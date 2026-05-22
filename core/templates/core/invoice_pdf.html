@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Invoice {{ invoice.invoice_number }}</title>
+    {% with primary=invoice_template.primary_color|default:global_appearance.primary_color|default:"#1a4d8e" %}
+    {% with font=invoice_template.font_family|default:global_appearance.font_family|default:"Helvetica" %}
+    <style>
+        @page {
+            size: A4;
+            margin: 2cm;
+        }
+        body {
+            font-family: var(--font), sans-serif;
+            font-size: 12pt;
+            line-height: 1.4;
+            color: #333;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #333;
+            padding-bottom: 20px;
+        }
+        .company-info {
+            text-align: left;
+        }
+        .company-info h1 {
+            margin: 0;
+            font-size: 24pt;
+            color: var(--primary);
+        }
+        .invoice-info {
+            text-align: right;
+        }
+        .invoice-info .invoice-number {
+            font-size: 18pt;
+            font-weight: bold;
+            color: var(--primary);
+        }
+        .section {
+            margin-bottom: 25px;
+        }
+        .section-title {
+            font-weight: bold;
+            font-size: 14pt;
+            margin-bottom: 10px;
+            color: var(--primary);
+        }
+        .customer-details, .invoice-dates {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        table th, table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        table th {
+            background-color: #f5f7fa;
+            font-weight: bold;
+            color: #333;
+        }
+        .total-row {
+            text-align: right;
+            font-weight: bold;
+        }
+        .total-amount {
+            font-size: 16pt;
+            color: var(--primary);
+        }
+        .footer {
+            margin-top: 40px;
+            border-top: 1px solid #ddd;
+            padding-top: 20px;
+            text-align: center;
+            font-size: 10pt;
+            color: #666;
+        }
+        .logo {
+            max-height: 60px;
+            max-width: 180px;
+            object-fit: contain;
+            display: block;
+            margin-bottom: 8px;
+        }
+    </style>
+    {% endwith %}
+    {% endwith %}
+</head>
+<body style="--primary: {{ primary }}; --font: {{ font }};">
+    <div class="header">
+        <div class="company-info">
+            {% if invoice_template.logo_url|default:global_appearance.logo_url %}
+                <img class="logo" src="{{ invoice_template.logo_url|default:global_appearance.logo_url }}" alt="Logo" />
+            {% endif %}
+            <h1>{{ global_appearance.company_name|default:"PIXELHUB" }}</h1>
+            <p>{{ global_appearance.company_tagline|default:"Business Management System" }}</p>
+        </div>
+        <div class="invoice-info">
+            <div class="invoice-number">INVOICE</div>
+            <div>#{{ invoice.invoice_number }}</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="section-title">Bill To:</div>
+        <div class="customer-details">
+            <div><strong>{{ invoice.customer.name }}</strong></div>
+            {% if invoice.customer.email %}<div>{{ invoice.customer.email }}</div>{% endif %}
+            {% if invoice.customer.phone %}<div>{{ invoice.customer.phone }}</div>{% endif %}
+            {% if invoice.customer.billing_address %}<div>{{ invoice.customer.billing_address }}</div>{% endif %}
+        </div>
+    </div>
+
+    <div class="section">
+        <div class="invoice-dates">
+            <div><strong>Issue Date:</strong> {{ issue_date_fmt }}</div>
+            {% if due_date_fmt %}<div><strong>Due Date:</strong> {{ due_date_fmt }}</div>{% endif %}
+            <div><strong>Status:</strong> {{ invoice.status }}</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <table>
+            <thead>
+                <tr>
+                    <th>Item</th>
+                    <th style="text-align: center;">Qty</th>
+                    <th style="text-align: right;">Unit Price</th>
+                    <th style="text-align: right;">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in invoice_items %}
+                <tr>
+                    <td>
+                        <div>{{ item.name }}</div>
+                        {% if invoice_template.show_item_description|default:False and item.description %}
+                            <div style="font-size: 10pt; color: #666;">{{ item.description }}</div>
+                        {% endif %}
+                    </td>
+                    <td style="text-align: center;">{{ item.quantity }}</td>
+                    <td style="text-align: right;">{{ item.unit_price }}</td>
+                    <td style="text-align: right;">{{ item.line_total }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <div style="margin-left: auto; width: 300px;">
+            <div class="total-row">
+                Subtotal: {{ subtotal_fmt }}
+            </div>
+            {% if invoice.tax_total > 0 %}
+            <div class="total-row">
+                Tax: {{ tax_total_fmt }}
+            </div>
+            {% endif %}
+            <div class="total-row total-amount" style="margin-top: 10px; padding-top: 10px; border-top: 2px solid #333;">
+                Total: {{ total_amount_fmt }}
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        {{ invoice_template.footer_text|default:global_appearance.invoice_footer_text|default:"Thank you for your business!" }}
+    </div>
+</body>
+</html>

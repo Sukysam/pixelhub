@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Receipt {{ receipt_number }}</title>
+    <style>
+        body {
+            font-family: var(--font), sans-serif;
+            font-size: 12pt;
+            line-height: 1.4;
+            color: #222;
+            margin: 24px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 12px;
+            margin-bottom: 18px;
+        }
+        .logo {
+            max-height: 52px;
+            max-width: 160px;
+            object-fit: contain;
+            display: block;
+            margin-bottom: 6px;
+        }
+        .title {
+            font-size: 18pt;
+            font-weight: 700;
+            color: var(--primary);
+            margin: 0;
+        }
+        .meta {
+            text-align: right;
+            font-size: 10.5pt;
+            color: #444;
+        }
+        .section {
+            margin: 14px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #eee;
+            text-align: left;
+        }
+        th {
+            background: #f7f7f9;
+            font-weight: 700;
+        }
+        .right { text-align: right; }
+        .center { text-align: center; }
+        .totals {
+            margin-left: auto;
+            width: 320px;
+        }
+        .totals-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+        }
+        .totals-strong {
+            font-weight: 700;
+            color: var(--primary);
+            border-top: 2px solid #ddd;
+            padding-top: 10px;
+            margin-top: 8px;
+        }
+        .footer {
+            border-top: 1px solid #ddd;
+            padding-top: 14px;
+            margin-top: 24px;
+            font-size: 10.5pt;
+            color: #555;
+            text-align: center;
+        }
+    </style>
+</head>
+<body style="--primary: {{ primary }}; --font: {{ font }};">
+    <div class="header">
+        <div>
+            {% if logo_url %}
+                <img class="logo" src="{{ logo_url }}" alt="Logo" />
+            {% endif %}
+            <h1 class="title">{{ header_text }}</h1>
+            {% if global_appearance.company_tagline %}
+                <div style="color: #555; font-size: 10.5pt;">{{ global_appearance.company_tagline }}</div>
+            {% endif %}
+        </div>
+        <div class="meta">
+            <div><strong>Receipt:</strong> {{ receipt_number }}</div>
+            <div><strong>Date:</strong> {{ payment_date_fmt }}</div>
+            <div><strong>Invoice:</strong> #{{ receipt.invoice.invoice_number }}</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <div style="display: flex; justify-content: space-between; gap: 16px;">
+            <div>
+                <div style="font-weight: 700; margin-bottom: 6px;">Bill To</div>
+                <div>{{ receipt.invoice.customer.name }}</div>
+                {% if receipt.invoice.customer.email %}<div style="color: #555;">{{ receipt.invoice.customer.email }}</div>{% endif %}
+            </div>
+            <div style="text-align: right;">
+                <div style="font-weight: 700; margin-bottom: 6px;">Payment</div>
+                <div><strong>Method:</strong> {{ receipt.payment_method }}</div>
+                {% if receipt.reference_number %}<div><strong>Reference:</strong> {{ receipt.reference_number }}</div>{% endif %}
+            </div>
+        </div>
+    </div>
+
+    {% if show_items %}
+    <div class="section">
+        <table>
+            <thead>
+                <tr>
+                    <th>Item</th>
+                    <th class="center">Qty</th>
+                    <th class="right">Unit Price</th>
+                    <th class="right">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in invoice_items %}
+                <tr>
+                    <td>
+                        <div>{{ item.name }}</div>
+                        {% if show_item_description and item.description %}
+                            <div style="font-size: 10pt; color: #666;">{{ item.description }}</div>
+                        {% endif %}
+                    </td>
+                    <td class="center">{{ item.quantity }}</td>
+                    <td class="right">{{ item.unit_price }}</td>
+                    <td class="right">{{ item.line_total }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <div class="section totals">
+        <div class="totals-row">
+            <div>Invoice Total</div>
+            <div>{{ invoice_total_fmt }}</div>
+        </div>
+        <div class="totals-row totals-strong">
+            <div>Amount Paid</div>
+            <div>{{ amount_paid_fmt }}</div>
+        </div>
+    </div>
+
+    <div class="footer">
+        {{ footer_text }}
+    </div>
+</body>
+</html>
