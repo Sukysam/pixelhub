@@ -46,12 +46,18 @@ async function adminToken(request: any) {
   }
 
   const setupRes = await request.post(`${API_BASE_URL}/auth/admin/mfa/setup/`, { data: { username, password, force_reset: true } });
-  expect(setupRes.ok()).toBeTruthy();
+  if (!setupRes.ok()) {
+    const body = await setupRes.text();
+    throw new Error(`MFA setup failed: status=${setupRes.status()} body=${body}`);
+  }
   const setup = (await setupRes.json()) as { secret: string };
   const code = totpNow(setup.secret);
 
   const confirmRes = await request.post(`${API_BASE_URL}/auth/admin/mfa/confirm/`, { data: { username, password, code } });
-  expect(confirmRes.ok()).toBeTruthy();
+  if (!confirmRes.ok()) {
+    const body = await confirmRes.text();
+    throw new Error(`MFA confirm failed: status=${confirmRes.status()} body=${body}`);
+  }
   const confirmed = (await confirmRes.json()) as { token: string };
   cachedAdminTokenValue = confirmed.token;
   return cachedAdminTokenValue;
