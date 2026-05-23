@@ -120,7 +120,7 @@ jobs:
       - name: Prepare backend (migrate + seed user)
         run: |
           python manage.py migrate
-          python manage.py shell -c "import os; from django.contrib.auth.models import User; u, _ = User.objects.get_or_create(username=os.environ.get('E2E_USERNAME','admin')); u.is_staff=True; u.set_password(os.environ['E2E_PASSWORD']); u.save()"
+          python manage.py shell -c "import os; from django.contrib.auth.models import User; u, _ = User.objects.get_or_create(username=os.environ.get('E2E_USERNAME','admin')); u.is_staff=True; u.is_superuser=True; u.set_password(os.environ['E2E_PASSWORD']); u.save()"
 
       - name: Start backend
         run: |
