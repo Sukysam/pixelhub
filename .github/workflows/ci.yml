@@ -54,6 +54,12 @@ jobs:
           pip install pip-audit
           pip-audit -r requirements.txt
 
+          - name: Check backend logs
+          if: always()
+          run: |
+            echo "=== Django Server Logs ==="
+            tail -n 100 /tmp/django.log || echo "No logs found"
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
