@@ -22,7 +22,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
 
-DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+_DJANGO_DEBUG_RAW = os.environ.get("DJANGO_DEBUG")
+_DJANGO_DEBUG_DEFAULT = "0" if os.environ.get("PORT") else "1"
+DEBUG = (_DJANGO_DEBUG_RAW or _DJANGO_DEBUG_DEFAULT) == "1"
+
+
+def _split_csv_env(key: str) -> list[str]:
+    return [v.strip() for v in os.environ.get(key, "").split(",") if v.strip()]
 
 _DEFAULT_INSECURE_SECRET_KEY = secrets.token_urlsafe(64) if DEBUG else ""
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or _DEFAULT_INSECURE_SECRET_KEY
@@ -32,10 +38,12 @@ if not DEBUG and (
 ):
     raise RuntimeError("DJANGO_SECRET_KEY must be set to a long random value (>= 50 chars) when DJANGO_DEBUG=0")
 
+_LOCAL_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]
+_ENV_ALLOWED_HOSTS = _split_csv_env("DJANGO_ALLOWED_HOSTS")
 if DEBUG:
-    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]
+    ALLOWED_HOSTS = list(dict.fromkeys(_LOCAL_ALLOWED_HOSTS + _ENV_ALLOWED_HOSTS))
 else:
-    ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    ALLOWED_HOSTS = _ENV_ALLOWED_HOSTS
     if not ALLOWED_HOSTS:
         raise RuntimeError("DJANGO_ALLOWED_HOSTS must be set when DJANGO_DEBUG=0 (comma-separated)")
 
@@ -252,14 +260,11 @@ _DEFAULT_CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3003",
     "http://127.0.0.1:3004",
 ]
+_ENV_CORS_ALLOWED_ORIGINS = _split_csv_env("DJANGO_CORS_ALLOWED_ORIGINS")
 if DEBUG:
-    CORS_ALLOWED_ORIGINS = _DEFAULT_CORS_ALLOWED_ORIGINS
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys(_DEFAULT_CORS_ALLOWED_ORIGINS + _ENV_CORS_ALLOWED_ORIGINS))
 else:
-    CORS_ALLOWED_ORIGINS = [
-        o.strip()
-        for o in os.environ.get("DJANGO_CORS_ALLOWED_ORIGINS", "").split(",")
-        if o.strip()
-    ]
+    CORS_ALLOWED_ORIGINS = _ENV_CORS_ALLOWED_ORIGINS
     if not CORS_ALLOWED_ORIGINS:
         raise RuntimeError("DJANGO_CORS_ALLOWED_ORIGINS must be set when DJANGO_DEBUG=0 (comma-separated)")
 
