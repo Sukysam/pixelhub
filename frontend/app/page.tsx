@@ -239,85 +239,93 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
     setRegisteredEmail(null);
     setNeedsResend(false);
     if (!captcha) return;
-    try {
-      setRegisterSubmitting(true);
-      const emailClean = email.trim().toLowerCase();
-      const fullNameClean = fullName.trim();
-      if (!emailClean) {
-        setRegisterError("Email is required");
-        return;
-      }
-      if (!fullNameClean) {
-        setRegisterError("Full name is required");
-        return;
-      }
-      const companyLegalNameClean = companyLegalName.trim();
-      const industryClean = businessIndustry.trim();
-      const addressClean = businessAddress.trim();
-      if (!companyLegalNameClean) {
-        setRegisterError("Company legal name is required");
-        return;
-      }
-      if (!industryClean) {
-        setRegisterError("Business type / industry is required");
-        return;
-      }
-      if (!addressClean) {
-        setRegisterError("Business address is required");
-        return;
-      }
-      const companyRegClean = companyRegistrationNumber.trim();
-      const res = await apiRequest<{ registered: boolean; verification_sent: boolean; detail?: string }>("/auth/register/", {
-        method: "POST",
-        body: JSON.stringify({
-          email: emailClean,
-          password,
-          password_confirm: passwordConfirm,
-          full_name: fullNameClean,
-          phone: phone.trim() ? phone.trim() : null,
-          company_legal_name: companyLegalNameClean,
-          company_registration_number: companyRegClean ? companyRegClean : null,
-          business_industry: industryClean,
-          business_address: addressClean,
-          certifications: certifications
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-          accept_terms: acceptTerms,
-          captcha_id: captcha.captcha_id,
-          captcha_answer: captchaAnswer,
-          website,
-        }),
-      });
-      setRegisteredEmail(emailClean);
-      try {
-        const tokenRes = await apiRequest<{ token: string }>("/auth/token/", {
+    setRegisterSubmitting(true);
+    const emailClean = email.trim().toLowerCase();
+    const fullNameClean = fullName.trim();
+    if (!emailClean) {
+      setRegisterError("Email is required");
+      setRegisterSubmitting(false);
+      return;
+    }
+    if (!fullNameClean) {
+      setRegisterError("Full name is required");
+      setRegisterSubmitting(false);
+      return;
+    }
+    const companyLegalNameClean = companyLegalName.trim();
+    const industryClean = businessIndustry.trim();
+    const addressClean = businessAddress.trim();
+    if (!companyLegalNameClean) {
+      setRegisterError("Company legal name is required");
+      setRegisterSubmitting(false);
+      return;
+    }
+    if (!industryClean) {
+      setRegisterError("Business type / industry is required");
+      setRegisterSubmitting(false);
+      return;
+    }
+    if (!addressClean) {
+      setRegisterError("Business address is required");
+      setRegisterSubmitting(false);
+      return;
+    }
+    const companyRegClean = companyRegistrationNumber.trim();
+
+    apiRequest<{ registered: boolean; verification_sent: boolean; detail?: string }>("/auth/register/", {
+      method: "POST",
+      body: JSON.stringify({
+        email: emailClean,
+        password,
+        password_confirm: passwordConfirm,
+        full_name: fullNameClean,
+        phone: phone.trim() ? phone.trim() : null,
+        company_legal_name: companyLegalNameClean,
+        company_registration_number: companyRegClean ? companyRegClean : null,
+        business_industry: industryClean,
+        business_address: addressClean,
+        certifications: certifications
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        accept_terms: acceptTerms,
+        captcha_id: captcha.captcha_id,
+        captcha_answer: captchaAnswer,
+        website,
+      }),
+    })
+      .then(async (res) => {
+        setRegisteredEmail(emailClean);
+        return apiRequest<{ token: string }>("/auth/token/", {
           method: "POST",
           body: JSON.stringify({ username: emailClean, password, remember: true }),
-        });
-        const me = await apiRequest<AuthUser>("/auth/me/");
-        setAuthUser(me);
-        onAuthed?.();
-        router.replace("/");
-        return;
-      } catch {
-      }
-      if (res?.verification_sent) {
-        setRegisterSuccess("Account created. Please check your email to verify your account.");
-      } else {
-        setRegisterSuccess(res?.detail || "Account created, but verification email was not delivered. Please resend verification.");
-        setNeedsResend(true);
-      }
-      setPassword("");
-      setPasswordConfirm("");
-      setCaptchaAnswer("");
-      await loadCaptcha();
-    } catch (e: unknown) {
-      setRegisterError(getErrorMessage(e, "Registration failed"));
-      await loadCaptcha().catch(() => undefined);
-    } finally {
-      setRegisterSubmitting(false);
-    }
+        })
+          .then(() => apiRequest<AuthUser>("/auth/me/"))
+          .then((me) => {
+            setAuthUser(me);
+            onAuthed?.();
+            router.replace("/");
+          })
+          .catch(() => {
+            if (res?.verification_sent) {
+              setRegisterSuccess("Account created. Please check your email to verify your account.");
+            } else {
+              setRegisterSuccess(res?.detail || "Account created, but verification email was not delivered. Please resend verification.");
+              setNeedsResend(true);
+            }
+            setPassword("");
+            setPasswordConfirm("");
+            setCaptchaAnswer("");
+            return loadCaptcha();
+          });
+      })
+      .catch((err: unknown) => {
+        setRegisterError(getErrorMessage(err, "Registration failed"));
+        return loadCaptcha();
+      })
+      .finally(() => {
+        setRegisterSubmitting(false);
+      });
   };
 
   const onResendVerification = async () => {
