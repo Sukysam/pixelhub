@@ -55,7 +55,7 @@ Copy `.env.example` to `.env` for local use (do not commit `.env`), and configur
 
 - `DJANGO_DEBUG` (`1` for local, `0` for production)
 - `DJANGO_SECRET_KEY` (required when `DJANGO_DEBUG=0`)
-- `DJANGO_ALLOWED_HOSTS` (required when `DJANGO_DEBUG=0`, `pixelhub-exbd6.sevalla.app`, comma-separated)
+- `DJANGO_ALLOWED_HOSTS` (required when `DJANGO_DEBUG=0`, `.sevalla.app`, comma-separated)
 - `DJANGO_CORS_ALLOWED_ORIGINS` (required when `DJANGO_DEBUG=0`, comma-separated)
 - `FRONTEND_BASE_URL` (used for email verification links)
 - Email (production): `DJANGO_EMAIL_HOST`, `DJANGO_EMAIL_HOST_USER`, `DJANGO_EMAIL_HOST_PASSWORD`, `DJANGO_DEFAULT_FROM_EMAIL`
