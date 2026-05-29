@@ -35,7 +35,7 @@ if not DEBUG and (
 if DEBUG:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]
 else:
-    ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "sevalla.app", "").split(",") if h.strip()]
     if not ALLOWED_HOSTS:
         raise RuntimeError("DJANGO_ALLOWED_HOSTS must be set when DJANGO_DEBUG=0 (comma-separated)")
 
