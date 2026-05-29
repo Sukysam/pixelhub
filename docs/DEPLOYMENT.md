@@ -91,6 +91,64 @@ Set:
 npm run dev
 ```
 
+## Sevalla (GitHub Deployment)
+Sevalla (sometimes misspelled “Sevella”) supports GitHub-based deployments. This repository is a monorepo, so deploy the backend and frontend as separate Sevalla applications.
+
+### Backend on Sevalla (Django API)
+**Create an Application (Application Hosting)**
+- Git provider: GitHub
+- Repository: this repo
+- Branch: `main`
+- Build path: `.`
+
+**Runtime requirements**
+- Ensure the web process binds to Sevalla’s `$PORT`.
+- Use a production WSGI server (Gunicorn) rather than Django’s dev server.
+
+**Recommended web process start command**
+```bash
+python manage.py migrate && python manage.py collectstatic --noinput && gunicorn pixelhub.wsgi:application -b 0.0.0.0:$PORT
+```
+
+**Required environment variables (set in Sevalla; do not commit secrets)**
+- `DJANGO_DEBUG=0`
+- `DJANGO_SECRET_KEY` (generate a long random value)
+- `DJANGO_ALLOWED_HOSTS` (comma-separated; include your Sevalla backend domain)
+- `DJANGO_CORS_ALLOWED_ORIGINS` (comma-separated; include your Sevalla frontend origin)
+- `FRONTEND_BASE_URL` (your Sevalla frontend URL; used for verify-email links)
+- Email (production): `DJANGO_EMAIL_HOST`, `DJANGO_EMAIL_HOST_USER`, `DJANGO_EMAIL_HOST_PASSWORD`, `DJANGO_DEFAULT_FROM_EMAIL`
+- Database (production): either `DATABASE_URL` or the `POSTGRES_*` variables (recommended: Sevalla-managed Postgres)
+- Optional cache: `REDIS_URL`
+
+**Health check**
+- Use `GET /api/auth/captcha/` as a simple readiness check.
+
+**PDF generation (WeasyPrint)**
+- WeasyPrint requires OS-level libraries (cairo/pango/gdk-pixbuf). If you plan to use PDF endpoints in production, ensure your Sevalla build includes the required system dependencies (use Sevalla build strategy settings or a Dockerfile when needed).
+
+### Frontend on Sevalla (Next.js UI)
+**Create an Application (Application Hosting)**
+- Git provider: GitHub
+- Repository: this repo
+- Branch: `main`
+- Build path: `frontend`
+
+**Build and start**
+- Build command: `npm run build`
+- Start command: `npm run start`
+
+**Required environment variables**
+- `NEXT_PUBLIC_API_BASE_URL` (example: `https://<your-backend-domain>/api`)
+
+**Health check**
+- Use `GET /` as a basic check.
+
+### Staging vs Production
+Use Sevalla “Preview”/staging environments with a separate set of environment variables. Keep the same values across both environments except for:
+- hostnames/URLs (`DJANGO_ALLOWED_HOSTS`, `DJANGO_CORS_ALLOWED_ORIGINS`, `FRONTEND_BASE_URL`, `NEXT_PUBLIC_API_BASE_URL`)
+- secrets/keys (`DJANGO_SECRET_KEY`, OAuth secrets, webhook secrets)
+- database/cache connection strings
+
 ## Tests
 ### Backend
 ```bash
