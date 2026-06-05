@@ -8,7 +8,7 @@ const basePath =
 
 const nextConfig = {
   reactStrictMode: true,
-  output: isGitHubPages ? "export" : undefined,
+  output: isGitHubPages ? "export" : "standalone",
   trailingSlash: isGitHubPages,
   basePath,
   assetPrefix: basePath ? `${basePath}/` : undefined,

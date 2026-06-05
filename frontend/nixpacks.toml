@@ -1,0 +1,13 @@
+# nixpacks.toml for PIXELHUB Frontend on Sevalla
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "node .next/standalone/frontend/server.js"
