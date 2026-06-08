@@ -1,5 +1,5 @@
 # Dependencies
-/node_modules
+#/node_modules
 /.pnp
 .pnp.js
 
@@ -7,11 +7,11 @@
 /coverage
 
 # Next.js
-/.next/
-/out/
+#/.next/
+#/out/
 
 # Production
-/build
+#/build
 
 # Misc
 .DS_Store
