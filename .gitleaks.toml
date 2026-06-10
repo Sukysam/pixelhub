@@ -1,0 +1,15 @@
+[allowlist]
+  description = "Allowlist for common development files and false positives"
+  paths = [
+    '''frontend/node_modules''',
+    '''frontend/.next''',
+    '''.venv''',
+    '''venv''',
+    '''.coverage''',
+    '''desktop/release''',
+    '''.git''',
+  ]
+  regexes = [
+    '''(dummy|example|test)_?(key|secret|token|password)''',
+    '''(secret|key|token|password) *= *["'](dummy|example|test|fake)["']''',
+  ]
