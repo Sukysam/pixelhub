@@ -1,5 +1,5 @@
 """
-WSGI config for sukyacc project.
+WSGI config for pixelhub project.
 
 It exposes the WSGI callable as a module-level variable named ``application``.
 
