@@ -49,9 +49,9 @@ Under the **Environment Variables** tab for your new application, add the follow
 If Nixpacks doesn't automatically detect the correct commands, use these in the **Processes** > **Web Process** settings:
 
 -   **Build Command**: `npm run build`
--   **Start Command**: `node .next/standalone/frontend/server.js`
+-   **Start Command**: `node .next/standalone/server.js`
 
-*Note: The `nixpacks.toml` file in the `frontend` directory already specifies these defaults for Sevalla.*
+*Note: The `nixpacks.toml` file in the `frontend` directory already specifies these defaults for Sevalla. If your host deploys from the repo root instead, set `APP_RUNTIME=frontend` so the root `nixpacks.toml` switches to the frontend build.*
 
 ## 7. Post-Deployment Validation
 

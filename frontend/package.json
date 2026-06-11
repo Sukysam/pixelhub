@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "build:export": "node -e \"process.env.GITHUB_PAGES='1'; require('child_process').spawnSync('next',['build'],{stdio:'inherit',shell:true,env:process.env});\"",
-    "start": "next start",
+    "start": "node .next/standalone/server.js",
     "lint": "eslint .",
     "test:e2e": "playwright test"
   },

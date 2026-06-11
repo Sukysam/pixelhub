@@ -1,13 +1,22 @@
-# nixpacks.toml for PIXELHUB Backend on Sevalla
+# nixpacks.toml for PIXELHUB monorepo deployments on platforms that build from
+# the repository root. Set APP_RUNTIME=frontend for the Next.js app; backend is
+# the default.
+
+[variables]
+APP_RUNTIME = "backend"
 
 [phases.setup]
-nixPkgs = ["python311", "cairo", "pango", "gdk-pixbuf", "shared-mime-info"]
+nixPkgs = ["python311", "nodejs_20", "cairo", "pango", "gdk-pixbuf", "shared-mime-info"]
 
 [phases.install]
-cmds = ["python -m venv venv", "./venv/bin/pip install --upgrade pip setuptools wheel", "./venv/bin/pip install -r requirements.txt"]
+cmds = [
+  "if [ \"$APP_RUNTIME\" = \"frontend\" ]; then cd frontend && npm ci; else python -m venv venv && ./venv/bin/pip install --upgrade pip setuptools wheel && ./venv/bin/pip install -r requirements.txt; fi",
+]
 
 [phases.build]
-cmds = ["./venv/bin/python manage.py collectstatic --noinput"]
+cmds = [
+  "if [ \"$APP_RUNTIME\" = \"frontend\" ]; then cd frontend && npm run build; else ./venv/bin/python manage.py collectstatic --noinput; fi",
+]
 
 [start]
-cmd = "./venv/bin/python manage.py migrate && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:$PORT"
+cmd = "if [ \"$APP_RUNTIME\" = \"frontend\" ]; then cd frontend && node .next/standalone/server.js; else ./venv/bin/python manage.py migrate && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}; fi"
