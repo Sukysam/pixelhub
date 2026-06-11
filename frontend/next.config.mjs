@@ -14,6 +14,7 @@ const nextConfig = {
   assetPrefix: basePath ? `${basePath}/` : undefined,
   images: { unoptimized: true },
   allowedDevOrigins: ["127.0.0.1", "localhost"],
+  outputFileTracingRoot: new URL(".", import.meta.url).pathname,
   async headers() {
     if (isGitHubPages) return [];
     const csp = [
