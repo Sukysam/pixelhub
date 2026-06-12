@@ -10,4 +10,4 @@ cmds = ["npm ci"]
 cmds = ["npm run build"]
 
 [start]
-cmd = "node .next/standalone/server.js"
+cmd = "npm run start"

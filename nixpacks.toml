@@ -19,4 +19,4 @@ cmds = [
 ]
 
 [start]
-cmd = "if [ \"$APP_RUNTIME\" = \"frontend\" ]; then cd frontend && node .next/standalone/server.js; else ./venv/bin/python manage.py migrate && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}; fi"
+cmd = "if [ \"$APP_RUNTIME\" = \"frontend\" ]; then cd frontend && npm run start; else ./venv/bin/python manage.py migrate && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}; fi"
