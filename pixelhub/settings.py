@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -29,6 +30,14 @@ DEBUG = (_DJANGO_DEBUG_RAW or _DJANGO_DEBUG_DEFAULT) == "1"
 
 def _split_csv_env(key: str) -> list[str]:
     return [v.strip() for v in os.environ.get(key, "").split(",") if v.strip()]
+
+
+def _first_env(*keys: str) -> str:
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
 
 _DEFAULT_INSECURE_SECRET_KEY = secrets.token_urlsafe(64) if DEBUG else ""
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or _DEFAULT_INSECURE_SECRET_KEY
@@ -117,15 +126,38 @@ WSGI_APPLICATION = "pixelhub.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
-if os.environ.get("POSTGRES_DB") or os.environ.get("DATABASE_URL"):
+_DATABASE_URL = _first_env("DATABASE_URL", "DB_URL")
+_DATABASE_NAME = _first_env("POSTGRES_DB", "DB_DATABASE")
+_DATABASE_USER = _first_env("POSTGRES_USER", "DB_USERNAME")
+_DATABASE_PASSWORD = _first_env("POSTGRES_PASSWORD", "DB_PASSWORD")
+_DATABASE_HOST = _first_env("POSTGRES_HOST", "DB_HOST")
+_DATABASE_PORT = _first_env("POSTGRES_PORT", "DB_PORT")
+
+if _DATABASE_URL:
+    _parsed_database_url = urlparse(_DATABASE_URL)
+    if _parsed_database_url.scheme not in {"postgres", "postgresql"}:
+        raise RuntimeError("DATABASE_URL/DB_URL must use a postgres:// or postgresql:// scheme")
+
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", ""),
-            "USER": os.environ.get("POSTGRES_USER", ""),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", ""),
-            "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "NAME": unquote(_parsed_database_url.path.lstrip("/")),
+            "USER": unquote(_parsed_database_url.username or ""),
+            "PASSWORD": unquote(_parsed_database_url.password or ""),
+            "HOST": _parsed_database_url.hostname or "localhost",
+            "PORT": str(_parsed_database_url.port or "5432"),
+            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+        }
+    }
+elif any([_DATABASE_NAME, _DATABASE_USER, _DATABASE_PASSWORD, _DATABASE_HOST, _DATABASE_PORT]):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": _DATABASE_NAME,
+            "USER": _DATABASE_USER,
+            "PASSWORD": _DATABASE_PASSWORD,
+            "HOST": _DATABASE_HOST or "localhost",
+            "PORT": _DATABASE_PORT or "5432",
             "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
         }
     }
