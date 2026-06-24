@@ -25,8 +25,6 @@ Environment variables:
 - `DJANGO_EMAIL_USE_SSL` (default: `0`)
 - `DJANGO_EMAIL_TIMEOUT` (default: `15`)
 - `DJANGO_ALLOW_CONSOLE_EMAIL_IN_PROD` (set to `1` only if you explicitly want console email with `DJANGO_DEBUG=0`)
-- `REGISTRATION_CAPTCHA_BYPASS=1` (only for load testing; do not enable in production)
-
 Operational notes:
 - Verification email send success/failure is logged to server logs and stored in `AuditLog` (security events).
 - Admin-only endpoints are available for monitoring and testing:
@@ -121,7 +119,7 @@ python manage.py migrate && python manage.py collectstatic --noinput && gunicorn
 - Optional cache: `REDIS_URL`
 
 **Health check**
-- Use `GET /api/auth/captcha/` as a simple readiness check.
+- Use `GET /api/auth/me/` for an authenticated readiness check, or load the frontend signup page and submit a test registration to verify the public auth flow.
 
 **PDF generation (WeasyPrint)**
 - WeasyPrint requires OS-level libraries (cairo/pango/gdk-pixbuf). If you plan to use PDF endpoints in production, ensure your Sevalla build includes the required system dependencies (use Sevalla build strategy settings or a Dockerfile when needed).
@@ -158,7 +156,7 @@ Use Sevalla “Preview”/staging environments with a separate set of environmen
 ### Registration load test (1000 concurrent registrations)
 Start the backend server, then run (development only):
 ```bash
-REGISTRATION_CAPTCHA_BYPASS=1 ./venv/bin/python manage.py runserver 0.0.0.0:8000
+./venv/bin/python manage.py runserver 0.0.0.0:8000
 ```
 In another terminal:
 ```bash

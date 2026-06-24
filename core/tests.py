@@ -1183,20 +1183,7 @@ class RegistrationTests(APITestCase):
         super().setUp()
         cache.clear()
 
-    def _get_captcha(self):
-        res = self.client.get("/api/auth/captcha/")
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        return res.data["captcha_id"], res.data["question"]
-
-    def _solve_question(self, question: str) -> str:
-        parts = question.replace("?", "").split()
-        a = int(parts[2])
-        b = int(parts[4])
-        return str(a + b)
-
     def test_register_and_verify_email_flow(self):
-        captcha_id, question = self._get_captcha()
-        answer = self._solve_question(question)
         secret = _test_secret()
 
         with override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend", DEFAULT_FROM_EMAIL="no-reply@test.local"):
@@ -1214,8 +1201,6 @@ class RegistrationTests(APITestCase):
                     "business_address": "1 Test Street, Lagos, NG",
                     "certifications": ["CAC"],
                     "accept_terms": True,
-                    "captcha_id": captcha_id,
-                    "captcha_answer": answer,
                     "website": "",
                 },
                 format="json",
@@ -1253,8 +1238,6 @@ class RegistrationTests(APITestCase):
         self.assertGreaterEqual(len(mail.outbox), 1)
 
     def test_register_requires_terms(self):
-        captcha_id, question = self._get_captcha()
-        answer = self._solve_question(question)
         secret = _test_secret()
         res = self.client.post(
             "/api/auth/register/",
@@ -1268,16 +1251,12 @@ class RegistrationTests(APITestCase):
                 "business_industry": "Retail",
                 "business_address": "2 Test Street, Abuja, NG",
                 "accept_terms": False,
-                "captcha_id": captcha_id,
-                "captcha_answer": answer,
             },
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_register_password_strength(self):
-        captcha_id, question = self._get_captcha()
-        answer = self._solve_question(question)
         weak_cred = "weak"
         res = self.client.post(
             "/api/auth/register/",
@@ -1291,15 +1270,12 @@ class RegistrationTests(APITestCase):
                 "business_industry": "Professional Services",
                 "business_address": "3 Test Street, Kano, NG",
                 "accept_terms": True,
-                "captcha_id": captcha_id,
-                "captcha_answer": answer,
             },
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_register_captcha_invalid(self):
-        captcha_id, _ = self._get_captcha()
+    def test_register_rejects_honeypot_submission(self):
         secret = _test_secret()
         res = self.client.post(
             "/api/auth/register/",
@@ -1307,14 +1283,13 @@ class RegistrationTests(APITestCase):
                 "email": "c@example.com",
                 "password": secret,
                 "password_confirm": secret,
-                "full_name": "Captcha User",
-                "company_legal_name": "CaptchaCo Ltd",
+                "full_name": "Bot User",
+                "company_legal_name": "BotCo Ltd",
                 "company_registration_number": "RC-777777",
                 "business_industry": "Manufacturing",
                 "business_address": "4 Test Street, PH, NG",
                 "accept_terms": True,
-                "captcha_id": captcha_id,
-                "captcha_answer": "9999",
+                "website": "https://spam.example.com",
             },
             format="json",
         )
@@ -1662,7 +1637,6 @@ class AuthApiTests(APITestCase):
         self.assertEqual(res.data.get("company_name"), "Acme Incorporated")
         self.assertIn("roles", res.data)
 
-    @override_settings(REGISTRATION_CAPTCHA_BYPASS=True)
     def test_register_and_duplicate_email(self):
         secret = _test_secret()
         ok = self.client.post(
@@ -1679,8 +1653,6 @@ class AuthApiTests(APITestCase):
                 "business_address": "1 Test Street, Lagos, NG",
                 "certifications": [],
                 "accept_terms": True,
-                "captcha_id": "bypass",
-                "captcha_answer": "bypass",
                 "website": "",
             },
             format="json",
@@ -1700,8 +1672,6 @@ class AuthApiTests(APITestCase):
                 "business_industry": "Technology",
                 "business_address": "1 Test Street, Lagos, NG",
                 "accept_terms": True,
-                "captcha_id": "bypass",
-                "captcha_answer": "bypass",
                 "website": "",
             },
             format="json",

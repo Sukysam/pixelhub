@@ -371,21 +371,6 @@ def _rate_limit(key: str, limit: int, window_seconds: int) -> bool:
     return count > limit
 
 
-def _captcha_cache_key(captcha_id: str) -> str:
-    return f"captcha:{captcha_id}"
-
-
-def _verify_captcha(captcha_id: str, captcha_answer: str) -> None:
-    if getattr(settings, "REGISTRATION_CAPTCHA_BYPASS", False):
-        return
-    expected = cache.get(_captcha_cache_key(captcha_id))
-    if expected is None:
-        raise ValidationError({"captcha": "Captcha expired. Please try again."})
-    if str(captcha_answer).strip() != str(expected).strip():
-        raise ValidationError({"captcha": "Incorrect captcha answer"})
-    cache.delete(_captcha_cache_key(captcha_id))
-
-
 def _username_for_email(email: str) -> str:
     return str(email).strip().lower()
 
@@ -3065,17 +3050,6 @@ class AdminMfaConfirmApi(APIView):
         return resp
 
 
-class CaptchaApi(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def get(self, request):
-        a = secrets.randbelow(8) + 2
-        b = secrets.randbelow(8) + 2
-        captcha_id = secrets.token_urlsafe(16)
-        cache.set(_captcha_cache_key(captcha_id), str(a + b), timeout=300)
-        return Response({"captcha_id": captcha_id, "question": f"What is {a} + {b}?"}, status=status.HTTP_200_OK)
-
-
 class RegisterApi(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -3101,8 +3075,6 @@ class RegisterApi(APIView):
         if _rate_limit(f"register:email:{_hash_email(email)}", limit=3, window_seconds=3600):
             _log_security_event(None, get_user_model(), object_id=email, changes={"event": "rate_limit", "scope": "register_email"})
             return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        _verify_captcha(str(data["captcha_id"]), str(data["captcha_answer"]))
 
         User = get_user_model()
         username = _username_for_email(email)

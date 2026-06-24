@@ -2,14 +2,6 @@
 
 Base path: `/api/auth`
 
-## GET /captcha/
-Returns a simple challenge used for bot protection.
-
-Response:
-```json
-{ "captcha_id": "...", "question": "What is 3 + 7?" }
-```
-
 ## POST /register/
 Creates a new account (inactive until email verification).
 
@@ -22,8 +14,6 @@ Request:
   "full_name": "New User",
   "phone": "+15551234567",
   "accept_terms": true,
-  "captcha_id": "...",
-  "captcha_answer": "10",
   "website": ""
 }
 ```
@@ -34,6 +24,7 @@ Response:
 ```
 
 Notes:
+- Captcha verification was removed from the signup flow. Clients no longer need to fetch or submit any Captcha fields.
 - `website` is a honeypot field and must be empty.
 - Rate limits apply per-IP and per-email.
 - If the account is created but email sending fails, the response will be:

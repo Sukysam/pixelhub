@@ -55,7 +55,6 @@ function clamp(n: number, min: number, max: number) {
 }
 
 type AuthMode = "login" | "register";
-type Captcha = { captcha_id: string; question: string };
 
 function isValidEmail(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
@@ -104,36 +103,12 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [website, setWebsite] = useState("");
-  const [captcha, setCaptcha] = useState<Captcha | null>(null);
-  const [captchaAnswer, setCaptchaAnswer] = useState("");
-  const [registerLoading, setRegisterLoading] = useState(true);
   const [registerSubmitting, setRegisterSubmitting] = useState(false);
   const [registerResending, setRegisterResending] = useState(false);
   const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registeredEmail, setRegisteredEmail] = useState<string | null>(null);
   const [needsResend, setNeedsResend] = useState(false);
-
-  const loadCaptcha = useCallback(async () => {
-    const res = await apiRequest<Captcha>("/auth/captcha/");
-    setCaptcha(res);
-    setCaptchaAnswer("");
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setRegisterLoading(true);
-        await loadCaptcha();
-      } finally {
-        if (!cancelled) setRegisterLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadCaptcha]);
 
   const emailOk = useMemo(() => isValidEmail(email), [email]);
   const pwIssues = useMemo(() => passwordIssues(password), [password]);
@@ -150,23 +125,17 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
       pwOk &&
       pwMatch &&
       acceptTerms &&
-      (captcha?.captcha_id ?? "").length > 0 &&
-      captchaAnswer.trim().length > 0 &&
-      !registerLoading &&
       !registerSubmitting
     );
   }, [
     acceptTerms,
     businessAddress,
     businessIndustry,
-    captcha?.captcha_id,
-    captchaAnswer,
     companyLegalName,
     emailOk,
     fullName,
     pwMatch,
     pwOk,
-    registerLoading,
     registerSubmitting,
   ]);
 
@@ -238,7 +207,6 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
     setRegisterSuccess(null);
     setRegisteredEmail(null);
     setNeedsResend(false);
-    if (!captcha) return;
     setRegisterSubmitting(true);
     const emailClean = email.trim().toLowerCase();
     const fullNameClean = fullName.trim();
@@ -289,8 +257,6 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
           .map((s) => s.trim())
           .filter(Boolean),
         accept_terms: acceptTerms,
-        captcha_id: captcha.captcha_id,
-        captcha_answer: captchaAnswer,
         website,
       }),
     })
@@ -315,13 +281,12 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
             }
             setPassword("");
             setPasswordConfirm("");
-            setCaptchaAnswer("");
-            return loadCaptcha();
+            return undefined;
           });
       })
       .catch((err: unknown) => {
         setRegisterError(getErrorMessage(err, "Registration failed"));
-        return loadCaptcha();
+        return undefined;
       })
       .finally(() => {
         setRegisterSubmitting(false);
@@ -699,26 +664,7 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
                     {passwordConfirm.length > 0 && !pwMatch ? <div className="text-xs text-red-700 mt-1">Passwords do not match.</div> : null}
                   </div>
 
-                  <div className="space-y-2">
-                    <div>
-                      <Label htmlFor="captcha_answer">Captcha</Label>
-                      <div className="text-xs text-gray-600 mt-1">{captcha?.question ?? (registerLoading ? "Loading captcha…" : "Unable to load captcha")}</div>
-                      <Input
-                        id="captcha_answer"
-                        value={captchaAnswer}
-                        onChange={(e) => setCaptchaAnswer(e.target.value)}
-                        inputMode="numeric"
-                        autoComplete="off"
-                        required
-                      />
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <button type="button" className="text-sm text-blue-700 underline" onClick={() => loadCaptcha().catch(() => undefined)}>
-                        New captcha
-                      </button>
-                      <input type="text" className="hidden" value={website} onChange={(e) => setWebsite(e.target.value)} aria-hidden="true" tabIndex={-1} />
-                    </div>
-                  </div>
+                  <input type="text" className="hidden" value={website} onChange={(e) => setWebsite(e.target.value)} aria-hidden="true" tabIndex={-1} />
 
                   <label className="flex items-start gap-2 text-sm text-gray-700">
                     <input

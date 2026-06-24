@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Basic registration load test. Requires REGISTRATION_CAPTCHA_BYPASS=1."
+    help = "Basic registration load test for the signup endpoint."
 
     def add_arguments(self, parser):
         parser.add_argument("--url", default="http://127.0.0.1:8000/api/auth/register/")
@@ -38,8 +38,6 @@ class Command(BaseCommand):
                 "business_address": "1 Load Test Street, Lagos, NG",
                 "certifications": [],
                 "accept_terms": True,
-                "captcha_id": "bypass",
-                "captcha_answer": "bypass",
                 "website": "",
             }
             req = Request(url, method="POST", data=json.dumps(payload).encode("utf-8"))

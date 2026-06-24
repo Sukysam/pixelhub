@@ -379,8 +379,6 @@ class RegisterSerializer(serializers.Serializer):
     business_address = serializers.CharField(max_length=2000)
     certifications = serializers.ListField(child=serializers.CharField(max_length=120), required=False, allow_empty=True)
     accept_terms = serializers.BooleanField()
-    captcha_id = serializers.CharField()
-    captcha_answer = serializers.CharField()
     website = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate_password(self, value):

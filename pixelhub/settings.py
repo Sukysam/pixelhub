@@ -235,7 +235,6 @@ if not DEBUG and EMAIL_BACKEND.endswith("smtp.EmailBackend") and not EMAIL_HOST:
 
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "http://127.0.0.1:3000")
 BACKEND_PUBLIC_BASE_URL = os.environ.get("BACKEND_PUBLIC_BASE_URL", "http://127.0.0.1:8000")
-REGISTRATION_CAPTCHA_BYPASS = os.environ.get("REGISTRATION_CAPTCHA_BYPASS", "0") == "1"
 GOOGLE_OAUTH_CLIENT_ID = (os.environ.get("DJANGO_GOOGLE_OAUTH_CLIENT_ID") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = (os.environ.get("DJANGO_GOOGLE_OAUTH_CLIENT_SECRET") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
 GITHUB_OAUTH_CLIENT_ID = (os.environ.get("DJANGO_GITHUB_OAUTH_CLIENT_ID") or os.environ.get("GITHUB_OAUTH_CLIENT_ID") or "").strip()

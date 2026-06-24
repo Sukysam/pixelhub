@@ -110,13 +110,7 @@ async function registerAndReachDashboard(page: any) {
   await page.getByLabel("Certifications (optional)").fill("CAC");
   await page.getByLabel("Password", { exact: true }).fill(signupSecret);
   await page.getByLabel("Confirm password").fill(signupSecret);
-
-  const questionLocator = page.locator('label[for="captcha_answer"] + div');
-  await expect(questionLocator).toContainText(/\d/);
-  const captchaQuestion = await questionLocator.textContent();
-  const nums = (captchaQuestion ?? "").match(/-?\d+/g)?.map((n: string) => Number(n)) ?? [];
-  const answer = (nums[0] + nums[1]).toString();
-  await page.getByLabel("Captcha").fill(answer);
+  await expect(page.getByLabel("Captcha")).toHaveCount(0);
 
   await page.getByRole("checkbox", { name: "I agree to the terms." }).check();
   await page.getByRole("button", { name: "Create account" }).click();

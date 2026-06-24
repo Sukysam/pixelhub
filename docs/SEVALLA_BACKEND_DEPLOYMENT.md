@@ -19,7 +19,7 @@ python -m venv venv
 ./venv/bin/python manage.py runserver
 ```
 
-Visit http://localhost:8000/api/auth/captcha/ to verify it's working.
+Visit http://localhost:8000/api/auth/register/ with a REST client or load the frontend signup page to verify the auth API is reachable.
 
 ## 3. Backend Sevalla Application Setup
 
@@ -78,7 +78,7 @@ Once your backend application is deployed and marked as **Live** in Sevalla:
 
 ## 5. Post-Deployment Verification
 
-1. Open your backend API URL (e.g., `https://pixelhub-api.sevalla.app/api/auth/captcha/`). You should see a captcha question/answer.
+1. Open your backend API base URL (e.g., `https://pixelhub-api.sevalla.app/api/`) and verify it responds, or load the frontend signup page and submit a test registration.
 2. (If email configured) Test email sending via the admin-only endpoint:
    - First, create an admin user using the Django shell (via Sevalla's console or locally):
      ```bash
