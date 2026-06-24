@@ -113,7 +113,26 @@ function isErrorWithMessage(e: unknown): e is { message: string } {
 }
 
 export function getErrorMessage(e: unknown, fallback: string): string {
-  if (isErrorWithMessage(e)) return e.message;
+  if (isErrorWithMessage(e)) {
+    const message = e.message;
+    if (/failed to fetch|load failed|networkerror/i.test(message)) {
+      if (
+        typeof window !== "undefined" &&
+        window.location.protocol === "https:" &&
+        /^http:\/\//i.test(API_BASE_URL)
+      ) {
+        return `Network error: the frontend is configured to call an insecure API URL (${API_BASE_URL}) from an HTTPS page. Set NEXT_PUBLIC_API_BASE_URL to your live HTTPS backend API URL.`;
+      }
+      if (
+        typeof window !== "undefined" &&
+        !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname) &&
+        /127\.0\.0\.1|localhost/i.test(API_BASE_URL)
+      ) {
+        return `Network error: the frontend is still pointing at a local API (${API_BASE_URL}). Set NEXT_PUBLIC_API_BASE_URL to your deployed backend API URL.`;
+      }
+    }
+    return message;
+  }
   return fallback;
 }
 
