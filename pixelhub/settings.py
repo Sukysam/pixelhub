@@ -32,6 +32,20 @@ def _split_csv_env(key: str) -> list[str]:
     return [v.strip() for v in os.environ.get(key, "").split(",") if v.strip()]
 
 
+def _normalize_origin(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return raw.rstrip("/")
+
+
+def _split_origin_env(key: str) -> list[str]:
+    return [_normalize_origin(v) for v in os.environ.get(key, "").split(",") if _normalize_origin(v)]
+
+
 def _first_env(*keys: str) -> str:
     for key in keys:
         value = os.environ.get(key, "").strip()
@@ -291,7 +305,7 @@ _DEFAULT_CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3003",
     "http://127.0.0.1:3004",
 ]
-_ENV_CORS_ALLOWED_ORIGINS = _split_csv_env("DJANGO_CORS_ALLOWED_ORIGINS")
+_ENV_CORS_ALLOWED_ORIGINS = _split_origin_env("DJANGO_CORS_ALLOWED_ORIGINS")
 if DEBUG:
     CORS_ALLOWED_ORIGINS = list(dict.fromkeys(_DEFAULT_CORS_ALLOWED_ORIGINS + _ENV_CORS_ALLOWED_ORIGINS))
 else:
