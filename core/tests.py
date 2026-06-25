@@ -50,7 +50,7 @@ from .models import (
     evaluate_invoice_payment_status,
 )
 from .views import _rate_limit
-from .documents import create_delivery
+from .documents import create_delivery, render_invoice, render_receipt
 
 
 def _test_secret() -> str:
@@ -818,6 +818,21 @@ class SettingsTests(APITestCase):
         self.assertEqual(gs.tax_identification_number, "TIN-ADMIN-123")
         self.assertTrue(AuditLog.objects.filter(object_id=str(gs.id), action="update").exists())
 
+    def test_superuser_without_userrole_still_has_admin_access(self):
+        UserRole.objects.filter(user=self.admin).delete()
+
+        self.client.force_authenticate(user=self.admin)
+        me = self.client.get("/api/auth/me/")
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertIn("admin", me.data.get("roles", []))
+        self.assertIn("settings.global.write", me.data.get("permissions", []))
+
+        global_get = self.client.get("/api/settings/global/")
+        self.assertEqual(global_get.status_code, status.HTTP_200_OK)
+
+        admin_users = self.client.get("/api/admin/users/?page=1")
+        self.assertEqual(admin_users.status_code, status.HTTP_200_OK)
+
     def test_effective_settings_hides_tax_id_for_non_admin(self):
         gs = GlobalSettings.objects.get_or_create(singleton_key="global")[0]
         gs.tax_identification_number = "SECRET-TIN"
@@ -1012,12 +1027,16 @@ class InvoiceFiltersAndSavedViewsTests(APITestCase):
         self.assertNotIn("INV-1", flat)
 
     def test_invoice_export_pdf(self):
+        UserProfile.objects.update_or_create(user=self.user, defaults={"company_legal_name": "AmbienteSoft LTD"})
         res = self.client.get("/api/invoices/export/?status=Paid&file_format=pdf&fields=invoice_number,status")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertTrue(
             ("application/pdf" in (res.get("Content-Type") or "")) or ("text/html" in (res.get("Content-Type") or "")),
             msg=f"unexpected content-type: {res.get('Content-Type')}",
         )
+        if "text/html" in (res.get("Content-Type") or ""):
+            self.assertContains(res, "AmbienteSoft LTD")
+            self.assertContains(res, "Invoices Export")
 
     def test_saved_invoice_views_crud(self):
         create = self.client.post("/api/invoices/views/", {"name": "Paid", "filters": {"status": "Paid"}, "is_default": True}, format="json")
@@ -1059,6 +1078,19 @@ class ImportExportTests(APITestCase):
         body = b"".join(res.streaming_content).decode("utf-8")
         self.assertIn("sku", body)
         self.assertIn("W-1", body)
+
+    def test_inventory_export_pdf(self):
+        UserProfile.objects.update_or_create(user=self.user, defaults={"company_legal_name": "AmbienteSoft LTD"})
+        Item.objects.create(type="product", name="Widget", sku="W-1", unit_price=Decimal("10.00"), stock_quantity=5)
+        res = self.client.get("/api/items/export/?file_format=pdf&fields=sku,name,unit_price,stock_quantity")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            ("application/pdf" in (res.get("Content-Type") or "")) or ("text/html" in (res.get("Content-Type") or "")),
+            msg=f"unexpected content-type: {res.get('Content-Type')}",
+        )
+        if "text/html" in (res.get("Content-Type") or ""):
+            self.assertContains(res, "AmbienteSoft LTD")
+            self.assertContains(res, "Inventory Export")
 
     def test_inventory_import_template_downloads(self):
         csv_res = self.client.get("/api/items/import_template/?file_format=csv")
@@ -1538,6 +1570,7 @@ class ApiCoverageTests(APITestCase):
 
     def test_invoice_pdf_and_receipt_print(self):
         self.client.force_authenticate(user=self.user)
+        UserProfile.objects.update_or_create(user=self.user, defaults={"company_legal_name": "AmbienteSoft LTD"})
         customer = Customer.objects.create(name="PDF Buyer", email="p@example.com")
         item = Item.objects.create(name="Widget", unit_price=Decimal("10.00"), stock_quantity=10)
         inv = Invoice.objects.create(
@@ -1559,6 +1592,10 @@ class ApiCoverageTests(APITestCase):
             line_total=Decimal("10.00"),
         )
 
+        request_stub = type("Req", (), {"user": self.user, "query_params": {}, "headers": {}})()
+        rendered_invoice = render_invoice(request_stub, inv, "html")
+        self.assertIn("AmbienteSoft LTD", rendered_invoice.content.decode("utf-8"))
+
         pdf = self.client.get(f"/api/invoices/{inv.id}/download_pdf/")
         self.assertEqual(pdf.status_code, status.HTTP_200_OK)
         self.assertIn("X-PDF-Backend", pdf)
@@ -1568,9 +1605,14 @@ class ApiCoverageTests(APITestCase):
         )
 
         receipt = Receipt.objects.create(invoice=inv, amount_paid=Decimal("10.00"), payment_method="Cash", reference_number="R1")
+        rendered_receipt = render_receipt(request_stub, receipt, "html")
+        receipt_body = rendered_receipt.content.decode("utf-8")
+        self.assertIn("AmbienteSoft LTD", receipt_body)
+        self.assertIn("Receipt", receipt_body)
         html = self.client.get(f"/api/receipts/{receipt.id}/print_html/")
         self.assertEqual(html.status_code, status.HTTP_200_OK)
         self.assertIn("text/html", html["Content-Type"])
+        self.assertContains(html, "AmbienteSoft LTD")
 
     def test_invoice_pdf_falls_back_to_html_when_weasyprint_render_fails(self):
         self.client.force_authenticate(user=self.user)
@@ -1596,7 +1638,7 @@ class ApiCoverageTests(APITestCase):
         )
 
         try:
-            import weasyprint as _weasyprint
+            import weasyprint
         except Exception:
             res = self.client.get(f"/api/invoices/{inv.id}/download_pdf/")
             self.assertEqual(res.status_code, status.HTTP_200_OK)

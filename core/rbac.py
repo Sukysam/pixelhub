@@ -13,17 +13,22 @@ SYSTEM_ROLE_NAMES = {"user", "staff", "admin"}
 def user_role_names(user) -> list[str]:
     if not getattr(user, "is_authenticated", False):
         return []
-    return list(
+    names = list(
         UserRole.objects.filter(user=user)
         .select_related("role")
         .values_list("role__name", flat=True)
     )
+    if bool(getattr(user, "is_superuser", False)) and "admin" not in names:
+        names.append("admin")
+    elif bool(getattr(user, "is_staff", False)) and "staff" not in names:
+        names.append("staff")
+    return names
 
 
 def user_has_role(user, role_name: str) -> bool:
     if not getattr(user, "is_authenticated", False):
         return False
-    return UserRole.objects.filter(user=user, role__name=role_name).exists()
+    return str(role_name or "") in set(user_role_names(user))
 
 
 def user_has_any_role(user, role_names: Iterable[str]) -> bool:
@@ -32,12 +37,14 @@ def user_has_any_role(user, role_names: Iterable[str]) -> bool:
     names = [str(x) for x in role_names if str(x)]
     if not names:
         return False
-    return UserRole.objects.filter(user=user, role__name__in=names).exists()
+    return bool(set(user_role_names(user)).intersection(names))
 
 
 def user_has_permission(user, permission_code: str) -> bool:
     if not getattr(user, "is_authenticated", False):
         return False
+    if bool(getattr(user, "is_superuser", False)):
+        return True
     code = str(permission_code or "").strip()
     if not code:
         return False

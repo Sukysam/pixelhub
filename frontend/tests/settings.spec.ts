@@ -263,6 +263,7 @@ test("user can select NGN currency in settings", async ({ page }) => {
 test("admin can upload PNG logo, save global settings, and logo shows in user Settings previews", async ({ page, request }) => {
   const token = await adminToken(request);
   await setSession(page, request, token);
+  const officialCompanyName = `AmbienteSoft LTD ${Date.now()}`;
 
   await page.goto("/settings");
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
@@ -283,11 +284,14 @@ test("admin can upload PNG logo, save global settings, and logo shows in user Se
   const currencySelect = page.getByLabel("Default Currency");
   await expect(currencySelect).toBeVisible({ timeout: 30_000 });
   await currencySelect.selectOption({ index: 1 });
+  await page.getByLabel("Company Name").fill(officialCompanyName);
   await page.getByRole("button", { name: "Save Global Settings" }).click();
   await expect(page.getByText("Global settings saved.")).toBeVisible({ timeout: 30_000 });
 
   await page.goto("/settings");
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Invoice preview")).toContainText(officialCompanyName);
+  await expect(page.getByLabel("Receipt preview")).toContainText(officialCompanyName);
   const invoiceLogo = page.getByLabel("Invoice preview").locator('img[alt="Logo"]');
   await expect(invoiceLogo).toBeVisible({ timeout: 30_000 });
   await expect(invoiceLogo).toHaveAttribute("src", /127\.0\.0\.1:8000\/media\/uploads\/logos\//);

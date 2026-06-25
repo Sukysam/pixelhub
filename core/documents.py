@@ -74,12 +74,14 @@ def verify_download_token(token: str, token_hash: str) -> bool:
 def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDocument:
     from .views import (
         _currency_for_code,
+        _effective_company_identity_for_user,
         _effective_region_settings_for_user,
         _effective_templates_for_user,
         _format_date_for_pattern,
         _format_money,
     )
     templates = _effective_templates_for_user(request.user)
+    identity = _effective_company_identity_for_user(request.user)
     region = _effective_region_settings_for_user(request, request.user)
     currency = _currency_for_code(region["currency_code"])
     symbol_position = (templates.get("invoice_template") or {}).get("currency_symbol_position") or "prefix"
@@ -124,6 +126,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
 
     if fmt == "text":
         lines = [
+            identity["company_name"] or "PIXELHUB",
             f"INVOICE {invoice.invoice_number}",
             f"Customer: {invoice.customer.name}",
             f"Issue date: {invoice.issue_date}",
@@ -161,12 +164,14 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
 def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDocument:
     from .views import (
         _currency_for_code,
+        _effective_company_identity_for_user,
         _effective_region_settings_for_user,
         _effective_templates_for_user,
         _format_date_for_pattern,
         _format_money,
     )
     templates = _effective_templates_for_user(request.user)
+    identity = _effective_company_identity_for_user(request.user)
     region = _effective_region_settings_for_user(request, request.user)
     currency = _currency_for_code(region["currency_code"])
     symbol_position = (templates.get("receipt_template") or {}).get("currency_symbol_position") or "prefix"
@@ -176,7 +181,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
     primary = rt.get("primary_color") or ga.get("primary_color") or "#1a4d8e"
     font = rt.get("font_family") or ga.get("font_family") or "Helvetica"
     logo_url = rt.get("logo_url") or ga.get("logo_url")
-    header_text = rt.get("header_text") or ga.get("company_name") or "Receipt"
+    header_text = rt.get("header_text") or "Receipt"
     footer_text = rt.get("footer_text") or ga.get("receipt_footer_text") or "Thank you!"
     show_items = rt.get("show_items") if "show_items" in rt else True
     show_item_description = rt.get("show_item_description") if "show_item_description" in rt else False
@@ -229,6 +234,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
 
     if fmt == "text":
         lines = [
+            identity["company_name"] or "PIXELHUB",
             f"RECEIPT RCPT-{receipt.id}",
             f"Invoice: {receipt.invoice.invoice_number}",
             f"Date: {receipt.payment_date}",

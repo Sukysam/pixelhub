@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getAuthUser, getErrorMessage, resolveMediaUrl } from "@/lib/api";
+import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
 
 type Currency = {
   id: number;
@@ -88,7 +88,7 @@ export default function SettingsPage() {
 
 function SettingsPageInner() {
   const authUser = getAuthUser();
-  const isAdmin = (authUser?.roles ?? []).includes("admin");
+  const isAdmin = hasAdminSettingsAccess(authUser);
   const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -155,6 +155,8 @@ function SettingsPageInner() {
     const logoUrl = resolveMediaUrl(logoUrlRaw);
     const showDesc = Boolean(invoiceTemplate.show_item_description);
     const footerText = (invoiceTemplate.footer_text as string) || (globalAppearance.invoice_footer_text as string) || "Thank you for your business!";
+    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PIXELHUB";
+    const companyTagline = (globalAppearance.company_tagline as string) || "";
     const currencyCode = selectedCurrencyCode || "USD";
     const nf = new Intl.NumberFormat(locale, { style: "currency", currency: currencyCode });
     const df = new Intl.DateTimeFormat(locale);
@@ -166,8 +168,8 @@ function SettingsPageInner() {
     const subtotal = 400;
     const tax = 0;
     const total = 400;
-    return { primary, font, logoUrl, showDesc, footerText, nf, df, today, items, subtotal, tax, total };
-  }, [form?.invoice_template, globalAppearance, locale, selectedCurrencyCode]);
+    return { primary, font, logoUrl, showDesc, footerText, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
+  }, [authUser?.company_name, form?.invoice_template, globalAppearance, locale, selectedCurrencyCode]);
 
   const previewReceipt = useMemo(() => {
     const receiptTemplate = (form?.receipt_template ?? {}) as Record<string, unknown>;
@@ -177,7 +179,9 @@ function SettingsPageInner() {
     const logoUrl = resolveMediaUrl(logoUrlRaw);
     const showItems = receiptTemplate.show_items !== false;
     const showDesc = Boolean(receiptTemplate.show_item_description);
-    const headerText = (receiptTemplate.header_text as string) || (globalAppearance.company_name as string) || "Receipt";
+    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PIXELHUB";
+    const companyTagline = (globalAppearance.company_tagline as string) || "";
+    const titleText = (receiptTemplate.header_text as string) || "Receipt";
     const footerText = (receiptTemplate.footer_text as string) || (globalAppearance.receipt_footer_text as string) || "Thank you!";
     const currencyCode = selectedCurrencyCode || "USD";
     const nf = new Intl.NumberFormat(locale, { style: "currency", currency: currencyCode });
@@ -188,8 +192,8 @@ function SettingsPageInner() {
       { name: "Product B", description: "Hardware", qty: 2, unit: 75, total: 150 },
     ];
     const paid = 400;
-    return { primary, font, logoUrl, showItems, showDesc, headerText, footerText, nf, df, today, items, paid };
-  }, [form?.receipt_template, globalAppearance, locale, selectedCurrencyCode]);
+    return { primary, font, logoUrl, showItems, showDesc, companyName, companyTagline, titleText, footerText, nf, df, today, items, paid };
+  }, [authUser?.company_name, form?.receipt_template, globalAppearance, locale, selectedCurrencyCode]);
 
   const onSave = async () => {
     if (!form) return;
@@ -667,9 +671,9 @@ function SettingsPageInner() {
                           <img src={previewInvoice.logoUrl} alt="Logo" className="h-10 w-auto mb-2" />
                         ) : null}
                         <div className="text-xl font-bold" style={{ color: previewInvoice.primary }}>
-                          {String(globalAppearance.company_name ?? "PIXELHUB")}
+                          {previewInvoice.companyName}
                         </div>
-                        <div className="text-xs text-gray-600">{String(globalAppearance.company_tagline ?? "")}</div>
+                        <div className="text-xs text-gray-600">{previewInvoice.companyTagline}</div>
                       </div>
                       <div className="text-right">
                         <div className="text-lg font-bold" style={{ color: previewInvoice.primary }}>
@@ -762,8 +766,10 @@ function SettingsPageInner() {
                           <img src={previewReceipt.logoUrl} alt="Logo" className="h-10 w-auto mb-2" />
                         ) : null}
                         <div className="text-xl font-bold" style={{ color: previewReceipt.primary }}>
-                          {previewReceipt.headerText}
+                          {previewReceipt.companyName}
                         </div>
+                        <div className="text-xs text-gray-600">{previewReceipt.companyTagline}</div>
+                        <div className="mt-1 text-sm font-semibold text-gray-900">{previewReceipt.titleText}</div>
                       </div>
                       <div className="text-right text-sm">
                         <div>

@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getAuthToken, getAuthUser, getErrorMessage, resolveMediaUrl } from "@/lib/api";
+import { apiRequest, getAuthToken, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
 
 type Currency = {
   id: number;
@@ -116,8 +116,7 @@ const EMPTY_ROLE_DRAFT: RoleDraft = {
 
 export function AdminSettingsModule() {
   const authUser = getAuthUser();
-  const roles = authUser?.roles ?? [];
-  const isAdmin = roles.includes("admin");
+  const isAdmin = hasAdminSettingsAccess(authUser);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -148,7 +147,7 @@ export function AdminSettingsModule() {
   const customRoles = useMemo(() => roleCatalog.filter((role) => !role.is_system), [roleCatalog]);
   const currencyOptions = useMemo(() => currencies.slice().sort((a, b) => a.code.localeCompare(b.code)), [currencies]);
 
-  const loadAll = async () => {
+  const loadAll = useCallback(async () => {
     if (!isAdmin) {
       setLoading(false);
       return;
@@ -176,11 +175,11 @@ export function AdminSettingsModule() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isAdmin]);
 
   useEffect(() => {
     void loadAll();
-  }, [isAdmin]);
+  }, [loadAll]);
 
   const onSaveGlobal = async () => {
     if (!globalSettings) return;

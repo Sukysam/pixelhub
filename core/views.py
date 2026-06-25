@@ -246,6 +246,8 @@ SYSTEM_ROLE_NAMES = {"user", "staff", "admin"}
 def _permission_codes_for_user(user) -> list[str]:
     if not getattr(user, "is_authenticated", False):
         return []
+    if bool(getattr(user, "is_superuser", False)):
+        return list(Permission.objects.values_list("code", flat=True).distinct().order_by("code"))
     return list(
         Permission.objects.filter(permission_roles__role__role_users__user=user)
         .values_list("code", flat=True)
@@ -351,6 +353,18 @@ def _get_global_settings() -> GlobalSettings:
     return obj
 
 
+def _effective_company_identity_for_user(user) -> dict[str, Optional[str]]:
+    gs = _get_global_settings()
+    appearance = gs.appearance or {}
+    profile_company = None
+    if getattr(user, "is_authenticated", False):
+        profile = UserProfile.objects.filter(user=user).only("company_legal_name").first()
+        profile_company = getattr(profile, "company_legal_name", None) if profile else None
+    company_name = str(appearance.get("company_name") or "").strip() or str(profile_company or "").strip() or "PIXELHUB"
+    company_tagline = str(appearance.get("company_tagline") or "").strip() or None
+    return {"company_name": company_name, "company_tagline": company_tagline}
+
+
 def _get_user_settings(user) -> UserSettings:
     obj, _ = UserSettings.objects.get_or_create(user=user)
     return obj
@@ -361,6 +375,7 @@ def _effective_templates_for_user(user) -> dict:
     global_appearance = gs.appearance or {}
     invoice_template = {}
     receipt_template = {}
+    identity = _effective_company_identity_for_user(user)
     if getattr(user, "is_authenticated", False):
         us = _get_user_settings(user)
         if gs.allow_user_overrides:
@@ -393,9 +408,10 @@ def _effective_templates_for_user(user) -> dict:
         "primary_color": None,
         "font_family": None,
         "logo_url": None,
-        "company_name": None,
-        "company_tagline": None,
+        "company_name": identity["company_name"],
+        "company_tagline": identity["company_tagline"],
         "invoice_footer_text": None,
+        "receipt_footer_text": None,
         **(global_appearance if isinstance(global_appearance, dict) else {}),
     }
     return {
@@ -1640,8 +1656,9 @@ class ItemViewSet(SoftDeleteModelViewSet):
         for it in qs.iterator(chunk_size=2000):
             row = {f: _value_for(it, f) for f in fields}
             rows.append(row)
-        html = "<html><head><meta charset='utf-8' /><style>body{font-family:Arial, sans-serif;font-size:10pt;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:4px;}th{background:#f3f3f3;text-align:left;}</style></head><body>"
-        html += "<h2>Inventory Export</h2>"
+        company_name = str(_effective_company_identity_for_user(request.user)["company_name"] or "PIXELHUB").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = "<html><head><meta charset='utf-8' /><style>body{font-family:Arial, sans-serif;font-size:10pt;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:4px;}th{background:#f3f3f3;text-align:left;}.doc-company{font-size:18pt;font-weight:700;margin:0 0 4px;color:#1a4d8e;}.doc-title{font-size:12pt;font-weight:700;margin:0 0 12px;}</style></head><body>"
+        html += f"<div class='doc-company'>{company_name}</div><div class='doc-title'>Inventory Export</div>"
         html += "<table><thead><tr>" + "".join([f"<th>{f}</th>" for f in fields]) + "</tr></thead><tbody>"
         for r in rows:
             html += "<tr>" + "".join([f"<td>{str(r.get(f, '')).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')}</td>" for f in fields]) + "</tr>"
@@ -2358,8 +2375,9 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         for inv in qs.iterator(chunk_size=2000):
             row = {f: _value_for(inv, f) for f in fields}
             rows.append(row)
-        html = "<html><head><meta charset='utf-8' /><style>body{font-family:Arial, sans-serif;font-size:10pt;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:4px;}th{background:#f3f3f3;text-align:left;}</style></head><body>"
-        html += "<h2>Invoices Export</h2>"
+        company_name = str(_effective_company_identity_for_user(request.user)["company_name"] or "PIXELHUB").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = "<html><head><meta charset='utf-8' /><style>body{font-family:Arial, sans-serif;font-size:10pt;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:4px;}th{background:#f3f3f3;text-align:left;}.doc-company{font-size:18pt;font-weight:700;margin:0 0 4px;color:#1a4d8e;}.doc-title{font-size:12pt;font-weight:700;margin:0 0 12px;}</style></head><body>"
+        html += f"<div class='doc-company'>{company_name}</div><div class='doc-title'>Invoices Export</div>"
         html += "<table><thead><tr>" + "".join([f"<th>{f}</th>" for f in fields]) + "</tr></thead><tbody>"
         for r in rows:
             html += "<tr>" + "".join([f"<td>{str(r.get(f, '')).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')}</td>" for f in fields]) + "</tr>"
@@ -2794,7 +2812,7 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
         primary = rt.get("primary_color") or ga.get("primary_color") or "#1a4d8e"
         font = rt.get("font_family") or ga.get("font_family") or "Helvetica"
         logo_url = rt.get("logo_url") or ga.get("logo_url")
-        header_text = rt.get("header_text") or ga.get("company_name") or "Receipt"
+        header_text = rt.get("header_text") or "Receipt"
         footer_text = rt.get("footer_text") or ga.get("receipt_footer_text") or "Thank you!"
         show_items = rt.get("show_items") if "show_items" in rt else True
         show_item_description = rt.get("show_item_description") if "show_item_description" in rt else False

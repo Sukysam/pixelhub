@@ -88,10 +88,11 @@
             {% if logo_url %}
                 <img class="logo" src="{{ logo_url }}" alt="Logo" />
             {% endif %}
-            <h1 class="title">{{ header_text }}</h1>
+            <h1 class="title">{{ global_appearance.company_name|default:"PIXELHUB" }}</h1>
             {% if global_appearance.company_tagline %}
                 <div style="color: #555; font-size: 10.5pt;">{{ global_appearance.company_tagline }}</div>
             {% endif %}
+            <div style="margin-top: 4px; font-size: 11pt; font-weight: 700; color: #111;">{{ header_text|default:"Receipt" }}</div>
         </div>
         <div class="meta">
             <div><strong>Receipt:</strong> {{ receipt_number }}</div>

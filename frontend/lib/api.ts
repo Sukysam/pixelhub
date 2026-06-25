@@ -91,6 +91,16 @@ export type AuthUser = {
   }>;
 };
 
+export function hasAdminSettingsAccess(user: AuthUser | null): boolean {
+  if (!user) return false;
+  if (user.is_superuser) return true;
+  const roles = new Set(user.roles ?? []);
+  if (roles.has("admin")) return true;
+  if (user.session_role === "admin") return true;
+  const permissions = new Set(user.permissions ?? []);
+  return permissions.has("settings.global.write") || permissions.has("admin.users.write");
+}
+
 export function getAuthUser(): AuthUser | null {
   if (typeof window === "undefined") return null;
   const raw = window.localStorage.getItem("auth_user");
