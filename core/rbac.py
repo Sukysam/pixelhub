@@ -7,6 +7,8 @@ from django.db.models import Exists, OuterRef
 
 from .models import Permission, Role, RolePermission, UserRole
 
+SYSTEM_ROLE_NAMES = {"user", "staff", "admin"}
+
 
 def user_role_names(user) -> list[str]:
     if not getattr(user, "is_authenticated", False):
@@ -61,7 +63,7 @@ def sync_user_role_from_flags(user) -> None:
     elif bool(getattr(user, "is_staff", False)):
         role_name = "staff"
 
-    UserRole.objects.filter(user=user).exclude(role__name=role_name).delete()
+    UserRole.objects.filter(user=user, role__name__in=SYSTEM_ROLE_NAMES).exclude(role__name=role_name).delete()
     role = Role.objects.filter(name=role_name).first()
     if role is None:
         return

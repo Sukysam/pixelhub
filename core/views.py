@@ -63,6 +63,8 @@ from .models import (
     EmailVerificationToken,
     AccessToken,
     Role,
+    Permission,
+    RolePermission,
     UserRole,
     DocumentDelivery,
     PaymentTransaction,
@@ -92,6 +94,10 @@ from .serializers import (
     PasswordResetConfirmSerializer,
     DocumentDeliverySerializer,
     PaymentTransactionSerializer,
+    normalize_signup_phone,
+    validate_application_password,
+    NIGERIA_COUNTRY_NAME,
+    DEFAULT_COUNTRY_CODE,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,6 +238,81 @@ def _log_operation(user, action: str, content_type_model, object_id: str, change
         object_id=str(object_id),
         changes=changes or {},
     )
+
+
+SYSTEM_ROLE_NAMES = {"user", "staff", "admin"}
+
+
+def _permission_codes_for_user(user) -> list[str]:
+    if not getattr(user, "is_authenticated", False):
+        return []
+    return list(
+        Permission.objects.filter(permission_roles__role__role_users__user=user)
+        .values_list("code", flat=True)
+        .distinct()
+        .order_by("code")
+    )
+
+
+def _role_permission_codes(role: Role) -> list[str]:
+    return list(
+        Permission.objects.filter(permission_roles__role=role)
+        .values_list("code", flat=True)
+        .distinct()
+        .order_by("code")
+    )
+
+
+def _latest_login_timestamps_by_user(user_ids: list[int]) -> dict[int, Optional[str]]:
+    if not user_ids:
+        return {}
+    ct = ContentType.objects.get_for_model(get_user_model())
+    rows = (
+        AuditLog.objects.filter(
+            action="security",
+            content_type=ct,
+            object_id__in=[str(user_id) for user_id in user_ids],
+            changes__event__in=["login_success", "staff_login_success", "admin_login_success"],
+        )
+        .order_by("object_id", "-created_at")
+        .values("object_id", "created_at")
+    )
+    latest: dict[int, Optional[str]] = {}
+    for row in rows:
+        try:
+            key = int(str(row["object_id"]))
+        except (TypeError, ValueError):
+            continue
+        if key not in latest:
+            created_at = row.get("created_at")
+            latest[key] = created_at.isoformat() if created_at else None
+    return latest
+
+
+def _serialize_admin_user(user, *, latest_login_at: Optional[str] = None) -> dict[str, Any]:
+    profile = UserProfile.objects.filter(user=user).only("full_name", "phone", "company_legal_name").first()
+    roles = user_role_names(user)
+    system_role = "user"
+    if "admin" in roles or bool(getattr(user, "is_superuser", False)):
+        system_role = "admin"
+    elif "staff" in roles or bool(getattr(user, "is_staff", False)):
+        system_role = "staff"
+    custom_roles = [role for role in roles if role not in SYSTEM_ROLE_NAMES]
+    return {
+        "id": user.id,
+        "username": getattr(user, "username", ""),
+        "email": getattr(user, "email", ""),
+        "is_active": bool(getattr(user, "is_active", True)),
+        "is_staff": bool(getattr(user, "is_staff", False)),
+        "is_superuser": bool(getattr(user, "is_superuser", False)),
+        "primary_role": system_role,
+        "roles": roles,
+        "custom_roles": custom_roles,
+        "full_name": getattr(profile, "full_name", None) if profile else None,
+        "phone": getattr(profile, "phone", None) if profile else None,
+        "company_name": getattr(profile, "company_legal_name", None) if profile else None,
+        "last_login_at": latest_login_at,
+    }
 
 
 class EditDeletePermission(permissions.BasePermission):
@@ -3009,13 +3090,17 @@ class MeApi(APIView):
         u = request.user
         profile = UserProfile.objects.filter(user=u).only("company_legal_name").first()
         roles = user_role_names(u)
+        permission_codes = _permission_codes_for_user(u)
         session_role = getattr(getattr(request, "auth", None), "role", None)
         return Response(
             {
                 "id": u.id,
                 "username": getattr(u, "username", ""),
                 "email": getattr(u, "email", ""),
+                "is_staff": bool(getattr(u, "is_staff", False)),
+                "is_superuser": bool(getattr(u, "is_superuser", False)),
                 "roles": roles,
+                "permissions": permission_codes,
                 "session_role": getattr(session_role, "name", None),
                 "company_name": (getattr(profile, "company_legal_name", None) or None),
                 "social_accounts": _social_connections_for_user(u),
@@ -3267,6 +3352,7 @@ class RegisterApi(APIView):
             raise
         data = serializer.validated_data
         email = str(data["email"]).strip().lower()
+        phone_e164 = str(data["phone_e164"]).strip()
         if _rate_limit(f"register:email:{_hash_email(email)}", limit=3, window_seconds=3600):
             _log_security_event(None, get_user_model(), object_id=email, changes={"event": "rate_limit", "scope": "register_email"})
             return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
@@ -3276,29 +3362,33 @@ class RegisterApi(APIView):
         if User.objects.filter(username=username).exists() or User.objects.filter(email=email).exists():
             _log_security_event(None, User, object_id=email, changes={"event": "register_duplicate", "ip": ip})
             raise ValidationError({"email": "An account with this email already exists"})
+        if UserProfile.objects.filter(phone=phone_e164).exists():
+            _log_security_event(None, User, object_id=phone_e164, changes={"event": "register_duplicate_phone", "ip": ip})
+            raise ValidationError({"phone_number": "An account with this phone number already exists"})
 
         with transaction.atomic():
-            user = User(username=username, email=email, is_active=True)
+            user = User(username=username, email=email, is_active=False)
             user.set_password(data["password"])
             user.save()
-            UserProfile.objects.create(
+            profile = UserProfile.objects.create(
                 user=user,
-                full_name=str(data.get("full_name") or "").strip() or None,
-                phone=(str(data.get("phone")).strip() if data.get("phone") else None),
-                company_legal_name=str(data.get("company_legal_name") or "").strip() or None,
-                company_registration_number=str(data.get("company_registration_number") or "").strip() or None,
-                business_industry=str(data.get("business_industry") or "").strip() or None,
-                business_address=str(data.get("business_address") or "").strip() or None,
-                certifications=list(data.get("certifications") or []),
+                phone=phone_e164,
+                company_legal_name=str(data.get("company_name") or "").strip() or None,
                 terms_accepted_at=timezone.now(),
             )
+            user_settings = _get_user_settings(user)
+            user_settings.country = "NG"
+            ngn = Currency.objects.filter(code="NGN").first()
+            if ngn is not None:
+                user_settings.currency = ngn
+            user_settings.save(update_fields=["country", "currency", "updated_at"])
             token = secrets.token_urlsafe(48)[:120]
             EmailVerificationToken.objects.create(
                 user=user,
                 token=token,
                 expires_at=timezone.now() + timedelta(days=2),
             )
-            _log_audit(user, "create", user, {"event": "registered", "ip": ip})
+            _log_audit(user, "create", user, {"event": "registered", "ip": ip, "company_name": profile.company_legal_name, "phone": phone_e164})
 
         verification_sent = _send_verification_email(email, token, user=user, ip=ip, source="register")
         payload = {"registered": True, "verification_sent": bool(verification_sent)}
@@ -3928,6 +4018,35 @@ class CurrencyConvertApi(APIView):
         )
 
 
+def _parse_custom_role_names(raw_value) -> list[str]:
+    if raw_value in (None, ""):
+        return []
+    if not isinstance(raw_value, list):
+        raise ValidationError({"custom_roles": "custom_roles must be a list"})
+    cleaned = sorted({str(value or "").strip() for value in raw_value if str(value or "").strip()})
+    invalid = [name for name in cleaned if name in SYSTEM_ROLE_NAMES]
+    if invalid:
+        raise ValidationError({"custom_roles": f"Use primary_role for system roles: {', '.join(sorted(invalid))}"})
+    existing = set(Role.objects.filter(name__in=cleaned).values_list("name", flat=True))
+    missing = [name for name in cleaned if name not in existing]
+    if missing:
+        raise ValidationError({"custom_roles": f"Unknown roles: {', '.join(missing)}"})
+    return cleaned
+
+
+def _apply_admin_user_roles(user, *, primary_role: str, custom_role_names: list[str]) -> None:
+    role_name = str(primary_role or "user").strip().lower()
+    if role_name not in SYSTEM_ROLE_NAMES:
+        raise ValidationError({"primary_role": "primary_role must be user, staff, or admin"})
+    user.is_superuser = role_name == "admin"
+    user.is_staff = role_name in {"staff", "admin"}
+    user.save(update_fields=["is_superuser", "is_staff"])
+    custom_roles = list(Role.objects.filter(name__in=custom_role_names))
+    UserRole.objects.filter(user=user).exclude(role__name__in=SYSTEM_ROLE_NAMES).exclude(role__in=custom_roles).delete()
+    for role in custom_roles:
+        UserRole.objects.get_or_create(user=user, role=role)
+
+
 class AdminUsersApi(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -3944,39 +4063,66 @@ class AdminUsersApi(APIView):
         page_size = 25
         start = (page - 1) * page_size
         end = start + page_size
-        results = []
-        for u in qs[start:end]:
-            results.append(
-                {
-                    "id": u.id,
-                    "username": getattr(u, "username", ""),
-                    "email": getattr(u, "email", ""),
-                    "is_active": bool(getattr(u, "is_active", True)),
-                    "is_staff": bool(getattr(u, "is_staff", False)),
-                    "is_superuser": bool(getattr(u, "is_superuser", False)),
-                }
-            )
+        page_users = list(qs[start:end])
+        latest_logins = _latest_login_timestamps_by_user([u.id for u in page_users])
+        results = [_serialize_admin_user(u, latest_login_at=latest_logins.get(u.id)) for u in page_users]
         return Response({"page": page, "results": results, "count": qs.count()}, status=status.HTTP_200_OK)
 
     def post(self, request):
         if not user_has_permission(request.user, "admin.users.write"):
             raise PermissionDenied("You do not have permission to manage users.")
         username = str(request.data.get("username") or "").strip()
-        password = request.data.get("password")
+        password = str(request.data.get("password") or "")
         email = str(request.data.get("email") or "").strip().lower()
-        is_staff = bool(request.data.get("is_staff", False))
+        full_name = str(request.data.get("full_name") or "").strip()
+        company_name = str(request.data.get("company_name") or "").strip()
         is_active = bool(request.data.get("is_active", True))
+        primary_role = str(request.data.get("primary_role") or "user").strip().lower()
+        custom_role_names = _parse_custom_role_names(request.data.get("custom_roles"))
         if not username or not password:
             raise ValidationError({"detail": "username and password are required"})
+        validate_application_password(password, min_length=6)
+        phone_value = str(request.data.get("phone") or "").strip()
+        country_code = str(request.data.get("country_code") or DEFAULT_COUNTRY_CODE).strip() or DEFAULT_COUNTRY_CODE
+        phone_e164 = None
+        if phone_value:
+            try:
+                phone_e164 = normalize_signup_phone(country_code, phone_value)
+            except ValidationError as exc:
+                raise ValidationError({"phone": exc.detail})
         User = get_user_model()
         if User.objects.filter(username=username).exists():
             raise ValidationError({"username": "Username already exists"})
         if email and User.objects.filter(email=email).exists():
             raise ValidationError({"email": "Email already exists"})
-        u = User(username=username, email=email, is_staff=is_staff, is_active=is_active)
-        u.set_password(password)
-        u.save()
-        _log_audit(request.user, "create", u, {"username": username, "email": email or None, "is_staff": is_staff, "is_active": is_active})
+        if phone_e164 and UserProfile.objects.filter(phone=phone_e164).exists():
+            raise ValidationError({"phone": "Phone number already exists"})
+        with transaction.atomic():
+            u = User(username=username, email=email, is_active=is_active)
+            u.set_password(password)
+            u.save()
+            _apply_admin_user_roles(u, primary_role=primary_role, custom_role_names=custom_role_names)
+            UserProfile.objects.update_or_create(
+                user=u,
+                defaults={
+                    "full_name": full_name or None,
+                    "phone": phone_e164,
+                    "company_legal_name": company_name or None,
+                    "email_verified_at": timezone.now() if email else None,
+                },
+            )
+            _log_audit(
+                request.user,
+                "create",
+                u,
+                {
+                    "username": username,
+                    "email": email or None,
+                    "is_active": is_active,
+                    "primary_role": primary_role,
+                    "custom_roles": custom_role_names,
+                },
+            )
         return Response({"id": u.id, "created": True}, status=status.HTTP_201_CREATED)
 
     def patch(self, request):
@@ -3990,19 +4136,207 @@ class AdminUsersApi(APIView):
             u = User.objects.get(pk=int(user_id))
         except (User.DoesNotExist, ValueError, TypeError):
             raise NotFound("User not found")
-        before = {
-            "is_active": bool(getattr(u, "is_active", True)),
-            "is_staff": bool(getattr(u, "is_staff", False)),
-        }
+
+        before = _serialize_admin_user(u, latest_login_at=_latest_login_timestamps_by_user([u.id]).get(u.id))
+        update_fields = []
+        if "username" in request.data:
+            username = str(request.data.get("username") or "").strip()
+            if not username:
+                raise ValidationError({"username": "Username is required"})
+            if User.objects.exclude(pk=u.pk).filter(username=username).exists():
+                raise ValidationError({"username": "Username already exists"})
+            u.username = username
+            update_fields.append("username")
+        if "email" in request.data:
+            email = str(request.data.get("email") or "").strip().lower()
+            if email and User.objects.exclude(pk=u.pk).filter(email=email).exists():
+                raise ValidationError({"email": "Email already exists"})
+            u.email = email
+            update_fields.append("email")
         if "is_active" in request.data:
             u.is_active = bool(request.data.get("is_active"))
-        if "is_staff" in request.data:
-            u.is_staff = bool(request.data.get("is_staff"))
-        u.save(update_fields=["is_active", "is_staff"])
-        after = {"is_active": bool(u.is_active), "is_staff": bool(u.is_staff)}
-        if before != after:
-            _log_audit(request.user, "update", u, {"before": before, "after": after})
+            update_fields.append("is_active")
+
+        primary_role = before["primary_role"]
+        if "primary_role" in request.data:
+            primary_role = str(request.data.get("primary_role") or "").strip().lower()
+        custom_role_names = before["custom_roles"]
+        if "custom_roles" in request.data:
+            custom_role_names = _parse_custom_role_names(request.data.get("custom_roles"))
+        if int(request.user.id) == int(u.id) and primary_role != "admin":
+            raise ValidationError({"primary_role": "You cannot remove your own admin access."})
+
+        new_password = request.data.get("new_password")
+        if new_password not in (None, ""):
+            new_password = str(new_password)
+            validate_application_password(new_password, min_length=6)
+
+        full_name = str(request.data.get("full_name") or "").strip() if "full_name" in request.data else None
+        company_name = str(request.data.get("company_name") or "").strip() if "company_name" in request.data else None
+        phone_value = str(request.data.get("phone") or "").strip() if "phone" in request.data else None
+        country_code = str(request.data.get("country_code") or DEFAULT_COUNTRY_CODE).strip() or DEFAULT_COUNTRY_CODE
+        phone_e164 = None
+        if phone_value is not None:
+            if phone_value:
+                try:
+                    phone_e164 = normalize_signup_phone(country_code, phone_value)
+                except ValidationError as exc:
+                    raise ValidationError({"phone": exc.detail})
+                if UserProfile.objects.exclude(user=u).filter(phone=phone_e164).exists():
+                    raise ValidationError({"phone": "Phone number already exists"})
+
+        with transaction.atomic():
+            if update_fields:
+                u.save(update_fields=sorted(set(update_fields)))
+            _apply_admin_user_roles(u, primary_role=primary_role, custom_role_names=custom_role_names)
+            if new_password:
+                u.set_password(new_password)
+                u.save(update_fields=["password"])
+            profile, _ = UserProfile.objects.get_or_create(user=u)
+            profile_updates = []
+            if full_name is not None:
+                profile.full_name = full_name or None
+                profile_updates.append("full_name")
+            if company_name is not None:
+                profile.company_legal_name = company_name or None
+                profile_updates.append("company_legal_name")
+            if phone_value is not None:
+                profile.phone = phone_e164
+                profile_updates.append("phone")
+            if profile_updates:
+                profile.save(update_fields=sorted(set(profile_updates + ["updated_at"])))
+
+        after = _serialize_admin_user(u, latest_login_at=_latest_login_timestamps_by_user([u.id]).get(u.id))
+        changes = {"before": before, "after": after}
+        if new_password:
+            changes["password_reset"] = True
+        if before != after or new_password:
+            _log_audit(request.user, "update", u, changes)
         return Response({"updated": True}, status=status.HTTP_200_OK)
+
+
+class AdminRolesApi(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not user_has_permission(request.user, "admin.users.read"):
+            raise PermissionDenied("You do not have permission to view roles.")
+        roles = Role.objects.all().order_by("name")
+        permissions_qs = Permission.objects.all().order_by("code")
+        return Response(
+            {
+                "permissions": [{"code": perm.code, "description": perm.description} for perm in permissions_qs],
+                "results": [
+                    {
+                        "id": role.id,
+                        "name": role.name,
+                        "description": role.description,
+                        "is_system": role.name in SYSTEM_ROLE_NAMES,
+                        "permission_codes": _role_permission_codes(role),
+                    }
+                    for role in roles
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+        if not user_has_permission(request.user, "admin.users.write"):
+            raise PermissionDenied("You do not have permission to manage roles.")
+        name = str(request.data.get("name") or "").strip().lower()
+        description = str(request.data.get("description") or "").strip()
+        permission_codes_raw = request.data.get("permission_codes") or []
+        if not name:
+            raise ValidationError({"name": "name is required"})
+        if not re.fullmatch(r"[a-z][a-z0-9_\\-]{1,48}", name):
+            raise ValidationError({"name": "Use lowercase letters, numbers, hyphen, or underscore"})
+        if name in SYSTEM_ROLE_NAMES:
+            raise ValidationError({"name": "System roles cannot be created here"})
+        if not isinstance(permission_codes_raw, list):
+            raise ValidationError({"permission_codes": "permission_codes must be a list"})
+        permission_codes = sorted({str(code or "").strip() for code in permission_codes_raw if str(code or "").strip()})
+        permissions_map = {perm.code: perm for perm in Permission.objects.filter(code__in=permission_codes)}
+        missing = [code for code in permission_codes if code not in permissions_map]
+        if missing:
+            raise ValidationError({"permission_codes": f"Unknown permissions: {', '.join(missing)}"})
+        role, created = Role.objects.get_or_create(name=name, defaults={"description": description or None})
+        if not created:
+            raise ValidationError({"name": "Role already exists"})
+        role.description = description or None
+        role.save(update_fields=["description"])
+        for code in permission_codes:
+            RolePermission.objects.get_or_create(role=role, permission=permissions_map[code])
+        _log_audit(request.user, "create", role, {"permission_codes": permission_codes})
+        return Response({"id": role.id, "created": True}, status=status.HTTP_201_CREATED)
+
+    def patch(self, request):
+        if not user_has_permission(request.user, "admin.users.write"):
+            raise PermissionDenied("You do not have permission to manage roles.")
+        role_id = request.data.get("id")
+        if role_id is None:
+            raise ValidationError({"id": "id is required"})
+        try:
+            role = Role.objects.get(pk=int(role_id))
+        except (Role.DoesNotExist, ValueError, TypeError):
+            raise NotFound("Role not found")
+        if role.name in SYSTEM_ROLE_NAMES:
+            raise ValidationError({"id": "System roles cannot be modified here"})
+        description = str(request.data.get("description") or "").strip() if "description" in request.data else role.description
+        permission_codes = _role_permission_codes(role)
+        if "permission_codes" in request.data:
+            raw_codes = request.data.get("permission_codes") or []
+            if not isinstance(raw_codes, list):
+                raise ValidationError({"permission_codes": "permission_codes must be a list"})
+            permission_codes = sorted({str(code or "").strip() for code in raw_codes if str(code or "").strip()})
+        permissions_map = {perm.code: perm for perm in Permission.objects.filter(code__in=permission_codes)}
+        missing = [code for code in permission_codes if code not in permissions_map]
+        if missing:
+            raise ValidationError({"permission_codes": f"Unknown permissions: {', '.join(missing)}"})
+        before = {"description": role.description, "permission_codes": _role_permission_codes(role)}
+        with transaction.atomic():
+            role.description = description or None
+            role.save(update_fields=["description"])
+            RolePermission.objects.filter(role=role).exclude(permission__code__in=permission_codes).delete()
+            for code in permission_codes:
+                RolePermission.objects.get_or_create(role=role, permission=permissions_map[code])
+        after = {"description": role.description, "permission_codes": _role_permission_codes(role)}
+        if before != after:
+            _log_audit(request.user, "update", role, {"before": before, "after": after})
+        return Response({"updated": True}, status=status.HTTP_200_OK)
+
+
+class AdminAuditLogsApi(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not user_has_permission(request.user, "admin.users.read"):
+            raise PermissionDenied("You do not have permission to view audit logs.")
+        try:
+            page = int(request.query_params.get("page", "1"))
+        except ValueError:
+            page = 1
+        page = max(1, page)
+        page_size = 25
+        q = str(request.query_params.get("q") or "").strip().lower()
+        qs = AuditLog.objects.select_related("user", "content_type").order_by("-created_at")
+        if q:
+            qs = qs.filter(Q(action__icontains=q) | Q(changes__icontains=q) | Q(object_id__icontains=q))
+        total = qs.count()
+        start = (page - 1) * page_size
+        rows = []
+        for row in qs[start : start + page_size]:
+            rows.append(
+                {
+                    "id": row.id,
+                    "action": row.action,
+                    "object_id": row.object_id,
+                    "content_type": getattr(row.content_type, "model", None),
+                    "changes": row.changes,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "actor": getattr(getattr(row, "user", None), "email", None) or getattr(getattr(row, "user", None), "username", None),
+                }
+            )
+        return Response({"page": page, "count": total, "results": rows}, status=status.HTTP_200_OK)
 
 
 class AdminOAuthStatusApi(APIView):

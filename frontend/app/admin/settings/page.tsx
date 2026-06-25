@@ -699,14 +699,18 @@ function AdminSettingsInner() {
           <Card>
             <CardHeader>
               <CardTitle>Users</CardTitle>
-              <CardDescription>Enable/disable accounts and grant staff access.</CardDescription>
+              <CardDescription>Open the dedicated admin user management workspace for account, role, and audit controls.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               {readOnly ? <div className="text-sm text-gray-700">You do not have permission to view or manage users.</div> : null}
-              <div className="flex justify-end">
-                <Button type="button" onClick={() => setCreateUserOpen(true)} disabled={readOnly}>
-                  Create User
-                </Button>
+              <div className="flex justify-between gap-3">
+                <div className="text-sm text-gray-600">Advanced role assignment, password resets, and audit logs now live in the dedicated admin user management page.</div>
+                <a
+                  href="/admin/users"
+                  className={`inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium ${readOnly ? "bg-gray-100 text-gray-400 pointer-events-none" : "bg-gray-900 text-white hover:bg-gray-800"}`}
+                >
+                  Open User Management
+                </a>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">

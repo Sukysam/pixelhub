@@ -1,18 +1,13 @@
 import { test, expect } from "@playwright/test";
 
 async function fillRegistrationForm(page: any, email: string, password: string) {
-  await page.goto("/?mode=register");
-  await page.getByRole("tab", { name: "Create account" }).click();
+  await page.goto("/register");
 
-  await page.getByLabel("Full name").fill("E2E User");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Company legal name").fill("E2E Company Ltd");
-  await page.getByLabel(/Registration number/i).fill("RC-123456");
-  await page.getByLabel("Business type / industry").selectOption("Technology");
-  await page.getByLabel("Business address").fill("1 Test Street, Lagos, NG");
-  await page.getByLabel("Certifications (optional)").fill("CAC");
-  await page.getByLabel("Password", { exact: true }).fill(password);
-  await page.getByLabel("Confirm password").fill(password);
+  await page.getByLabel("Email Address").fill(email);
+  await page.getByLabel("Create New Password (6 Characters Minimum)").fill(password);
+  await page.getByLabel("Confirm Password").fill(password);
+  await page.getByLabel("Your Company Name").fill("E2E Company Ltd");
+  await page.getByLabel("Phone Number").fill("8012345678");
 }
 
 test("guest can register an account on desktop without captcha", async ({ page }) => {
@@ -27,11 +22,11 @@ test("guest can register an account on desktop without captcha", async ({ page }
   await fillRegistrationForm(page, email, signupSecret);
   await expect(page.getByLabel("Captcha")).toHaveCount(0);
 
-  await page.getByRole("checkbox", { name: "I agree to the terms." }).check();
+  await page.getByRole("checkbox").check();
   await page.getByRole("button", { name: "Create account" }).click();
 
-  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator("div.w-64").getByRole("heading", { level: 1 })).toHaveText("E2E Company Ltd");
+  await expect(page.getByText(/Account created successfully/i)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("link", { name: "Go to login" })).toBeVisible();
 });
 
 test("signup validation works on mobile-sized viewport without broken captcha UI", async ({ page }) => {
@@ -40,11 +35,11 @@ test("signup validation works on mobile-sized viewport without broken captcha UI
 
   await fillRegistrationForm(page, email, "weak");
   await expect(page.getByLabel("Captcha")).toHaveCount(0);
-  await page.getByRole("checkbox", { name: "I agree to the terms." }).check();
+  await page.getByRole("checkbox").check();
 
-  await expect(page.getByText(/Password must include:/i)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Create account" })).toBeDisabled();
-  await expect(page.getByRole("tabpanel", { name: "Registration form" })).toBeVisible();
+  await page.getByRole("button", { name: "Create account" }).click();
+  await expect(page.getByText(/Password must be at least 6 characters/i)).toBeVisible();
+  await expect(page.getByText(/or sign up with email/i)).toBeVisible();
 });
 
 test("guest can request password reset", async ({ page }) => {

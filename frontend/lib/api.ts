@@ -78,6 +78,7 @@ export type AuthUser = {
   is_superuser: boolean;
   company_name?: string | null;
   roles?: string[];
+  permissions?: string[];
   session_role?: string | null;
   social_accounts?: Array<{
     provider: string;

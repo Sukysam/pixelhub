@@ -1208,13 +1208,10 @@ class RegistrationTests(APITestCase):
                     "email": "new@example.com",
                     "password": secret,
                     "password_confirm": secret,
-                    "full_name": "New User",
-                    "phone": "",
-                    "company_legal_name": "NewCo Ltd",
-                    "company_registration_number": "RC-123456",
-                    "business_industry": "Technology",
-                    "business_address": "1 Test Street, Lagos, NG",
-                    "certifications": ["CAC"],
+                    "company_name": "NewCo Ltd",
+                    "country_code": "+234",
+                    "phone_number": "8012345678",
+                    "country": "Nigeria",
                     "accept_terms": True,
                     "website": "",
                 },
@@ -1223,11 +1220,12 @@ class RegistrationTests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_201_CREATED)
         self.assertTrue(res.data.get("verification_sent", False))
         u = User.objects.get(username="new@example.com")
-        self.assertTrue(u.is_active)
+        self.assertFalse(u.is_active)
         self.assertTrue(u.password.startswith("bcrypt_sha256$"))
         profile = UserProfile.objects.get(user=u)
         self.assertIsNotNone(profile.terms_accepted_at)
         self.assertEqual(profile.company_legal_name, "NewCo Ltd")
+        self.assertEqual(profile.phone, "+2348012345678")
         self.assertIsNone(profile.email_verified_at)
         self.assertGreaterEqual(len(mail.outbox), 1)
         self.assertIn("verify-email?token=", (mail.outbox[-1].body or "").lower())
@@ -1260,11 +1258,10 @@ class RegistrationTests(APITestCase):
                 "email": "t@example.com",
                 "password": secret,
                 "password_confirm": secret,
-                "full_name": "T User",
-                "company_legal_name": "TermsCo Ltd",
-                "company_registration_number": "RC-654321",
-                "business_industry": "Retail",
-                "business_address": "2 Test Street, Abuja, NG",
+                "company_name": "TermsCo Ltd",
+                "country_code": "+234",
+                "phone_number": "8011111111",
+                "country": "Nigeria",
                 "accept_terms": False,
             },
             format="json",
@@ -1279,11 +1276,10 @@ class RegistrationTests(APITestCase):
                 "email": "weak@example.com",
                 "password": weak_cred,
                 "password_confirm": weak_cred,
-                "full_name": "Weak User",
-                "company_legal_name": "WeakCo Ltd",
-                "company_registration_number": "RC-000001",
-                "business_industry": "Professional Services",
-                "business_address": "3 Test Street, Kano, NG",
+                "company_name": "WeakCo Ltd",
+                "country_code": "+234",
+                "phone_number": "8022222222",
+                "country": "Nigeria",
                 "accept_terms": True,
             },
             format="json",
@@ -1298,11 +1294,10 @@ class RegistrationTests(APITestCase):
                 "email": "c@example.com",
                 "password": secret,
                 "password_confirm": secret,
-                "full_name": "Bot User",
-                "company_legal_name": "BotCo Ltd",
-                "company_registration_number": "RC-777777",
-                "business_industry": "Manufacturing",
-                "business_address": "4 Test Street, PH, NG",
+                "company_name": "BotCo Ltd",
+                "country_code": "+234",
+                "phone_number": "8033333333",
+                "country": "Nigeria",
                 "accept_terms": True,
                 "website": "https://spam.example.com",
             },
@@ -1454,12 +1449,21 @@ class ApiCoverageTests(APITestCase):
         created_secret = _test_secret()
         created = self.client.post(
             "/api/admin/users/",
-            {"username": "created_user", "password": created_secret, "email": "created_user@example.com", "is_staff": False, "is_active": True},
+            {
+                "username": "created_user",
+                "password": created_secret,
+                "email": "created_user@example.com",
+                "company_name": "Created User Co",
+                "phone": "8044444444",
+                "primary_role": "user",
+                "custom_roles": [],
+                "is_active": True,
+            },
             format="json",
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
         self.assertTrue(AuditLog.objects.filter(action="create", object_id=str(created.data["id"])).exists())
-        patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "is_staff": True}, format="json")
+        patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "primary_role": "staff"}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
         self.assertTrue(AuditLog.objects.filter(action="update", object_id=str(created.data["id"])).exists())
 
@@ -1740,13 +1744,10 @@ class AuthApiTests(APITestCase):
                 "email": "new@example.com",
                 "password": secret,
                 "password_confirm": secret,
-                "full_name": "New User",
-                "phone": None,
-                "company_legal_name": "NewCo Ltd",
-                "company_registration_number": "RC-123456",
-                "business_industry": "Technology",
-                "business_address": "1 Test Street, Lagos, NG",
-                "certifications": [],
+                "company_name": "NewCo Ltd",
+                "country_code": "+234",
+                "phone_number": "8055555555",
+                "country": "Nigeria",
                 "accept_terms": True,
                 "website": "",
             },
@@ -1761,11 +1762,10 @@ class AuthApiTests(APITestCase):
                 "email": "new@example.com",
                 "password": secret,
                 "password_confirm": secret,
-                "full_name": "New User",
-                "company_legal_name": "NewCo Ltd",
-                "company_registration_number": "RC-123456",
-                "business_industry": "Technology",
-                "business_address": "1 Test Street, Lagos, NG",
+                "company_name": "NewCo Ltd",
+                "country_code": "+234",
+                "phone_number": "8066666666",
+                "country": "Nigeria",
                 "accept_terms": True,
                 "website": "",
             },

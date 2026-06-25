@@ -1,5 +1,4 @@
 import re
-from django.conf import settings
 from rest_framework import serializers
 from .models import (
     Customer,
@@ -55,6 +54,40 @@ BUSINESS_INDUSTRY_CHOICES = [
     "Wholesale",
     "Other",
 ]
+
+NIGERIA_COUNTRY_NAME = "Nigeria"
+DEFAULT_COUNTRY_CODE = "+234"
+
+
+def validate_application_password(value: str, *, min_length: int = 6) -> str:
+    password = str(value or "")
+    if len(password) < int(min_length):
+        raise serializers.ValidationError(f"Password must be at least {int(min_length)} characters")
+    return password
+
+
+def normalize_signup_phone(country_code: str, phone_number: str) -> str:
+    cc_digits = re.sub(r"\D", "", str(country_code or ""))
+    phone_digits = re.sub(r"\D", "", str(phone_number or ""))
+    if not cc_digits:
+        raise serializers.ValidationError("Country code is required")
+    if not phone_digits:
+        raise serializers.ValidationError("Phone number is required")
+    if len(cc_digits) > 4:
+        raise serializers.ValidationError("Country code is invalid")
+
+    if cc_digits == "234":
+        if phone_digits.startswith("234"):
+            phone_digits = phone_digits[3:]
+        if phone_digits.startswith("0"):
+            phone_digits = phone_digits[1:]
+        if len(phone_digits) != 10:
+            raise serializers.ValidationError("Enter a valid Nigerian phone number")
+    else:
+        if len(phone_digits) < 7 or len(phone_digits) > 14:
+            raise serializers.ValidationError("Enter a valid phone number")
+
+    return f"+{cc_digits}{phone_digits}"
 
 
 class CustomerSerializer(serializers.ModelSerializer):
@@ -371,50 +404,39 @@ class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
     password_confirm = serializers.CharField(write_only=True)
-    full_name = serializers.CharField(max_length=255)
-    phone = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=30)
-    company_legal_name = serializers.CharField(max_length=255)
-    company_registration_number = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
-    business_industry = serializers.CharField(max_length=120)
-    business_address = serializers.CharField(max_length=2000)
-    certifications = serializers.ListField(child=serializers.CharField(max_length=120), required=False, allow_empty=True)
+    company_name = serializers.CharField(max_length=255)
+    country_code = serializers.CharField(max_length=8, default=DEFAULT_COUNTRY_CODE)
+    phone_number = serializers.CharField(max_length=30)
+    country = serializers.CharField(max_length=80, default=NIGERIA_COUNTRY_NAME)
     accept_terms = serializers.BooleanField()
     website = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate_password(self, value):
-        if len(value) < 8:
-            raise serializers.ValidationError("Password must be at least 8 characters")
-        if re.search(r"[A-Z]", value) is None:
-            raise serializers.ValidationError("Password must include an uppercase letter")
-        if re.search(r"[a-z]", value) is None:
-            raise serializers.ValidationError("Password must include a lowercase letter")
-        if re.search(r"[0-9]", value) is None:
-            raise serializers.ValidationError("Password must include a number")
-        if re.search(r"[^A-Za-z0-9]", value) is None:
-            raise serializers.ValidationError("Password must include a special character")
-        return value
+        return validate_application_password(value, min_length=6)
 
     def validate(self, attrs):
         if attrs.get("website"):
             raise serializers.ValidationError({"detail": "Invalid submission"})
-        for key in ("company_legal_name", "business_industry", "business_address"):
-            val = str(attrs.get(key) or "").strip()
-            if not val:
-                raise serializers.ValidationError({key: "This field is required"})
-            attrs[key] = val
-        if attrs["business_industry"] not in BUSINESS_INDUSTRY_CHOICES:
-            raise serializers.ValidationError({"business_industry": "Invalid business type / industry"})
-        reg = attrs.get("company_registration_number")
-        reg_clean = str(reg or "").strip()
-        attrs["company_registration_number"] = reg_clean or None
-        certs = attrs.get("certifications")
-        if certs is not None:
-            cleaned = []
-            for c in certs:
-                s = str(c or "").strip()
-                if s:
-                    cleaned.append(s)
-            attrs["certifications"] = cleaned
+        attrs["email"] = str(attrs.get("email") or "").strip().lower()
+        company_name = str(attrs.get("company_name") or "").strip()
+        if not company_name:
+            raise serializers.ValidationError({"company_name": "This field is required"})
+        attrs["company_name"] = company_name
+        country = str(attrs.get("country") or "").strip()
+        if country != NIGERIA_COUNTRY_NAME:
+            raise serializers.ValidationError({"country": "Country must be Nigeria"})
+        attrs["country"] = country
+        cc = str(attrs.get("country_code") or DEFAULT_COUNTRY_CODE).strip()
+        cc_digits = re.sub(r"\D", "", cc)
+        if not cc_digits:
+            raise serializers.ValidationError({"country_code": "Country code is required"})
+        cc = f"+{cc_digits}"
+        attrs["country_code"] = cc
+        attrs["phone_number"] = str(attrs.get("phone_number") or "").strip()
+        try:
+            attrs["phone_e164"] = normalize_signup_phone(attrs["country_code"], attrs["phone_number"])
+        except serializers.ValidationError as exc:
+            raise serializers.ValidationError({"phone_number": exc.detail[0] if isinstance(exc.detail, list) else exc.detail})
         if attrs.get("accept_terms") is not True:
             raise serializers.ValidationError({"accept_terms": "You must accept the terms"})
         if attrs.get("password") != attrs.get("password_confirm"):
@@ -437,17 +459,7 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     new_password_confirm = serializers.CharField(write_only=True)
 
     def validate_new_password(self, value):
-        if len(value) < 8:
-            raise serializers.ValidationError("Password must be at least 8 characters")
-        if re.search(r"[A-Z]", value) is None:
-            raise serializers.ValidationError("Password must include an uppercase letter")
-        if re.search(r"[a-z]", value) is None:
-            raise serializers.ValidationError("Password must include a lowercase letter")
-        if re.search(r"[0-9]", value) is None:
-            raise serializers.ValidationError("Password must include a number")
-        if re.search(r"[^A-Za-z0-9]", value) is None:
-            raise serializers.ValidationError("Password must include a special character")
-        return value
+        return validate_application_password(value, min_length=6)
 
     def validate(self, attrs):
         if attrs.get("new_password") != attrs.get("new_password_confirm"):

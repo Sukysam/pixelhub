@@ -55,128 +55,25 @@ function clamp(n: number, min: number, max: number) {
 }
 
 type AuthMode = "login" | "register";
-
-function isValidEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
-}
-
-function passwordIssues(value: string): string[] {
-  const v = value || "";
-  const issues: string[] = [];
-  if (v.length < 8) issues.push("At least 8 characters");
-  if (!/[A-Z]/.test(v)) issues.push("Uppercase letter");
-  if (!/[a-z]/.test(v)) issues.push("Lowercase letter");
-  if (!/[0-9]/.test(v)) issues.push("Number");
-  if (!/[^A-Za-z0-9]/.test(v)) issues.push("Special character");
-  return issues;
-}
-
-type LoginType = "user" | "staff" | "admin";
-
 function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthed?: () => void }) {
   const router = useRouter();
-  const [mode, setMode] = useState<AuthMode>(defaultMode);
-
   const [oauthLoading, setOauthLoading] = useState<"google" | "facebook" | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [oauthRemember, setOauthRemember] = useState(true);
-
   const [loginIdentifier, setLoginIdentifier] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [loginType, setLoginType] = useState<LoginType>("user");
-  const [adminMfaCode, setAdminMfaCode] = useState("");
-  const [adminMfaSetupInfo, setAdminMfaSetupInfo] = useState<{ secret: string; provisioning_uri: string } | null>(null);
-  const [adminMfaSetupLoading, setAdminMfaSetupLoading] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
 
-  const [fullName, setFullName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [companyLegalName, setCompanyLegalName] = useState("");
-  const [companyRegistrationNumber, setCompanyRegistrationNumber] = useState("");
-  const [businessIndustry, setBusinessIndustry] = useState("");
-  const [businessAddress, setBusinessAddress] = useState("");
-  const [certifications, setCertifications] = useState("");
-  const [password, setPassword] = useState("");
-  const [passwordConfirm, setPasswordConfirm] = useState("");
-  const [acceptTerms, setAcceptTerms] = useState(false);
-  const [website, setWebsite] = useState("");
-  const [registerSubmitting, setRegisterSubmitting] = useState(false);
-  const [registerResending, setRegisterResending] = useState(false);
-  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
-  const [registerError, setRegisterError] = useState<string | null>(null);
-  const [registeredEmail, setRegisteredEmail] = useState<string | null>(null);
-  const [needsResend, setNeedsResend] = useState(false);
-
-  const emailOk = useMemo(() => isValidEmail(email), [email]);
-  const pwIssues = useMemo(() => passwordIssues(password), [password]);
-  const pwOk = pwIssues.length === 0;
-  const pwMatch = password.length > 0 && password === passwordConfirm;
-
-  const canRegister = useMemo(() => {
-    return (
-      fullName.trim().length > 0 &&
-      emailOk &&
-      companyLegalName.trim().length > 0 &&
-      businessIndustry.trim().length > 0 &&
-      businessAddress.trim().length > 0 &&
-      pwOk &&
-      pwMatch &&
-      acceptTerms &&
-      !registerSubmitting
-    );
-  }, [
-    acceptTerms,
-    businessAddress,
-    businessIndustry,
-    companyLegalName,
-    emailOk,
-    fullName,
-    pwMatch,
-    pwOk,
-    registerSubmitting,
-  ]);
+  useEffect(() => {
+    if (defaultMode === "register") {
+      router.replace("/register");
+    }
+  }, [defaultMode, router]);
 
   const onLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoginError(null);
-    try {
-      setLoginLoading(true);
-      const identifierClean = loginIdentifier.trim();
-      if (!identifierClean) {
-        setLoginError("Email or username is required");
-        return;
-      }
-      if (!loginPassword) {
-        setLoginError("Password is required");
-        return;
-      }
-      const endpoint =
-        loginType === "admin" ? (adminMfaSetupInfo ? "/auth/admin/mfa/confirm/" : "/auth/admin/token/") : loginType === "staff" ? "/auth/staff/token/" : "/auth/token/";
-      const payload: Record<string, unknown> = { username: identifierClean, password: loginPassword, remember: rememberMe };
-      if (loginType === "admin") {
-        const code = adminMfaCode.trim();
-        if (!code) {
-          setLoginError("MFA code is required for admin login");
-          return;
-        }
-        payload.code = code;
-      }
-      await apiRequest<{ token: string }>(endpoint, { method: "POST", body: JSON.stringify(payload) });
-      const me = await apiRequest<AuthUser>("/auth/me/");
-      setAuthUser(me);
-      onAuthed?.();
-      router.replace("/");
-    } catch (e: unknown) {
-      setLoginError(getErrorMessage(e, "Login failed"));
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const onAdminMfaSetup = async () => {
     setLoginError(null);
     const identifierClean = loginIdentifier.trim();
     if (!identifierClean) {
@@ -188,124 +85,19 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
       return;
     }
     try {
-      setAdminMfaSetupLoading(true);
-      const res = await apiRequest<{ secret: string; provisioning_uri: string }>("/auth/admin/mfa/setup/", {
+      setLoginLoading(true);
+      await apiRequest<{ token: string }>("/auth/token/", {
         method: "POST",
-        body: JSON.stringify({ username: identifierClean, password: loginPassword, force_reset: true }),
+        body: JSON.stringify({ username: identifierClean, password: loginPassword, remember: rememberMe }),
       });
-      setAdminMfaSetupInfo(res);
+      const me = await apiRequest<AuthUser>("/auth/me/");
+      setAuthUser(me);
+      onAuthed?.();
+      router.replace("/");
     } catch (e: unknown) {
-      setLoginError(getErrorMessage(e, "Unable to start MFA setup"));
+      setLoginError(getErrorMessage(e, "Login failed"));
     } finally {
-      setAdminMfaSetupLoading(false);
-    }
-  };
-
-  const onRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRegisterError(null);
-    setRegisterSuccess(null);
-    setRegisteredEmail(null);
-    setNeedsResend(false);
-    setRegisterSubmitting(true);
-    const emailClean = email.trim().toLowerCase();
-    const fullNameClean = fullName.trim();
-    if (!emailClean) {
-      setRegisterError("Email is required");
-      setRegisterSubmitting(false);
-      return;
-    }
-    if (!fullNameClean) {
-      setRegisterError("Full name is required");
-      setRegisterSubmitting(false);
-      return;
-    }
-    const companyLegalNameClean = companyLegalName.trim();
-    const industryClean = businessIndustry.trim();
-    const addressClean = businessAddress.trim();
-    if (!companyLegalNameClean) {
-      setRegisterError("Company legal name is required");
-      setRegisterSubmitting(false);
-      return;
-    }
-    if (!industryClean) {
-      setRegisterError("Business type / industry is required");
-      setRegisterSubmitting(false);
-      return;
-    }
-    if (!addressClean) {
-      setRegisterError("Business address is required");
-      setRegisterSubmitting(false);
-      return;
-    }
-    const companyRegClean = companyRegistrationNumber.trim();
-
-    apiRequest<{ registered: boolean; verification_sent: boolean; detail?: string }>("/auth/register/", {
-      method: "POST",
-      body: JSON.stringify({
-        email: emailClean,
-        password,
-        password_confirm: passwordConfirm,
-        full_name: fullNameClean,
-        phone: phone.trim() ? phone.trim() : null,
-        company_legal_name: companyLegalNameClean,
-        company_registration_number: companyRegClean ? companyRegClean : null,
-        business_industry: industryClean,
-        business_address: addressClean,
-        certifications: certifications
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-        accept_terms: acceptTerms,
-        website,
-      }),
-    })
-      .then(async (res) => {
-        setRegisteredEmail(emailClean);
-        return apiRequest<{ token: string }>("/auth/token/", {
-          method: "POST",
-          body: JSON.stringify({ username: emailClean, password, remember: true }),
-        })
-          .then(() => apiRequest<AuthUser>("/auth/me/"))
-          .then((me) => {
-            setAuthUser(me);
-            onAuthed?.();
-            router.replace("/");
-          })
-          .catch(() => {
-            if (res?.verification_sent) {
-              setRegisterSuccess("Account created. Please check your email to verify your account.");
-            } else {
-              setRegisterSuccess(res?.detail || "Account created, but verification email was not delivered. Please resend verification.");
-              setNeedsResend(true);
-            }
-            setPassword("");
-            setPasswordConfirm("");
-            return undefined;
-          });
-      })
-      .catch((err: unknown) => {
-        setRegisterError(getErrorMessage(err, "Registration failed"));
-        return undefined;
-      })
-      .finally(() => {
-        setRegisterSubmitting(false);
-      });
-  };
-
-  const onResendVerification = async () => {
-    if (!registeredEmail) return;
-    setRegisterError(null);
-    setRegisterSuccess(null);
-    try {
-      setRegisterResending(true);
-      await apiRequest("/auth/resend-verification/", { method: "POST", body: JSON.stringify({ email: registeredEmail }) });
-      setRegisterSuccess("Verification email sent. Please check your inbox and spam folder.");
-      setNeedsResend(false);
-    } catch (e: unknown) {
-      setRegisterError(getErrorMessage(e, "Unable to resend verification email"));
-    } finally {
-      setRegisterResending(false);
+      setLoginLoading(false);
     }
   };
 
@@ -316,19 +108,19 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
       return;
     }
     setOauthLoading(provider);
-    window.location.href = `${API_BASE_URL}/auth/${provider}/start/?remember=${oauthRemember ? "1" : "0"}`;
+    window.location.assign(`${API_BASE_URL}/auth/${provider}/start/?remember=${oauthRemember ? "1" : "0"}`);
   };
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
-      <div className="w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader>
             <CardTitle>Welcome to PIXELHUB</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm text-gray-700">
             <div>Manage invoices, receipts, inventory, and reports in one place.</div>
-            <div className="space-y-2">
+            <div className="space-y-3">
               {oauthError ? (
                 <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2" role="alert" aria-live="polite">
                   {oauthError}
@@ -338,350 +130,86 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
                 <input type="checkbox" checked={oauthRemember} onChange={(e) => setOauthRemember(e.target.checked)} className="h-4 w-4" />
                 Remember me on this device
               </label>
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                onClick={() => startOAuth("google")}
-                disabled={oauthLoading != null}
-              >
+              <Button type="button" variant="outline" className="w-full" onClick={() => startOAuth("google")} disabled={oauthLoading != null}>
                 {oauthLoading === "google" ? "Redirecting…" : "Continue with Google"}
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                onClick={() => startOAuth("facebook")}
-                disabled={oauthLoading != null}
-              >
+              <Button type="button" variant="outline" className="w-full" onClick={() => startOAuth("facebook")} disabled={oauthLoading != null}>
                 {oauthLoading === "facebook" ? "Redirecting…" : "Continue with Facebook"}
               </Button>
-              <div className="text-xs text-gray-500">Social sign-in requires provider configuration (client ID/secret) on the backend.</div>
+              <div className="text-xs text-gray-500">Social sign-in requires provider configuration on the backend.</div>
             </div>
-            <div className="text-xs text-gray-500">
-              By continuing, you agree to the application terms and privacy policy.
+            <div className="rounded-md border border-gray-200 bg-gray-50 p-4 space-y-2">
+              <div className="font-medium text-gray-900">Need a different portal?</div>
+              <div className="text-sm text-gray-600">Administrative sign-in is separated from the standard user login.</div>
+              <div className="flex flex-wrap gap-3">
+                <Link href="/staff-login" prefetch={false} className="text-sm text-blue-700 underline">
+                  Staff sign in
+                </Link>
+                <Link href="/admin-login" prefetch={false} className="text-sm text-blue-700 underline">
+                  Admin sign in
+                </Link>
+              </div>
             </div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between gap-3" role="tablist" aria-label="Authentication">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "login"}
-                className={`px-3 py-2 rounded-md text-sm font-medium ${mode === "login" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-800"}`}
-                onClick={() => setMode("login")}
-              >
-                Login
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "register"}
-                className={`px-3 py-2 rounded-md text-sm font-medium ${mode === "register" ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-800"}`}
-                onClick={() => setMode("register")}
+            <CardTitle>Sign in</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {loginError ? (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2" role="alert" aria-live="polite">
+                {loginError}
+              </div>
+            ) : null}
+            <form className="space-y-4" onSubmit={onLogin} noValidate>
+              <div>
+                <Label htmlFor="login_identifier">Email or username</Label>
+                <Input
+                  id="login_identifier"
+                  value={loginIdentifier}
+                  onChange={(e) => setLoginIdentifier(e.target.value)}
+                  autoComplete="username"
+                  required
+                />
+              </div>
+              <div>
+                <Label htmlFor="login_password">Password</Label>
+                <Input
+                  id="login_password"
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} className="h-4 w-4" />
+                  Remember me
+                </label>
+                <Link href="/forgot-password" prefetch={false} className="text-sm text-blue-700 underline">
+                  Forgot password?
+                </Link>
+              </div>
+              <Button type="submit" className="w-full" disabled={loginLoading}>
+                {loginLoading ? "Signing in…" : "Login"}
+              </Button>
+            </form>
+
+            <div className="rounded-md border border-gray-200 bg-gray-50 p-4 space-y-3">
+              <div className="text-sm font-medium text-gray-900">New to PIXELHUB?</div>
+              <div className="text-sm text-gray-600">Create a business account with Nigeria-focused onboarding and email verification.</div>
+              <Link
+                href="/register"
+                prefetch={false}
+                className="inline-flex w-full items-center justify-center rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
               >
                 Create account
-              </button>
+              </Link>
             </div>
-          </CardHeader>
-
-          <CardContent>
-            {mode === "login" ? (
-              <div role="tabpanel" aria-label="Login form" className="space-y-4">
-                {loginError ? (
-                  <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2" role="alert" aria-live="polite">
-                    {loginError}
-                  </div>
-                ) : null}
-                <form className="space-y-4" onSubmit={onLogin} noValidate>
-                  <div>
-                    <Label htmlFor="login_identifier">Email or username</Label>
-                    <Input
-                      id="login_identifier"
-                      value={loginIdentifier}
-                      onChange={(e) => setLoginIdentifier(e.target.value)}
-                      autoComplete="username"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="login_password">Password</Label>
-                    <Input
-                      id="login_password"
-                      type="password"
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      autoComplete="current-password"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="login_type">Login as</Label>
-                    <select
-                      id="login_type"
-                      className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm"
-                      value={loginType}
-                      onChange={(e) => {
-                        const next = e.target.value as LoginType;
-                        setLoginType(next);
-                        setAdminMfaCode("");
-                        setAdminMfaSetupInfo(null);
-                      }}
-                    >
-                      <option value="user">User</option>
-                      <option value="staff">Staff</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                  </div>
-                  {loginType === "admin" ? (
-                    <div className="space-y-3">
-                      <div>
-                        <Label htmlFor="admin_mfa_code">MFA code</Label>
-                        <Input
-                          id="admin_mfa_code"
-                          inputMode="numeric"
-                          value={adminMfaCode}
-                          onChange={(e) => setAdminMfaCode(e.target.value)}
-                          placeholder="6-digit code"
-                        />
-                      </div>
-                      {!adminMfaSetupInfo ? (
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs text-gray-600">No MFA yet? Set it up in an authenticator app.</div>
-                          <Button type="button" variant="outline" onClick={onAdminMfaSetup} disabled={adminMfaSetupLoading}>
-                            {adminMfaSetupLoading ? "Starting…" : "Set up MFA"}
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
-                          <div className="font-medium text-gray-900">MFA setup</div>
-                          <div className="mt-1 break-all">Secret: {adminMfaSetupInfo.secret}</div>
-                          <div className="mt-1 break-all">URI: {adminMfaSetupInfo.provisioning_uri}</div>
-                          <div className="mt-1">Enter the code from your authenticator and click Login.</div>
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="checkbox"
-                        checked={rememberMe}
-                        onChange={(e) => setRememberMe(e.target.checked)}
-                        className="h-4 w-4"
-                      />
-                      Remember me
-                    </label>
-                    <Link href="/forgot-password" prefetch={false} className="text-sm text-blue-700 underline">
-                      Forgot password?
-                    </Link>
-                  </div>
-                  <div className="flex justify-end">
-                    <Button type="submit" disabled={loginLoading}>
-                      {loginLoading ? "Signing in…" : "Login"}
-                    </Button>
-                  </div>
-                </form>
-              </div>
-            ) : (
-              <div role="tabpanel" aria-label="Registration form" className="space-y-4">
-                {registerSuccess ? (
-                  <div className="text-sm text-green-800 bg-green-50 border border-green-200 rounded-md px-3 py-2">{registerSuccess}</div>
-                ) : null}
-                {registerError ? (
-                  <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2" role="alert" aria-live="polite">
-                    {registerError}
-                  </div>
-                ) : null}
-                {needsResend && registeredEmail ? (
-                  <div className="flex items-center justify-between gap-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
-                    <div className="text-sm text-gray-700">
-                      Didn’t receive the email for <span className="font-medium">{registeredEmail}</span>?
-                    </div>
-                    <Button type="button" onClick={onResendVerification} disabled={registerResending}>
-                      {registerResending ? "Sending…" : "Resend"}
-                    </Button>
-                  </div>
-                ) : null}
-                <form className="space-y-4" onSubmit={onRegister} noValidate>
-                  <div>
-                    <Label htmlFor="full_name">Full name</Label>
-                    <Input id="full_name" value={fullName} onChange={(e) => setFullName(e.target.value)} autoComplete="name" required />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="email">Email</Label>
-                    <Input
-                      id="email"
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      autoComplete="email"
-                      required
-                      aria-invalid={email.length > 0 && !emailOk}
-                    />
-                    {email.length > 0 && !emailOk ? <div className="text-xs text-red-700 mt-1">Enter a valid email address.</div> : null}
-                  </div>
-
-                  <div>
-                    <Label htmlFor="phone">Phone (optional)</Label>
-                    <Input id="phone" type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} autoComplete="tel" />
-                  </div>
-
-                  <div className="pt-2 border-t">
-                    <div className="text-sm font-semibold text-gray-900">Company information</div>
-                    <div className="text-xs text-gray-600 mt-1">Required for business accounts and invoice branding.</div>
-                  </div>
-
-                  <div>
-                    <Label htmlFor="company_legal_name">Company legal name</Label>
-                    <Input
-                      id="company_legal_name"
-                      value={companyLegalName}
-                      onChange={(e) => setCompanyLegalName(e.target.value)}
-                      autoComplete="organization"
-                      required
-                    />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="company_registration_number">Registration number (optional)</Label>
-                    <Input
-                      id="company_registration_number"
-                      value={companyRegistrationNumber}
-                      onChange={(e) => setCompanyRegistrationNumber(e.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="business_industry">Business type / industry</Label>
-                    <Select
-                      id="business_industry"
-                      value={businessIndustry}
-                      onChange={(e) => setBusinessIndustry(e.target.value)}
-                      autoComplete="off"
-                      required
-                    >
-                      <option value="" disabled>
-                        Select an industry…
-                      </option>
-                      <option value="Technology">Technology</option>
-                      <option value="Telecommunications">Telecommunications</option>
-                      <option value="Healthcare">Healthcare</option>
-                      <option value="Manufacturing">Manufacturing</option>
-                      <option value="Retail">Retail</option>
-                      <option value="Finance">Finance</option>
-                      <option value="Education">Education</option>
-                      <option value="Hospitality">Hospitality</option>
-                      <option value="Construction">Construction</option>
-                      <option value="Agriculture">Agriculture</option>
-                      <option value="Transportation">Transportation</option>
-                      <option value="Real Estate">Real Estate</option>
-                      <option value="Professional Services">Professional Services</option>
-                      <option value="Entertainment">Entertainment</option>
-                      <option value="Energy">Energy</option>
-                      <option value="Information Technology">Information Technology</option>
-                      <option value="Logistics">Logistics</option>
-                      <option value="Insurance">Insurance</option>
-                      <option value="Legal Services">Legal Services</option>
-                      <option value="Food & Beverage">Food & Beverage</option>
-                      <option value="Travel & Tourism">Travel & Tourism</option>
-                      <option value="Media & Publishing">Media & Publishing</option>
-                      <option value="Automotive">Automotive</option>
-                      <option value="Wholesale">Wholesale</option>
-                      <option value="Consumer Goods">Consumer Goods</option>
-                      <option value="Engineering">Engineering</option>
-                      <option value="Environmental Services">Environmental Services</option>
-                      <option value="Government">Government</option>
-                      <option value="Nonprofit">Nonprofit</option>
-                      <option value="Mining">Mining</option>
-                      <option value="Utilities">Utilities</option>
-                      <option value="Security Services">Security Services</option>
-                      <option value="Fashion & Apparel">Fashion & Apparel</option>
-                      <option value="Other">Other</option>
-                    </Select>
-                  </div>
-
-                  <div>
-                    <Label htmlFor="business_address">Business address</Label>
-                    <Input
-                      id="business_address"
-                      value={businessAddress}
-                      onChange={(e) => setBusinessAddress(e.target.value)}
-                      autoComplete="street-address"
-                      required
-                    />
-                  </div>
-
-                  <div>
-                    <Label htmlFor="certifications">Certifications (optional)</Label>
-                    <Input
-                      id="certifications"
-                      value={certifications}
-                      onChange={(e) => setCertifications(e.target.value)}
-                      placeholder="e.g. CAC, ISO 9001"
-                      autoComplete="off"
-                    />
-                    <div className="text-xs text-gray-500 mt-1">Separate multiple entries with commas.</div>
-                  </div>
-
-                  <div>
-                    <Label htmlFor="password">Password</Label>
-                    <Input
-                      id="password"
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      autoComplete="new-password"
-                      required
-                      aria-invalid={password.length > 0 && !pwOk}
-                    />
-                    {password.length > 0 && !pwOk ? (
-                      <div className="text-xs text-red-700 mt-1">Password must include: {pwIssues.join(", ")}.</div>
-                    ) : (
-                      <div className="text-xs text-gray-500 mt-1">Min 8 chars, uppercase, lowercase, number, special character.</div>
-                    )}
-                  </div>
-
-                  <div>
-                    <Label htmlFor="password_confirm">Confirm password</Label>
-                    <Input
-                      id="password_confirm"
-                      type="password"
-                      value={passwordConfirm}
-                      onChange={(e) => setPasswordConfirm(e.target.value)}
-                      autoComplete="new-password"
-                      required
-                      aria-invalid={passwordConfirm.length > 0 && !pwMatch}
-                    />
-                    {passwordConfirm.length > 0 && !pwMatch ? <div className="text-xs text-red-700 mt-1">Passwords do not match.</div> : null}
-                  </div>
-
-                  <input type="text" className="hidden" value={website} onChange={(e) => setWebsite(e.target.value)} aria-hidden="true" tabIndex={-1} />
-
-                  <label className="flex items-start gap-2 text-sm text-gray-700">
-                    <input
-                      type="checkbox"
-                      checked={acceptTerms}
-                      onChange={(e) => setAcceptTerms(e.target.checked)}
-                      className="h-4 w-4 mt-0.5"
-                      required
-                    />
-                    <span>I agree to the terms.</span>
-                  </label>
-
-                  <div className="flex justify-end">
-                    <Button type="submit" disabled={!canRegister}>
-                      {registerSubmitting ? "Creating…" : "Create account"}
-                    </Button>
-                  </div>
-                </form>
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>

@@ -98,22 +98,29 @@ function safeSvg(): string {
 async function registerAndReachDashboard(page: any) {
   const email = `e2e_settings_${Date.now()}@example.com`;
   const signupSecret = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
-  await page.goto("/?mode=register");
-  await page.getByRole("tab", { name: "Create account" }).click();
-
-  await page.getByLabel("Full name").fill("E2E User");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Company legal name").fill("E2E Settings Co");
-  await page.getByLabel(/Registration number/i).fill("RC-123456");
-  await page.getByLabel("Business type / industry").selectOption("Technology");
-  await page.getByLabel("Business address").fill("1 Test Street, Lagos, NG");
-  await page.getByLabel("Certifications (optional)").fill("CAC");
-  await page.getByLabel("Password", { exact: true }).fill(signupSecret);
-  await page.getByLabel("Confirm password").fill(signupSecret);
-  await expect(page.getByLabel("Captcha")).toHaveCount(0);
-
-  await page.getByRole("checkbox", { name: "I agree to the terms." }).check();
-  await page.getByRole("button", { name: "Create account" }).click();
+  const phone = `8${String(Date.now()).slice(-9)}`;
+  const token = await adminToken(page.request);
+  const createRes = await page.request.post(`${API_BASE_URL}/admin/users/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: {
+      username: email,
+      email,
+      password: signupSecret,
+      company_name: "E2E Settings Co",
+      phone,
+      is_active: true,
+      primary_role: "user",
+      custom_roles: [],
+    },
+  });
+  expect(createRes.ok()).toBeTruthy();
+  const loginRes = await page.request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: email, password: signupSecret, remember: true },
+  });
+  expect(loginRes.ok()).toBeTruthy();
+  const login = (await loginRes.json()) as { token: string };
+  await setSession(page, page.request, login.token);
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
 }
 

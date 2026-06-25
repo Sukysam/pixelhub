@@ -1,6 +1,10 @@
 # Auth and RBAC Implementation Notes
 
 ## Scope
+- The public "Login as" selector was removed from the main authentication screen and replaced with separated standard, staff, and admin sign-in entry points.
+- The create-account experience was rebuilt around the requested email, password, company, and Nigeria-focused phone fields with inline validation and legal links.
+- The registration backend contract was simplified to the new field set and now keeps email/password onboarding aligned with mandatory verification before first login.
+- A dedicated admin user-management workspace was added for account creation, profile edits, password resets, role assignment, custom role definition, and audit visibility.
 - Social authentication was aligned around Google and Facebook for end-user sign-in.
 - Account linking was added so one user profile can own both Google and Facebook identities.
 - Admin and user responsibilities were separated more strictly in both API behavior and frontend navigation.
@@ -13,15 +17,29 @@
 - Error handling around provider failures was fragmented, so failed exchanges and missing identity fields were not surfaced consistently.
 
 ### Role separation and permission risks
+- The public authentication screen exposed a "Login as" role switcher, which mixed user, staff, and admin entry points in one place and blurred the line between standard and privileged access flows.
 - User-facing and admin-facing flows shared too much surface area, which increased the chance of staff or standard users seeing controls that did not match their actual privileges.
 - Admin user-management actions needed clearer authorization boundaries and auditable write tracking.
 - Privileged accounts needed to be prevented from entering the standard user social-login flow.
+
+### Registration mismatch
+- The previous registration form collected a wider business onboarding dataset than the requested create-account journey and did not match the required Nigeria-first phone/country experience.
+- Registration created active accounts immediately, which conflicted with the intended email-verification activation workflow.
+- The UI and automated tests assumed successful post-registration login instead of a verify-before-login flow.
 
 ### Validation and environment drift
 - Local verification initially failed because declared backend dependencies (`openpyxl`, `whitenoise`) were missing from the virtual environment even though they were already listed in `requirements.txt`.
 - The new `SocialAuthConnection` schema also required the pending migration to be applied before browser-level testing.
 
 ## Backend Changes
+- Updated `RegisterSerializer` and `/api/auth/register/` to accept `company_name`, `country_code`, `phone_number`, `country`, and `accept_terms`.
+- Added Nigerian phone normalization and duplicate phone checks before account creation.
+- Changed email/password self-registration to create inactive accounts until `/api/auth/verify-email/` marks them active.
+- Seeded `viewer`, `editor`, and `manager` RBAC roles in `core.0021_seed_management_roles`.
+- Expanded `/api/auth/me/` to include permission codes alongside roles and session role.
+- Added `/api/admin/roles/` for reading and maintaining reusable role definitions.
+- Added `/api/admin/audit-logs/` for recent audit and login-activity visibility in the admin workspace.
+- Expanded `/api/admin/users/` to support primary role assignment, custom roles, profile fields, activation changes, and password resets.
 - Added `SocialAuthConnection` with uniqueness constraints for `provider + provider_user_id` and `user + provider`.
 - Added migration `core.0020_socialauthconnection`.
 - Extended `/api/auth/me/` to include `session_role` and linked social account metadata.
@@ -33,6 +51,11 @@
 - Added audit/security events for social linking and admin create/update actions.
 
 ## Frontend Changes
+- Removed the main landing-page role selector and separated privileged sign-in into `/staff-login` and `/admin-login`.
+- Replaced the redirect-only `/register` route with a full create-account page that matches the requested field order, validation behavior, and Terms/Privacy links.
+- Added public `/terms` and `/privacy` pages for the linked legal footer content.
+- Added a dedicated `/admin/users` workspace for admin-only account management, custom role editing, and audit log review.
+- Updated Admin Settings to route advanced user management to the dedicated workspace.
 - Replaced the public GitHub sign-in button with Facebook so the landing page matches the supported end-user providers.
 - Added richer auth callback handling for provider-specific errors and successful linking redirects.
 - Added a `Connected Accounts` section in Settings with provider state, connect/reconnect actions, and success messaging.
@@ -40,12 +63,14 @@
 
 ## Testing and Validation
 ### Backend
+- `./venv/bin/python manage.py test core.tests.RegistrationTests core.tests.AuthApiTests.test_register_and_duplicate_email core.tests.ApiCoverageTests.test_geo_and_audit_and_admin_users --keepdb`
 - `./venv/bin/python manage.py test core.tests.OAuthRedirectTests core.tests.AuthApiTests --keepdb`
 - `./venv/bin/python manage.py test core.tests.SettingsTests core.tests.ApiCoverageTests.test_geo_and_audit_and_admin_users core.tests.ApiCoverageTests.test_currency_and_exchange_rate_crud --keepdb`
 - `./venv/bin/python manage.py test core.tests.AuthApiTests.test_google_callback_links_social_account_to_existing_profile core.tests.AuthApiTests.test_google_callback_blocks_privileged_account_from_social_sign_in --keepdb`
 
 ### Frontend
 - `npm run lint`
+- `npm run build`
 - `npx playwright test tests/auth.spec.ts --project=chromium --project=firefox --project=webkit`
 - `npx playwright test tests/settings.spec.ts --project=chromium -g "user can update invoice footer in settings|user can select NGN currency in settings"`
 
@@ -53,6 +78,10 @@
 - `./venv/bin/python manage.py migrate`
 
 ## Verification Results
+- The public landing page no longer exposes a combined role-switching login control.
+- Self-registration now requires email verification before the new account can authenticate with the standard login flow.
+- The new `/register` route builds successfully and validates the requested field order, password indicator, phone checks, and legal links.
+- Admins now have a dedicated `/admin/users` workspace for user creation, profile edits, password resets, custom roles, and audit visibility.
 - Google and Facebook entry points now return deterministic redirect/error states.
 - Linked-account data is exposed to the authenticated user profile and Settings screen.
 - Google linking to an existing profile is covered by an automated backend regression test.
