@@ -11,6 +11,11 @@
 - **Date / Number formats**: controls how dates and numbers are displayed in templates and previews.
 - **Notifications**: simple toggles stored in your profile.
 
+## Connected Accounts
+- Open **Settings** and use **Connected Accounts** to link Google or Facebook to your existing profile.
+- Linked providers can be used to sign back in to the same account without creating duplicates.
+- If the provider email does not match your existing profile email, the link attempt is rejected for safety.
+
 ## Invoice Template
 Customize your invoices:
 - Logo URL

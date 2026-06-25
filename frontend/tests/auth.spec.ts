@@ -19,6 +19,11 @@ test("guest can register an account on desktop without captcha", async ({ page }
   const email = `e2e_${Date.now()}@example.com`;
   const signupSecret = `pw_${Date.now()}A!`;
 
+  await page.goto("/?mode=login");
+  await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue with Facebook" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue with GitHub" })).toHaveCount(0);
+
   await fillRegistrationForm(page, email, signupSecret);
   await expect(page.getByLabel("Captcha")).toHaveCount(0);
 

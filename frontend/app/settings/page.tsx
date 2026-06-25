@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,6 +51,17 @@ type EffectiveSettingsResponse = {
   user: UserSettings | null;
 };
 
+type SocialConnection = {
+  provider: string;
+  label: string;
+  connected: boolean;
+  display_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  linked_at: string | null;
+  last_login_at: string | null;
+};
+
 function localeFor(language: string, country: string | null) {
   const lang = (language || "en").toLowerCase();
   const cc = (country || "").toUpperCase();
@@ -59,24 +70,30 @@ function localeFor(language: string, country: string | null) {
 }
 
 export default function SettingsPage() {
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
+  const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
 
   const [form, setForm] = useState<UserSettings | null>(null);
   const [globalAppearance, setGlobalAppearance] = useState<Record<string, unknown>>({});
 
   const load = useCallback(async () => {
     setError(null);
+    setSuccess(null);
     setLoading(true);
     try {
-      const [effective, currencyList] = await Promise.all([
+      const [effective, currencyList, social] = await Promise.all([
         apiRequest<EffectiveSettingsResponse>("/settings/effective/"),
         apiRequest<Currency[]>("/currencies/"),
+        apiRequest<{ results: SocialConnection[] }>("/auth/social/connections/"),
       ]);
       setCurrencies(currencyList);
+      setSocialConnections(social.results);
       setGlobalAppearance(effective.effective.templates.global_appearance || {});
       if (!effective.user) {
         setForm(null);
@@ -93,6 +110,13 @@ export default function SettingsPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const linkedProvider = (searchParams.get("socialLinked") || "").trim();
+    if (!linkedProvider) return;
+    const label = linkedProvider.charAt(0).toUpperCase() + linkedProvider.slice(1);
+    setSuccess(`${label} account linked successfully.`);
+  }, [searchParams]);
 
   const currencyOptions = useMemo(() => currencies.slice().sort((a, b) => a.code.localeCompare(b.code)), [currencies]);
 
@@ -151,6 +175,7 @@ export default function SettingsPage() {
   const onSave = async () => {
     if (!form) return;
     setError(null);
+    setSuccess(null);
     setSaving(true);
     try {
       await apiRequest<UserSettings>("/settings/me/", {
@@ -168,11 +193,18 @@ export default function SettingsPage() {
       });
       setConfirmOpen(false);
       await load();
+      setSuccess("Settings updated.");
     } catch (e: unknown) {
       setError(getErrorMessage(e, "Failed to save settings"));
     } finally {
       setSaving(false);
     }
+  };
+
+  const startSocialLink = (provider: "google" | "facebook") => {
+    setError(null);
+    setSuccess(null);
+    window.location.href = `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api"}/auth/${provider}/start/?intent=link&remember=1`;
   };
 
   return (
@@ -193,6 +225,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {success ? <div className="text-sm text-green-800 bg-green-50 border border-green-200 rounded-md px-3 py-2">{success}</div> : null}
         {error ? <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div> : null}
 
         {loading ? (
@@ -202,6 +235,34 @@ export default function SettingsPage() {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Connected Accounts</CardTitle>
+                  <CardDescription>Link Google or Facebook so you can sign in with either provider on the same profile.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {socialConnections.map((connection) => (
+                    <div key={connection.provider} className="flex items-center justify-between gap-4 rounded-md border border-gray-200 px-4 py-3">
+                      <div>
+                        <div className="font-medium text-gray-900">{connection.label}</div>
+                        <div className="text-sm text-gray-600">
+                          {connection.connected
+                            ? connection.email || connection.display_name || "Connected"
+                            : "Not connected"}
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant={connection.connected ? "outline" : "default"}
+                        onClick={() => startSocialLink(connection.provider as "google" | "facebook")}
+                      >
+                        {connection.connected ? "Reconnect" : "Connect"}
+                      </Button>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle>Preferences</CardTitle>

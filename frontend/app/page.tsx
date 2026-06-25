@@ -77,7 +77,7 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
   const router = useRouter();
   const [mode, setMode] = useState<AuthMode>(defaultMode);
 
-  const [oauthLoading, setOauthLoading] = useState<"google" | "github" | null>(null);
+  const [oauthLoading, setOauthLoading] = useState<"google" | "facebook" | null>(null);
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [oauthRemember, setOauthRemember] = useState(true);
 
@@ -309,17 +309,14 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
     }
   };
 
-  const startOAuth = (provider: "google" | "github") => {
+  const startOAuth = (provider: "google" | "facebook") => {
     setOauthError(null);
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       setOauthError("You appear to be offline.");
       return;
     }
-    if (typeof window !== "undefined") {
-      window.sessionStorage.setItem("oauth_remember", oauthRemember ? "1" : "0");
-    }
     setOauthLoading(provider);
-    window.location.href = `${API_BASE_URL}/auth/${provider}/start/`;
+    window.location.href = `${API_BASE_URL}/auth/${provider}/start/?remember=${oauthRemember ? "1" : "0"}`;
   };
 
   return (
@@ -354,10 +351,10 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
                 type="button"
                 variant="outline"
                 className="w-full"
-                onClick={() => startOAuth("github")}
+                onClick={() => startOAuth("facebook")}
                 disabled={oauthLoading != null}
               >
-                {oauthLoading === "github" ? "Redirecting…" : "Continue with GitHub"}
+                {oauthLoading === "facebook" ? "Redirecting…" : "Continue with Facebook"}
               </Button>
               <div className="text-xs text-gray-500">Social sign-in requires provider configuration (client ID/secret) on the backend.</div>
             </div>

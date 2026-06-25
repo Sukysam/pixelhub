@@ -78,6 +78,16 @@ export type AuthUser = {
   is_superuser: boolean;
   company_name?: string | null;
   roles?: string[];
+  session_role?: string | null;
+  social_accounts?: Array<{
+    provider: string;
+    label: string;
+    email?: string | null;
+    display_name?: string | null;
+    avatar_url?: string | null;
+    created_at: string;
+    last_login_at: string;
+  }>;
 };
 
 export function getAuthUser(): AuthUser | null {

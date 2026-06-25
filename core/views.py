@@ -14,8 +14,9 @@ import hmac
 import time
 import json
 import urllib.parse
+import urllib.error
 import urllib.request
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
@@ -57,6 +58,7 @@ from .models import (
     GlobalSettings,
     UserSettings,
     UserProfile,
+    SocialAuthConnection,
     SavedInvoiceView,
     EmailVerificationToken,
     AccessToken,
@@ -69,7 +71,7 @@ from .models import (
     BusinessMembership,
 )
 from .rbac import user_role_names, user_has_permission
-from .auth_service import admin_mfa_assert, admin_mfa_confirm, admin_mfa_setup, issue_access_token, revoke_token, role_for_name
+from .auth_service import admin_mfa_assert, admin_mfa_confirm, admin_mfa_setup, ensure_user_role, issue_access_token, revoke_token, role_for_name
 from .serializers import (
     CustomerSerializer,
     ItemSerializer,
@@ -416,7 +418,7 @@ def _send_verification_email(email: str, token: str, *, user=None, ip: Optional[
         return False
 
 
-def _oauth_frontend_redirect(*, provider: str, token: Optional[str] = None, error: Optional[str] = None):
+def _oauth_frontend_redirect(*, provider: str, token: Optional[str] = None, error: Optional[str] = None, extras: Optional[dict[str, Any]] = None):
     frontend_base = getattr(settings, "FRONTEND_BASE_URL", "http://127.0.0.1:3000")
     base = frontend_base.rstrip("/") + "/auth/callback"
     fragment = {"provider": str(provider)}
@@ -424,7 +426,174 @@ def _oauth_frontend_redirect(*, provider: str, token: Optional[str] = None, erro
         fragment["token"] = str(token)
     if error:
         fragment["error"] = str(error)
+    if extras:
+        for key, value in extras.items():
+            if value is None:
+                continue
+            fragment[str(key)] = str(value)
     return HttpResponseRedirect(base + "#" + urllib.parse.urlencode(fragment))
+
+
+def _oauth_state_cache_key(provider: str, state: str) -> str:
+    return f"{provider}_oauth_state:{state}"
+
+
+def _bool_query(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _oauth_state_payload(request, *, intent_default: str = "login") -> dict[str, Any]:
+    intent = str(request.query_params.get("intent") or intent_default).strip().lower() or intent_default
+    if intent not in {"login", "link"}:
+        intent = intent_default
+    payload: dict[str, Any] = {
+        "ip": _client_ip(request),
+        "intent": intent,
+        "remember": _bool_query(request.query_params.get("remember"), default=True),
+    }
+    if intent == "link":
+        if not getattr(request.user, "is_authenticated", False):
+            raise PermissionDenied("Please sign in before linking a social account.")
+        payload["user_id"] = int(request.user.pk)
+    return payload
+
+
+def _pop_oauth_state(provider: str, state: str) -> dict[str, Any] | None:
+    key = _oauth_state_cache_key(provider, state)
+    row = cache.get(key)
+    if row is not None:
+        cache.delete(key)
+    return row
+
+
+def _social_provider_label(provider: str) -> str:
+    return "Google" if provider == "google" else "Facebook" if provider == "facebook" else str(provider).title()
+
+
+def _social_identity_error(provider: str, code: str):
+    return _oauth_frontend_redirect(provider=provider, error=code)
+
+
+def _social_connections_for_user(user) -> list[dict[str, Any]]:
+    rows = []
+    for conn in SocialAuthConnection.objects.filter(user=user).order_by("provider"):
+        rows.append(
+            {
+                "provider": conn.provider,
+                "label": _social_provider_label(conn.provider),
+                "email": conn.email,
+                "display_name": conn.display_name,
+                "avatar_url": conn.avatar_url,
+                "created_at": conn.created_at.isoformat(),
+                "last_login_at": conn.last_login_at.isoformat(),
+            }
+        )
+    return rows
+
+
+def _is_privileged_account(user) -> bool:
+    return bool(
+        user_has_permission(user, "settings.global.read")
+        or user_has_permission(user, "settings.global.write")
+        or user_has_permission(user, "admin.users.read")
+        or user_has_permission(user, "admin.users.write")
+    )
+
+
+def _touch_social_connection(
+    *,
+    user,
+    provider: str,
+    provider_user_id: str,
+    email: str,
+    display_name: str,
+    avatar_url: str,
+) -> SocialAuthConnection:
+    connection, _ = SocialAuthConnection.objects.update_or_create(
+        provider=provider,
+        provider_user_id=str(provider_user_id),
+        defaults={
+            "user": user,
+            "email": email or None,
+            "display_name": display_name or None,
+            "avatar_url": avatar_url or None,
+            "last_login_at": timezone.now(),
+        },
+    )
+    ensure_user_role(user, "user")
+    return connection
+
+
+def _complete_social_login(*, user, provider: str, ip: Optional[str], remember: bool, created: bool) -> HttpResponseRedirect:
+    if _is_privileged_account(user):
+        _log_security_event(
+            user,
+            get_user_model(),
+            object_id=str(user.pk),
+            changes={"event": f"{provider}_social_login_blocked_for_privileged_account", "ip": ip},
+        )
+        return _social_identity_error(provider, "privileged_account")
+
+    role = role_for_name("user")
+    token_row = issue_access_token(user=user, role=role, expires_seconds=7 * 24 * 3600)
+    _log_security_event(user, get_user_model(), object_id=str(user.pk), changes={"event": f"{provider}_login", "created": created, "ip": ip})
+    resp = _oauth_frontend_redirect(provider=provider)
+    _set_auth_cookie(resp, token_row, remember=remember)
+    return resp
+
+
+def _complete_social_link(
+    *,
+    user_id: int,
+    provider: str,
+    provider_user_id: str,
+    email: str,
+    display_name: str,
+    avatar_url: str,
+    ip: Optional[str],
+) -> HttpResponseRedirect:
+    User = get_user_model()
+    target = User.objects.filter(pk=int(user_id)).first()
+    if target is None:
+        return _social_identity_error(provider, "link_target_missing")
+
+    existing = SocialAuthConnection.objects.filter(provider=provider, provider_user_id=str(provider_user_id)).first()
+    if existing is not None and existing.user_id != target.id:
+        return _social_identity_error(provider, "already_linked")
+
+    if email and getattr(target, "email", "") and str(target.email).strip().lower() != email:
+        return _social_identity_error(provider, "email_mismatch")
+
+    if email and not getattr(target, "email", ""):
+        target.email = email
+        target.save(update_fields=["email"])
+
+    profile, _ = UserProfile.objects.get_or_create(user=target)
+    fields_to_update = []
+    if profile.email_verified_at is None and email:
+        profile.email_verified_at = timezone.now()
+        fields_to_update.extend(["email_verified_at", "updated_at"])
+    if fields_to_update:
+        profile.save(update_fields=fields_to_update)
+
+    connection = _touch_social_connection(
+        user=target,
+        provider=provider,
+        provider_user_id=str(provider_user_id),
+        email=email,
+        display_name=display_name,
+        avatar_url=avatar_url,
+    )
+    _log_audit(target, "update", connection, {"event": "social_account_linked", "provider": provider, "ip": ip})
+    _log_security_event(target, get_user_model(), object_id=str(target.pk), changes={"event": f"{provider}_linked", "ip": ip})
+    return _oauth_frontend_redirect(provider=provider, extras={"linked": "1"})
 
 
 def _effective_region_settings_for_user(request, user) -> dict:
@@ -2840,16 +3009,42 @@ class MeApi(APIView):
         u = request.user
         profile = UserProfile.objects.filter(user=u).only("company_legal_name").first()
         roles = user_role_names(u)
+        session_role = getattr(getattr(request, "auth", None), "role", None)
         return Response(
             {
                 "id": u.id,
                 "username": getattr(u, "username", ""),
                 "email": getattr(u, "email", ""),
                 "roles": roles,
+                "session_role": getattr(session_role, "name", None),
                 "company_name": (getattr(profile, "company_legal_name", None) or None),
+                "social_accounts": _social_connections_for_user(u),
             },
             status=status.HTTP_200_OK,
         )
+
+
+class SocialConnectionsApi(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        connected = {row["provider"]: row for row in _social_connections_for_user(request.user)}
+        payload = []
+        for provider in ("google", "facebook"):
+            row = connected.get(provider)
+            payload.append(
+                {
+                    "provider": provider,
+                    "label": _social_provider_label(provider),
+                    "connected": row is not None,
+                    "display_name": row.get("display_name") if row else None,
+                    "email": row.get("email") if row else None,
+                    "avatar_url": row.get("avatar_url") if row else None,
+                    "linked_at": row.get("created_at") if row else None,
+                    "last_login_at": row.get("last_login_at") if row else None,
+                }
+            )
+        return Response({"results": payload}, status=status.HTTP_200_OK)
 
 
 def _set_auth_cookie(resp: Response, token_row: AccessToken, *, remember: bool) -> None:
@@ -3282,7 +3477,11 @@ class GoogleOAuthStartApi(APIView):
             return _oauth_frontend_redirect(provider="google", error="not_configured")
 
         state = secrets.token_urlsafe(24)
-        cache.set(f"google_oauth_state:{state}", {"ip": ip}, timeout=600)
+        try:
+            state_payload = _oauth_state_payload(request)
+        except PermissionDenied:
+            return _oauth_frontend_redirect(provider="google", error="link_requires_login")
+        cache.set(_oauth_state_cache_key("google", state), state_payload, timeout=600)
         redirect_uri = request.build_absolute_uri("/api/auth/google/callback/")
         params = {
             "client_id": client_id,
@@ -3315,11 +3514,12 @@ class GoogleOAuthCallbackApi(APIView):
         if not state:
             return _oauth_frontend_redirect(provider="google", error="missing_state")
 
-        state_row = cache.get(f"google_oauth_state:{state}")
+        state_row = _pop_oauth_state("google", state)
         if state_row is None:
             logger.info("google_oauth_invalid_state ip=%s", ip or "unknown")
             return _oauth_frontend_redirect(provider="google", error="invalid_state")
-        cache.delete(f"google_oauth_state:{state}")
+        remember = bool(state_row.get("remember", True))
+        intent = str(state_row.get("intent") or "login")
 
         client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") or ""
         client_secret = getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", "") or ""
@@ -3348,6 +3548,10 @@ class GoogleOAuthCallbackApi(APIView):
             req.add_header("Content-Type", "application/x-www-form-urlencoded")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 token_payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.info("google_oauth_token_exchange_http_error ip=%s status=%s", ip or "unknown", getattr(e, "code", "unknown"))
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "google_oauth_exchange_failed", "ip": ip, "error": f"http_{getattr(e, 'code', 'unknown')}"})
+            return _oauth_frontend_redirect(provider="google", error="exchange_failed")
         except Exception as e:
             logger.exception("google_oauth_token_exchange_failed ip=%s", ip or "unknown")
             _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "google_oauth_exchange_failed", "ip": ip, "error": e.__class__.__name__})
@@ -3361,6 +3565,10 @@ class GoogleOAuthCallbackApi(APIView):
             info_url = "https://oauth2.googleapis.com/tokeninfo?" + urllib.parse.urlencode({"id_token": id_token})
             with urllib.request.urlopen(info_url, timeout=10) as resp:
                 info = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.info("google_oauth_tokeninfo_http_error ip=%s status=%s", ip or "unknown", getattr(e, "code", "unknown"))
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "google_oauth_tokeninfo_failed", "ip": ip, "error": f"http_{getattr(e, 'code', 'unknown')}"})
+            return _oauth_frontend_redirect(provider="google", error="identity_failed")
         except Exception as e:
             logger.exception("google_oauth_tokeninfo_failed ip=%s", ip or "unknown")
             _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "google_oauth_tokeninfo_failed", "ip": ip, "error": e.__class__.__name__})
@@ -3369,13 +3577,30 @@ class GoogleOAuthCallbackApi(APIView):
         email = str(info.get("email") or "").strip().lower()
         email_verified = str(info.get("email_verified") or "").lower() == "true"
         aud = str(info.get("aud") or "").strip()
+        provider_user_id = str(info.get("sub") or "").strip()
+        display_name = str(info.get("name") or "").strip()
+        avatar_url = str(info.get("picture") or "").strip()
         if not email or not email_verified:
             return _oauth_frontend_redirect(provider="google", error="email_not_verified")
         if aud and aud != client_id:
             return _oauth_frontend_redirect(provider="google", error="invalid_audience")
+        if not provider_user_id:
+            return _oauth_frontend_redirect(provider="google", error="identity_failed")
+
+        if intent == "link":
+            return _complete_social_link(
+                user_id=int(state_row.get("user_id")),
+                provider="google",
+                provider_user_id=provider_user_id,
+                email=email,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                ip=ip,
+            )
 
         User = get_user_model()
-        user = User.objects.filter(email=email).first()
+        connection = SocialAuthConnection.objects.filter(provider="google", provider_user_id=provider_user_id).select_related("user").first()
+        user = connection.user if connection is not None else User.objects.filter(email=email).first()
         created = False
         if user is None:
             user = User(username=_username_for_email(email), email=email, is_active=True)
@@ -3392,54 +3617,55 @@ class GoogleOAuthCallbackApi(APIView):
             profile.email_verified_at = timezone.now()
             profile.save(update_fields=["email_verified_at", "updated_at"])
 
-        role = role_for_name("user")
-        token_row = issue_access_token(user=user, role=role, expires_seconds=7 * 24 * 3600)
-        _log_security_event(user, User, object_id=str(user.pk), changes={"event": "google_login", "created": created, "ip": ip})
-
-        logger.info("google_oauth_success ip=%s user_id=%s created=%s", ip or "unknown", str(user.pk), created)
-        resp = _oauth_frontend_redirect(provider="google")
-        resp.set_cookie(
-            "auth_token",
-            token_row.key,
-            httponly=True,
-            secure=not bool(getattr(settings, "DEBUG", False)),
-            samesite="Lax",
-            max_age=max(1, int((token_row.expires_at - timezone.now()).total_seconds())) if token_row.expires_at else None,
-            path="/",
+        if _is_privileged_account(user):
+            return _complete_social_login(user=user, provider="google", ip=ip, remember=remember, created=created)
+        _touch_social_connection(
+            user=user,
+            provider="google",
+            provider_user_id=provider_user_id,
+            email=email,
+            display_name=display_name,
+            avatar_url=avatar_url,
         )
-        return resp
+        logger.info("google_oauth_success ip=%s user_id=%s created=%s", ip or "unknown", str(user.pk), created)
+        return _complete_social_login(user=user, provider="google", ip=ip, remember=remember, created=created)
 
 
-class GitHubOAuthStartApi(APIView):
+class FacebookOAuthStartApi(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         ip = _client_ip(request)
-        if _rate_limit(f"github_oauth_start:ip:{ip}", limit=20, window_seconds=60):
-            logger.info("github_oauth_start_rate_limited ip=%s", ip or "unknown")
-            return _oauth_frontend_redirect(provider="github", error="rate_limited")
+        if _rate_limit(f"facebook_oauth_start:ip:{ip}", limit=20, window_seconds=60):
+            logger.info("facebook_oauth_start_rate_limited ip=%s", ip or "unknown")
+            return _oauth_frontend_redirect(provider="facebook", error="rate_limited")
 
-        client_id = getattr(settings, "GITHUB_OAUTH_CLIENT_ID", "") or ""
-        client_secret = getattr(settings, "GITHUB_OAUTH_CLIENT_SECRET", "") or ""
+        client_id = getattr(settings, "FACEBOOK_OAUTH_CLIENT_ID", "") or ""
+        client_secret = getattr(settings, "FACEBOOK_OAUTH_CLIENT_SECRET", "") or ""
         if not client_id or not client_secret:
-            logger.info("github_oauth_not_configured ip=%s has_client_id=%s has_client_secret=%s", ip or "unknown", bool(client_id), bool(client_secret))
-            return _oauth_frontend_redirect(provider="github", error="not_configured")
+            logger.info("facebook_oauth_not_configured ip=%s has_client_id=%s has_client_secret=%s", ip or "unknown", bool(client_id), bool(client_secret))
+            return _oauth_frontend_redirect(provider="facebook", error="not_configured")
 
         state = secrets.token_urlsafe(24)
-        cache.set(f"github_oauth_state:{state}", {"ip": ip}, timeout=600)
-        redirect_uri = request.build_absolute_uri("/api/auth/github/callback/")
+        try:
+            state_payload = _oauth_state_payload(request)
+        except PermissionDenied:
+            return _oauth_frontend_redirect(provider="facebook", error="link_requires_login")
+        cache.set(_oauth_state_cache_key("facebook", state), state_payload, timeout=600)
+        redirect_uri = request.build_absolute_uri("/api/auth/facebook/callback/")
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
-            "scope": "read:user user:email",
+            "response_type": "code",
+            "scope": "email,public_profile",
             "state": state,
         }
-        url = "https://github.com/login/oauth/authorize?" + urllib.parse.urlencode(params)
-        logger.info("github_oauth_start ip=%s", ip or "unknown")
+        url = "https://www.facebook.com/v20.0/dialog/oauth?" + urllib.parse.urlencode(params)
+        logger.info("facebook_oauth_start ip=%s", ip or "unknown")
         return HttpResponseRedirect(url)
 
 
-class GitHubOAuthCallbackApi(APIView):
+class FacebookOAuthCallbackApi(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
@@ -3448,76 +3674,100 @@ class GitHubOAuthCallbackApi(APIView):
         code = str(request.query_params.get("code") or "").strip()
         state = str(request.query_params.get("state") or "").strip()
         if err:
-            mapped = "cancelled" if err in ("access_denied",) else "failed"
-            logger.info("github_oauth_cancelled ip=%s error=%s", ip or "unknown", err)
-            return _oauth_frontend_redirect(provider="github", error=mapped)
+            mapped = "cancelled" if err in ("access_denied", "user_denied") else "failed"
+            logger.info("facebook_oauth_cancelled ip=%s error=%s", ip or "unknown", err)
+            return _oauth_frontend_redirect(provider="facebook", error=mapped)
         if not code:
-            return _oauth_frontend_redirect(provider="github", error="missing_code")
+            return _oauth_frontend_redirect(provider="facebook", error="missing_code")
         if not state:
-            return _oauth_frontend_redirect(provider="github", error="missing_state")
+            return _oauth_frontend_redirect(provider="facebook", error="missing_state")
 
-        state_row = cache.get(f"github_oauth_state:{state}")
+        state_row = _pop_oauth_state("facebook", state)
         if state_row is None:
-            logger.info("github_oauth_invalid_state ip=%s", ip or "unknown")
-            return _oauth_frontend_redirect(provider="github", error="invalid_state")
-        cache.delete(f"github_oauth_state:{state}")
+            logger.info("facebook_oauth_invalid_state ip=%s", ip or "unknown")
+            return _oauth_frontend_redirect(provider="facebook", error="invalid_state")
+        remember = bool(state_row.get("remember", True))
+        intent = str(state_row.get("intent") or "login")
 
-        client_id = getattr(settings, "GITHUB_OAUTH_CLIENT_ID", "") or ""
-        client_secret = getattr(settings, "GITHUB_OAUTH_CLIENT_SECRET", "") or ""
+        client_id = getattr(settings, "FACEBOOK_OAUTH_CLIENT_ID", "") or ""
+        client_secret = getattr(settings, "FACEBOOK_OAUTH_CLIENT_SECRET", "") or ""
         if not client_id or not client_secret:
             logger.info(
-                "github_oauth_not_configured_callback ip=%s has_client_id=%s has_client_secret=%s",
+                "facebook_oauth_not_configured_callback ip=%s has_client_id=%s has_client_secret=%s",
                 ip or "unknown",
                 bool(client_id),
                 bool(client_secret),
             )
-            return _oauth_frontend_redirect(provider="github", error="not_configured")
+            return _oauth_frontend_redirect(provider="facebook", error="not_configured")
 
-        redirect_uri = request.build_absolute_uri("/api/auth/github/callback/")
-        data = urllib.parse.urlencode({"client_id": client_id, "client_secret": client_secret, "code": code, "redirect_uri": redirect_uri}).encode("utf-8")
-
+        redirect_uri = request.build_absolute_uri("/api/auth/facebook/callback/")
+        token_url = "https://graph.facebook.com/v20.0/oauth/access_token?" + urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "code": code,
+            }
+        )
         try:
-            req = urllib.request.Request("https://github.com/login/oauth/access_token", data=data, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(token_url, timeout=10) as resp:
                 token_payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.info("facebook_oauth_token_exchange_http_error ip=%s status=%s", ip or "unknown", getattr(e, "code", "unknown"))
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "facebook_oauth_exchange_failed", "ip": ip, "error": f"http_{getattr(e, 'code', 'unknown')}"})
+            return _oauth_frontend_redirect(provider="facebook", error="exchange_failed")
         except Exception as e:
-            logger.exception("github_oauth_token_exchange_failed ip=%s", ip or "unknown")
-            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "github_oauth_exchange_failed", "ip": ip, "error": e.__class__.__name__})
-            return _oauth_frontend_redirect(provider="github", error="exchange_failed")
+            logger.exception("facebook_oauth_token_exchange_failed ip=%s", ip or "unknown")
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "facebook_oauth_exchange_failed", "ip": ip, "error": e.__class__.__name__})
+            return _oauth_frontend_redirect(provider="facebook", error="exchange_failed")
 
         access_token = str(token_payload.get("access_token") or "").strip()
         if not access_token:
-            return _oauth_frontend_redirect(provider="github", error="missing_access_token")
+            return _oauth_frontend_redirect(provider="facebook", error="missing_access_token")
 
-        email = ""
+        me_url = "https://graph.facebook.com/v20.0/me?" + urllib.parse.urlencode(
+            {"fields": "id,name,email,picture.type(large)", "access_token": access_token}
+        )
         try:
-            emails_req = urllib.request.Request("https://api.github.com/user/emails", method="GET")
-            emails_req.add_header("Accept", "application/vnd.github+json")
-            emails_req.add_header("Authorization", f"Bearer {access_token}")
-            with urllib.request.urlopen(emails_req, timeout=10) as resp:
-                emails = json.loads(resp.read().decode("utf-8"))
-            if isinstance(emails, list):
-                primary_verified = None
-                for row in emails:
-                    if not isinstance(row, dict):
-                        continue
-                    if row.get("primary") and row.get("verified") and row.get("email"):
-                        primary_verified = str(row.get("email"))
-                        break
-                if primary_verified:
-                    email = primary_verified.strip().lower()
+            with urllib.request.urlopen(me_url, timeout=10) as resp:
+                info = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.info("facebook_oauth_identity_http_error ip=%s status=%s", ip or "unknown", getattr(e, "code", "unknown"))
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "facebook_oauth_identity_failed", "ip": ip, "error": f"http_{getattr(e, 'code', 'unknown')}"})
+            return _oauth_frontend_redirect(provider="facebook", error="identity_failed")
         except Exception as e:
-            logger.exception("github_oauth_email_fetch_failed ip=%s", ip or "unknown")
-            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "github_oauth_email_fetch_failed", "ip": ip, "error": e.__class__.__name__})
-            return _oauth_frontend_redirect(provider="github", error="email_fetch_failed")
+            logger.exception("facebook_oauth_identity_failed ip=%s", ip or "unknown")
+            _log_security_event(None, get_user_model(), object_id=ip or "unknown", changes={"event": "facebook_oauth_identity_failed", "ip": ip, "error": e.__class__.__name__})
+            return _oauth_frontend_redirect(provider="facebook", error="identity_failed")
 
+        provider_user_id = str(info.get("id") or "").strip()
+        display_name = str(info.get("name") or "").strip()
+        email = str(info.get("email") or "").strip().lower()
+        picture = info.get("picture") if isinstance(info.get("picture"), dict) else {}
+        picture_data = picture.get("data") if isinstance(picture, dict) else {}
+        avatar_url = str(picture_data.get("url") or "").strip() if isinstance(picture_data, dict) else ""
+
+        if not provider_user_id:
+            return _oauth_frontend_redirect(provider="facebook", error="identity_failed")
         if not email:
-            return _oauth_frontend_redirect(provider="github", error="no_verified_email")
+            return _oauth_frontend_redirect(provider="facebook", error="email_unavailable")
+
+        if intent == "link":
+            if not state_row.get("user_id"):
+                return _oauth_frontend_redirect(provider="facebook", error="link_target_missing")
+            return _complete_social_link(
+                user_id=int(state_row.get("user_id")),
+                provider="facebook",
+                provider_user_id=provider_user_id,
+                email=email,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                ip=ip,
+            )
 
         User = get_user_model()
-        user = User.objects.filter(email=email).first()
+        connection = SocialAuthConnection.objects.filter(provider="facebook", provider_user_id=provider_user_id).select_related("user").first()
+        user = connection.user if connection is not None else User.objects.filter(email=email).first()
         created = False
         if user is None:
             user = User(username=_username_for_email(email), email=email, is_active=True)
@@ -3525,31 +3775,32 @@ class GitHubOAuthCallbackApi(APIView):
             user.save()
             created = True
         else:
+            updates = []
             if not bool(getattr(user, "is_active", True)):
                 user.is_active = True
-                user.save(update_fields=["is_active"])
+                updates.append("is_active")
+            if email and str(getattr(user, "email", "") or "").strip().lower() != email:
+                return _oauth_frontend_redirect(provider="facebook", error="email_mismatch")
+            if updates:
+                user.save(update_fields=updates)
 
         profile, _ = UserProfile.objects.get_or_create(user=user)
         if profile.email_verified_at is None:
             profile.email_verified_at = timezone.now()
             profile.save(update_fields=["email_verified_at", "updated_at"])
 
-        role = role_for_name("user")
-        token_row = issue_access_token(user=user, role=role, expires_seconds=7 * 24 * 3600)
-        _log_security_event(user, User, object_id=str(user.pk), changes={"event": "github_login", "created": created, "ip": ip})
-
-        logger.info("github_oauth_success ip=%s user_id=%s created=%s", ip or "unknown", str(user.pk), created)
-        resp = _oauth_frontend_redirect(provider="github")
-        resp.set_cookie(
-            "auth_token",
-            token_row.key,
-            httponly=True,
-            secure=not bool(getattr(settings, "DEBUG", False)),
-            samesite="Lax",
-            max_age=max(1, int((token_row.expires_at - timezone.now()).total_seconds())) if token_row.expires_at else None,
-            path="/",
+        if _is_privileged_account(user):
+            return _complete_social_login(user=user, provider="facebook", ip=ip, remember=remember, created=created)
+        _touch_social_connection(
+            user=user,
+            provider="facebook",
+            provider_user_id=provider_user_id,
+            email=email,
+            display_name=display_name,
+            avatar_url=avatar_url,
         )
-        return resp
+        logger.info("facebook_oauth_success ip=%s user_id=%s created=%s", ip or "unknown", str(user.pk), created)
+        return _complete_social_login(user=user, provider="facebook", ip=ip, remember=remember, created=created)
 
 
 class AdminEmailVerificationMetricsApi(APIView):
@@ -3710,9 +3961,9 @@ class AdminUsersApi(APIView):
     def post(self, request):
         if not user_has_permission(request.user, "admin.users.write"):
             raise PermissionDenied("You do not have permission to manage users.")
-        username = request.data.get("username")
+        username = str(request.data.get("username") or "").strip()
         password = request.data.get("password")
-        email = request.data.get("email") or ""
+        email = str(request.data.get("email") or "").strip().lower()
         is_staff = bool(request.data.get("is_staff", False))
         is_active = bool(request.data.get("is_active", True))
         if not username or not password:
@@ -3720,9 +3971,12 @@ class AdminUsersApi(APIView):
         User = get_user_model()
         if User.objects.filter(username=username).exists():
             raise ValidationError({"username": "Username already exists"})
+        if email and User.objects.filter(email=email).exists():
+            raise ValidationError({"email": "Email already exists"})
         u = User(username=username, email=email, is_staff=is_staff, is_active=is_active)
         u.set_password(password)
         u.save()
+        _log_audit(request.user, "create", u, {"username": username, "email": email or None, "is_staff": is_staff, "is_active": is_active})
         return Response({"id": u.id, "created": True}, status=status.HTTP_201_CREATED)
 
     def patch(self, request):
@@ -3736,11 +3990,18 @@ class AdminUsersApi(APIView):
             u = User.objects.get(pk=int(user_id))
         except (User.DoesNotExist, ValueError, TypeError):
             raise NotFound("User not found")
+        before = {
+            "is_active": bool(getattr(u, "is_active", True)),
+            "is_staff": bool(getattr(u, "is_staff", False)),
+        }
         if "is_active" in request.data:
             u.is_active = bool(request.data.get("is_active"))
         if "is_staff" in request.data:
             u.is_staff = bool(request.data.get("is_staff"))
         u.save(update_fields=["is_active", "is_staff"])
+        after = {"is_active": bool(u.is_active), "is_staff": bool(u.is_staff)}
+        if before != after:
+            _log_audit(request.user, "update", u, {"before": before, "after": after})
         return Response({"updated": True}, status=status.HTTP_200_OK)
 
 
@@ -3753,8 +4014,8 @@ class AdminOAuthStatusApi(APIView):
         ip = _client_ip(request)
         google_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "") or ""
         google_secret = getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", "") or ""
-        github_id = getattr(settings, "GITHUB_OAUTH_CLIENT_ID", "") or ""
-        github_secret = getattr(settings, "GITHUB_OAUTH_CLIENT_SECRET", "") or ""
+        facebook_id = getattr(settings, "FACEBOOK_OAUTH_CLIENT_ID", "") or ""
+        facebook_secret = getattr(settings, "FACEBOOK_OAUTH_CLIENT_SECRET", "") or ""
 
         payload = {
             "google": {
@@ -3769,20 +4030,20 @@ class AdminOAuthStatusApi(APIView):
                     "GOOGLE_OAUTH_CLIENT_SECRET",
                 ],
             },
-            "github": {
-                "configured": bool(github_id and github_secret),
-                "has_client_id": bool(github_id),
-                "has_client_secret": bool(github_secret),
-                "callback_url": request.build_absolute_uri("/api/auth/github/callback/"),
+            "facebook": {
+                "configured": bool(facebook_id and facebook_secret),
+                "has_client_id": bool(facebook_id),
+                "has_client_secret": bool(facebook_secret),
+                "callback_url": request.build_absolute_uri("/api/auth/facebook/callback/"),
                 "expected_env": [
-                    "DJANGO_GITHUB_OAUTH_CLIENT_ID",
-                    "DJANGO_GITHUB_OAUTH_CLIENT_SECRET",
-                    "GITHUB_OAUTH_CLIENT_ID",
-                    "GITHUB_OAUTH_CLIENT_SECRET",
+                    "DJANGO_FACEBOOK_OAUTH_CLIENT_ID",
+                    "DJANGO_FACEBOOK_OAUTH_CLIENT_SECRET",
+                    "FACEBOOK_OAUTH_CLIENT_ID",
+                    "FACEBOOK_OAUTH_CLIENT_SECRET",
                 ],
             },
         }
-        logger.info("admin_oauth_status ip=%s google=%s github=%s", ip or "unknown", payload["google"]["configured"], payload["github"]["configured"])
+        logger.info("admin_oauth_status ip=%s google=%s facebook=%s", ip or "unknown", payload["google"]["configured"], payload["facebook"]["configured"])
         return Response(payload, status=status.HTTP_200_OK)
 
 

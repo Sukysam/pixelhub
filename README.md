@@ -8,7 +8,7 @@ SukyAcc is an accounting/invoicing application with a Django REST API backend an
 - Dashboard metrics and reports
 - User settings and global admin settings
 - Registration with email verification and password reset
-- Optional Google/GitHub OAuth sign-in (backend-configured)
+- Optional Google/Facebook OAuth sign-in (backend-configured)
 - PDF invoice generation (WeasyPrint)
 - End-to-end UI tests (Playwright)
 
@@ -61,7 +61,7 @@ Copy `.env.example` to `.env` for local use (do not commit `.env`), and configur
 - Email (production): `DJANGO_EMAIL_HOST`, `DJANGO_EMAIL_HOST_USER`, `DJANGO_EMAIL_HOST_PASSWORD`, `DJANGO_DEFAULT_FROM_EMAIL`
 - Optional database (Postgres): `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`
 - Optional cache (Redis): `REDIS_URL`
-- Optional OAuth: `DJANGO_GOOGLE_OAUTH_CLIENT_ID`, `DJANGO_GOOGLE_OAUTH_CLIENT_SECRET`, `DJANGO_GITHUB_OAUTH_CLIENT_ID`, `DJANGO_GITHUB_OAUTH_CLIENT_SECRET`
+- Optional OAuth: `DJANGO_GOOGLE_OAUTH_CLIENT_ID`, `DJANGO_GOOGLE_OAUTH_CLIENT_SECRET`, `DJANGO_FACEBOOK_OAUTH_CLIENT_ID`, `DJANGO_FACEBOOK_OAUTH_CLIENT_SECRET`
 
 ### Frontend
 

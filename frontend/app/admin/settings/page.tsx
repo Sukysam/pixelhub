@@ -104,7 +104,7 @@ function AdminSettingsInner() {
 
   useEffect(() => {
     const t = (searchParams.get("tab") || "").toLowerCase();
-    if (t === "users" && isStaffOrAdmin) setTab("users");
+    if (t === "users" && isAdmin) setTab("users");
     else if (t === "fx" && isStaffOrAdmin) setTab("fx");
     else if (t === "global" && isStaffOrAdmin) setTab("global");
   }, [isStaffOrAdmin, searchParams]);
@@ -410,7 +410,7 @@ function AdminSettingsInner() {
               Global
             </Button>
           ) : null}
-          {isStaffOrAdmin ? (
+          {isAdmin ? (
             <Button type="button" onClick={() => setTab("users")} disabled={tab === "users"}>
               Users
             </Button>

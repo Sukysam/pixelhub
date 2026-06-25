@@ -352,6 +352,36 @@ class UserProfile(models.Model):
         return f"Profile for {self.user_id}"
 
 
+class SocialAuthConnection(models.Model):
+    PROVIDER_CHOICES = [
+        ("google", "Google"),
+        ("facebook", "Facebook"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="social_auth_connections")
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    provider_user_id = models.CharField(max_length=255)
+    email = models.EmailField(blank=True, null=True)
+    display_name = models.CharField(max_length=255, blank=True, null=True)
+    avatar_url = models.URLField(blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    last_login_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["provider", "provider_user_id"], name="uniq_social_provider_subject"),
+            models.UniqueConstraint(fields=["user", "provider"], name="uniq_social_user_provider"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "provider"]),
+            models.Index(fields=["provider", "email"]),
+        ]
+
+    def __str__(self):
+        return f"SocialAuthConnection {self.provider}:{self.user_id}"
+
+
 class BusinessAccount(models.Model):
     name = models.CharField(max_length=255)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="owned_business_accounts")

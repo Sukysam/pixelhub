@@ -3,6 +3,7 @@
 ## Access
 - Log in with an account that has `is_staff=true`.
 - Open **Admin Settings** in the left navigation.
+- Only full admins can open the **Users** tab or perform write actions; staff access remains read-only for non-user-management sections.
 
 ## Global Settings
 ### Default Currency
@@ -28,10 +29,15 @@ From **Users** tab:
 - Toggle `Active` to enable/disable sign-in.
 - Toggle `Staff` to grant admin access.
 - Use **Create User** to add a new account.
+- Every create/update action is written to the audit log for traceability.
+
+## Social Sign-In Configuration
+- Configure Google with `DJANGO_GOOGLE_OAUTH_CLIENT_ID` and `DJANGO_GOOGLE_OAUTH_CLIENT_SECRET`.
+- Configure Facebook with `DJANGO_FACEBOOK_OAUTH_CLIENT_ID` and `DJANGO_FACEBOOK_OAUTH_CLIENT_SECRET`.
+- Privileged accounts are intentionally blocked from social sign-in and must use the staff/admin password flow.
 
 ## Exchange Rates (FX)
 From **FX Rates** tab:
 - Add pairs like `USD/EUR` with a decimal rate.
 - Rates are used by the conversion endpoint and formatting helpers.
 - If a direct pair is missing, conversion falls back to the inverse pair if available.
-

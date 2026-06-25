@@ -43,17 +43,17 @@ Security flags (recommended in production):
 - `DJANGO_SECURE_PROXY_SSL_HEADER=1` (recommended behind a reverse proxy/load balancer)
 - `DJANGO_USE_X_FORWARDED_HOST=1` (recommended behind a reverse proxy/load balancer)
 
-### Social sign-in (Google / GitHub)
+### Social sign-in (Google / Facebook)
 Backend environment variables (supported names):
 - Google: `DJANGO_GOOGLE_OAUTH_CLIENT_ID` / `DJANGO_GOOGLE_OAUTH_CLIENT_SECRET` (or `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`)
-- GitHub: `DJANGO_GITHUB_OAUTH_CLIENT_ID` / `DJANGO_GITHUB_OAUTH_CLIENT_SECRET` (or `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`)
+- Facebook: `DJANGO_FACEBOOK_OAUTH_CLIENT_ID` / `DJANGO_FACEBOOK_OAUTH_CLIENT_SECRET` (or `FACEBOOK_OAUTH_CLIENT_ID` / `FACEBOOK_OAUTH_CLIENT_SECRET`)
 
 Provider redirect URIs to register:
 - Google redirect URI: `https://<your-backend-domain>/api/auth/google/callback/`
-- GitHub callback URL: `https://<your-backend-domain>/api/auth/github/callback/`
+- Facebook callback URL: `https://<your-backend-domain>/api/auth/facebook/callback/`
 
 Runtime verification (admin-only):
-- `GET /api/admin/oauth/status/` returns whether Google/GitHub are configured and the exact callback URLs the server is generating.
+- `GET /api/admin/oauth/status/` returns whether Google/Facebook are configured and the exact callback URLs the server is generating.
 
 ### Database
 - Development uses SQLite (`db.sqlite3`).

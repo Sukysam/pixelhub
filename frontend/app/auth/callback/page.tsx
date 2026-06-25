@@ -33,11 +33,12 @@ function AuthCallbackInner() {
   const providerFromQuery = params.get("provider") || "";
   const [error, setError] = useState<string | null>(null);
 
-  const { provider, oauthError } = useMemo(() => {
+  const { provider, oauthError, linked } = useMemo(() => {
     const frag = readFragment();
     return {
       provider: providerFromQuery || frag.get("provider") || "",
       oauthError: errorFromQuery || frag.get("error") || "",
+      linked: (frag.get("linked") || "") === "1",
     };
   }, [errorFromQuery, providerFromQuery]);
 
@@ -61,9 +62,23 @@ function AuthCallbackInner() {
                 ? "Social sign-in is not configured."
                 : oauthError === "rate_limited"
                   ? "Too many attempts. Please try again later."
+                  : oauthError === "privileged_account"
+                    ? "This account must use the staff or admin password login flow."
+                    : oauthError === "link_requires_login"
+                      ? "Sign in first, then try linking the account again."
+                      : oauthError === "already_linked"
+                        ? "That social account is already linked to another user."
+                        : oauthError === "email_mismatch"
+                          ? "The social account email does not match this profile."
+                          : oauthError === "email_unavailable"
+                            ? "The provider did not return a usable email address."
                   : "Unable to complete sign-in.";
           setError(provider ? `${msg} (${provider})` : msg);
         }
+        return;
+      }
+      if (linked) {
+        router.replace(`/settings?socialLinked=${encodeURIComponent(provider || "provider")}`);
         return;
       }
       try {
@@ -79,7 +94,7 @@ function AuthCallbackInner() {
     return () => {
       cancelled = true;
     };
-  }, [oauthError, provider, router]);
+  }, [linked, oauthError, provider, router]);
 
   if (!error) {
     return (

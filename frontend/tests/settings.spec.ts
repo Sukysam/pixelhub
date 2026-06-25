@@ -122,6 +122,8 @@ test("user can update invoice footer in settings", async ({ page }) => {
 
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connected Accounts" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect", exact: true }).first()).toBeVisible();
 
   const footer = page.getByLabel("Invoice Footer Text");
   const newValue = `E2E Footer ${Date.now()}`;

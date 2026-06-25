@@ -38,6 +38,7 @@ from .models import (
     GlobalSettings,
     UserSettings,
     UserProfile,
+    SocialAuthConnection,
     EmailVerificationToken,
     AccessToken,
     AdminMfaDevice,
@@ -56,6 +57,20 @@ from .documents import create_delivery
 
 def _test_secret() -> str:
     return f"Aa1!{secrets.token_urlsafe(12)}"
+
+
+class _MockJsonResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 GW_SHARED = "test"
@@ -1390,29 +1405,21 @@ class OAuthRedirectTests(APITestCase):
         self.assertIn("provider=google", res["Location"])
         self.assertIn("error=cancelled", res["Location"])
 
-    def test_github_start_not_configured_redirects_to_frontend_callback(self):
-        with override_settings(FRONTEND_BASE_URL="http://frontend.test", GITHUB_OAUTH_CLIENT_ID="", GITHUB_OAUTH_CLIENT_SECRET=""):
-            res = self.client.get("/api/auth/github/start/")
+    def test_facebook_start_not_configured_redirects_to_frontend_callback(self):
+        with override_settings(FRONTEND_BASE_URL="http://frontend.test", FACEBOOK_OAUTH_CLIENT_ID="", FACEBOOK_OAUTH_CLIENT_SECRET=""):
+            res = self.client.get("/api/auth/facebook/start/")
         self.assertEqual(res.status_code, 302)
         self.assertTrue(res["Location"].startswith("http://frontend.test/auth/callback#"))
-        self.assertIn("provider=github", res["Location"])
+        self.assertIn("provider=facebook", res["Location"])
         self.assertIn("error=not_configured", res["Location"])
 
-    def test_github_start_missing_secret_redirects_to_frontend_callback(self):
-        with override_settings(FRONTEND_BASE_URL="http://frontend.test", GITHUB_OAUTH_CLIENT_ID="cid123", GITHUB_OAUTH_CLIENT_SECRET=""):
-            res = self.client.get("/api/auth/github/start/")
+    def test_facebook_callback_cancelled_redirects_to_frontend(self):
+        with override_settings(FRONTEND_BASE_URL="http://frontend.test", FACEBOOK_OAUTH_CLIENT_ID="x", FACEBOOK_OAUTH_CLIENT_SECRET="y"):
+            state = "statefb"
+            cache.set(f"facebook_oauth_state:{state}", {"ip": "127.0.0.1"}, timeout=600)
+            res = self.client.get(f"/api/auth/facebook/callback/?error=access_denied&state={state}")
         self.assertEqual(res.status_code, 302)
-        self.assertTrue(res["Location"].startswith("http://frontend.test/auth/callback#"))
-        self.assertIn("provider=github", res["Location"])
-        self.assertIn("error=not_configured", res["Location"])
-
-    def test_github_callback_cancelled_redirects_to_frontend(self):
-        with override_settings(FRONTEND_BASE_URL="http://frontend.test", GITHUB_OAUTH_CLIENT_ID="x", GITHUB_OAUTH_CLIENT_SECRET="y"):
-            state = "state456"
-            cache.set(f"github_oauth_state:{state}", {"ip": "127.0.0.1"}, timeout=600)
-            res = self.client.get(f"/api/auth/github/callback/?error=access_denied&state={state}")
-        self.assertEqual(res.status_code, 302)
-        self.assertIn("provider=github", res["Location"])
+        self.assertIn("provider=facebook", res["Location"])
         self.assertIn("error=cancelled", res["Location"])
 
 
@@ -1451,8 +1458,10 @@ class ApiCoverageTests(APITestCase):
             format="json",
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(AuditLog.objects.filter(action="create", object_id=str(created.data["id"])).exists())
         patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "is_staff": True}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
+        self.assertTrue(AuditLog.objects.filter(action="update", object_id=str(created.data["id"])).exists())
 
     def test_currency_and_exchange_rate_crud(self):
         self.client.force_authenticate(user=self.staff)
@@ -1637,6 +1646,92 @@ class AuthApiTests(APITestCase):
         self.assertEqual(res.data.get("company_name"), "Acme Incorporated")
         self.assertIn("roles", res.data)
 
+    def test_me_includes_linked_social_accounts(self):
+        user = User.objects.create_user(username="u_social", password=_test_secret(), is_active=True, email="u_social@example.com")
+        SocialAuthConnection.objects.create(
+            user=user,
+            provider="google",
+            provider_user_id="google-sub-1",
+            email="u_social@example.com",
+            display_name="U Social",
+        )
+        self.client.force_authenticate(user=user)
+        res = self.client.get("/api/auth/me/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        accounts = res.data.get("social_accounts") or []
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["provider"], "google")
+
+    def test_social_connections_endpoint_returns_provider_status(self):
+        user = User.objects.create_user(username="u_links", password=_test_secret(), is_active=True, email="u_links@example.com")
+        SocialAuthConnection.objects.create(
+            user=user,
+            provider="facebook",
+            provider_user_id="fb-1",
+            email="u_links@example.com",
+            display_name="FB User",
+        )
+        self.client.force_authenticate(user=user)
+        res = self.client.get("/api/auth/social/connections/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        rows = {row["provider"]: row for row in res.data["results"]}
+        self.assertTrue(rows["facebook"]["connected"])
+        self.assertFalse(rows["google"]["connected"])
+
+    def test_google_callback_links_social_account_to_existing_profile(self):
+        user = User.objects.create_user(
+            username="u_link_google",
+            password=_test_secret(),
+            is_active=True,
+            email="u_link_google@example.com",
+        )
+        profile = UserProfile.objects.create(user=user)
+
+        with override_settings(
+            FRONTEND_BASE_URL="http://frontend.test",
+            GOOGLE_OAUTH_CLIENT_ID="cid123",
+            GOOGLE_OAUTH_CLIENT_SECRET="sec123",
+        ):
+            cache.set(
+                "google_oauth_state:state-google-link-1",
+                {"ip": "127.0.0.1", "intent": "link", "user_id": user.id, "remember": True},
+                timeout=600,
+            )
+            with patch(
+                "urllib.request.urlopen",
+                side_effect=[
+                    _MockJsonResponse({"id_token": "id-token-link-1"}),
+                    _MockJsonResponse(
+                        {
+                            "sub": "google-sub-link-1",
+                            "email": user.email,
+                            "email_verified": "true",
+                            "aud": "cid123",
+                            "name": "Linked Google User",
+                            "picture": "https://example.com/avatar.png",
+                        }
+                    ),
+                ],
+            ):
+                res = self.client.get("/api/auth/google/callback/?code=abc&state=state-google-link-1")
+
+        self.assertEqual(res.status_code, 302)
+        self.assertIn("provider=google", res["Location"])
+        self.assertIn("linked=1", res["Location"])
+
+        connection = SocialAuthConnection.objects.get(provider="google", provider_user_id="google-sub-link-1")
+        self.assertEqual(connection.user_id, user.id)
+        self.assertEqual(connection.email, user.email)
+        self.assertEqual(connection.display_name, "Linked Google User")
+        self.assertIsNotNone(UserProfile.objects.get(pk=profile.pk).email_verified_at)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                action="update",
+                object_id=str(connection.id),
+                changes__event="social_account_linked",
+            ).exists()
+        )
+
     def test_register_and_duplicate_email(self):
         secret = _test_secret()
         ok = self.client.post(
@@ -1678,6 +1773,41 @@ class AuthApiTests(APITestCase):
         )
         self.assertEqual(dup.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("email", dup.data)
+
+    def test_google_callback_blocks_privileged_account_from_social_sign_in(self):
+        privileged = User.objects.create_user(
+            username="admin_social",
+            email="admin-social@example.com",
+            password=_test_secret(),
+            is_active=True,
+            is_staff=True,
+            is_superuser=True,
+        )
+        with override_settings(FRONTEND_BASE_URL="http://frontend.test", GOOGLE_OAUTH_CLIENT_ID="cid123", GOOGLE_OAUTH_CLIENT_SECRET="sec123"):
+            cache.set(
+                "google_oauth_state:state-google-1",
+                {"ip": "127.0.0.1", "intent": "login", "remember": True},
+                timeout=600,
+            )
+            with patch(
+                "urllib.request.urlopen",
+                side_effect=[
+                    _MockJsonResponse({"id_token": "id-token-1"}),
+                    _MockJsonResponse(
+                        {
+                            "sub": "google-sub-1",
+                            "email": privileged.email,
+                            "email_verified": "true",
+                            "aud": "cid123",
+                            "name": "Admin Social",
+                        }
+                    ),
+                ],
+            ):
+                res = self.client.get("/api/auth/google/callback/?code=abc&state=state-google-1")
+        self.assertEqual(res.status_code, 302)
+        self.assertIn("error=privileged_account", res["Location"])
+        self.assertFalse(SocialAuthConnection.objects.filter(provider="google", provider_user_id="google-sub-1").exists())
 
 
 class DocumentDeliveryAndPaymentsTests(APITestCase):

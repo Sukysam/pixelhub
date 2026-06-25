@@ -11,6 +11,7 @@ from .models import (
     GlobalSettings,
     UserSettings,
     UserProfile,
+    SocialAuthConnection,
     AuditLog,
     EmailVerificationToken,
 )
@@ -84,6 +85,13 @@ class UserProfileAdmin(admin.ModelAdmin):
     list_display = ("user", "company_legal_name", "full_name", "phone", "terms_accepted_at", "email_verified_at", "updated_at")
     search_fields = ("user__username", "user__email", "company_legal_name", "full_name", "phone")
     list_filter = ("email_verified_at", "terms_accepted_at")
+
+
+@admin.register(SocialAuthConnection)
+class SocialAuthConnectionAdmin(admin.ModelAdmin):
+    list_display = ("user", "provider", "provider_user_id", "email", "display_name", "last_login_at", "created_at")
+    search_fields = ("user__username", "user__email", "provider_user_id", "email", "display_name")
+    list_filter = ("provider", "created_at", "last_login_at")
 
 
 @admin.register(EmailVerificationToken)

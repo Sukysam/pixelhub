@@ -24,6 +24,7 @@ All authenticated requests use `Authorization: Token <token>` where `<token>` is
 - `POST /api/auth/admin/token/` issues an **admin** token (requires MFA code)
 - `POST /api/auth/admin/mfa/setup/` starts MFA enrollment for admin accounts
 - `POST /api/auth/admin/mfa/confirm/` confirms MFA and issues an admin token
+- Social sign-in (`/api/auth/google/*`, `/api/auth/facebook/*`) is limited to standard user sessions and will refuse privileged accounts so admin/staff users must stay on the password+MFA flow.
 
 ### Logout
 - `POST /api/auth/logout/` revokes the current token.
@@ -63,6 +64,7 @@ Admin and security-relevant actions are recorded in the audit log:
 - Authentication security events (success/failure/rate limits/MFA flows)
 - Global settings updates (before/after snapshots)
 - Admin operations (e.g., user management, logo upload)
+- Social account linking events (provider connected to a user profile)
 
 ## OWASP / Security Best Practices
 - Always enforce authorization on the server (UI checks are advisory only).
