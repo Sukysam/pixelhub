@@ -62,6 +62,12 @@ DJANGO_EMAIL_USE_TLS=1
 # Otherwise, set POSTGRES_* variables
 ```
 
+If you override the default Sevalla web process manually, use:
+
+```bash
+./venv/bin/python manage.py migrate && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}
+```
+
 ### 3.3 (Optional) Add a Sevalla-Managed Database
 
 1. In your Sevalla project, go to **Databases**.

@@ -105,7 +105,7 @@ Sevalla (sometimes misspelled “Sevella”) supports GitHub-based deployments. 
 
 **Recommended web process start command**
 ```bash
-python manage.py migrate && python manage.py collectstatic --noinput && gunicorn pixelhub.wsgi:application -b 0.0.0.0:$PORT
+./venv/bin/python manage.py migrate && ./venv/bin/python manage.py collectstatic --noinput && ./venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}
 ```
 
 **Required environment variables (set in Sevalla; do not commit secrets)**
