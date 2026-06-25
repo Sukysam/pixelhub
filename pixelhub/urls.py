@@ -25,6 +25,7 @@ urlpatterns = [
     path("favicon.ico", lambda request: HttpResponse(status=204), name="favicon"),
     path('admin/', admin.site.urls),
     path('api/', include('core.urls')),
+    path('api/health/', lambda request: JsonResponse({'status': 'ok'})),
 ]
 
 if settings.DEBUG:
