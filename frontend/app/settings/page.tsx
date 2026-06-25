@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
@@ -70,6 +70,22 @@ function localeFor(language: string, country: string | null) {
 }
 
 export default function SettingsPage() {
+  return (
+    <Suspense
+      fallback={
+        <DashboardLayout>
+          <div className="space-y-6">
+            <div className="text-sm text-gray-600">Loading…</div>
+          </div>
+        </DashboardLayout>
+      }
+    >
+      <SettingsPageInner />
+    </Suspense>
+  );
+}
+
+function SettingsPageInner() {
   const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
