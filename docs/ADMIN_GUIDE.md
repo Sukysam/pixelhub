@@ -1,43 +1,44 @@
 # Admin Guide (Settings)
 
 ## Access
-- Log in with an account that has `is_staff=true`.
-- Open **Admin Settings** in the left navigation.
-- Only full admins can open the **Users** tab or perform write actions; staff access remains read-only for non-user-management sections.
+- Sign in through the main login page with an authorized admin account.
+- Open `/settings`.
+- The administrative section is rendered inside Settings only for users with the `admin` role.
+- Standard users do not see the administrative module, and staff users do not receive admin-only write access.
 
-## Global Settings
-### Default Currency
-- Sets the system fallback currency used when a user has no currency override.
-- Users can override the currency only when **User Overrides** is enabled.
+## Administration Section
+The admin module inside `/settings` consolidates the standalone administrative portal features into one place.
 
-### Appearance
-Controls company-level defaults used by invoice PDFs and receipt prints:
-- Company name / tagline
-- Logo URL
-- Primary color
-- Invoice footer text
-- Receipt footer text
+- **System Configuration**
+  - Default currency
+  - User override policy
+  - Company branding
+  - Tax defaults
+  - Logo upload
 
-### Tax Configuration
-Tax settings are stored as JSON and are intended as defaults and metadata for country adaptation:
-- `type`: `vat` | `gst` | `sales_tax`
-- `default_rate`: string percent (e.g. `"20"`)
-- `inclusive`: boolean (tax-inclusive pricing)
+- **Exchange Rates**
+  - Create, edit, and delete currency pairs
+  - Maintain conversion rates used across the platform
 
 ## User Management
-From **Users** tab:
-- Toggle `Active` to enable/disable sign-in.
-- Toggle `Staff` to grant admin access.
-- Use **Create User** to add a new account.
-- Every create/update action is written to the audit log for traceability.
+- Create new accounts directly from Settings
+- Edit existing accounts
+- Reset passwords
+- Activate or deactivate access
+- Assign primary roles and custom roles
+- Every create or update action is written to the audit log
+
+## Permission Settings
+- Create reusable non-system roles
+- Update permission bundles for custom roles
+- Assign custom roles through the user management workflow
+
+## Audit Log
+- Review recent administrative activity from inside Settings
+- Track account creation, user updates, role changes, and authentication-related events
 
 ## Social Sign-In Configuration
 - Configure Google with `DJANGO_GOOGLE_OAUTH_CLIENT_ID` and `DJANGO_GOOGLE_OAUTH_CLIENT_SECRET`.
 - Configure Facebook with `DJANGO_FACEBOOK_OAUTH_CLIENT_ID` and `DJANGO_FACEBOOK_OAUTH_CLIENT_SECRET`.
-- Privileged accounts are intentionally blocked from social sign-in and must use the staff/admin password flow.
-
-## Exchange Rates (FX)
-From **FX Rates** tab:
-- Add pairs like `USD/EUR` with a decimal rate.
-- Rates are used by the conversion endpoint and formatting helpers.
-- If a direct pair is missing, conversion falls back to the inverse pair if available.
+- Standard users can use social sign-in and account linking from Settings.
+- Privileged users sign in through the same main password form as everyone else.

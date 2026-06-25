@@ -73,7 +73,7 @@ from .models import (
     BusinessMembership,
 )
 from .rbac import user_role_names, user_has_permission
-from .auth_service import admin_mfa_assert, admin_mfa_confirm, admin_mfa_setup, ensure_user_role, issue_access_token, revoke_token, role_for_name
+from .auth_service import ensure_user_role, issue_access_token, revoke_token, role_for_name
 from .serializers import (
     CustomerSerializer,
     ItemSerializer,
@@ -313,6 +313,14 @@ def _serialize_admin_user(user, *, latest_login_at: Optional[str] = None) -> dic
         "company_name": getattr(profile, "company_legal_name", None) if profile else None,
         "last_login_at": latest_login_at,
     }
+
+
+def _login_role_config_for_user(user) -> tuple[Any, str, int]:
+    if user_has_permission(user, "settings.global.write"):
+        return role_for_name("admin"), "admin_login_success", 12 * 3600
+    if user_has_permission(user, "settings.global.read") or user_has_permission(user, "admin.users.read"):
+        return role_for_name("staff"), "staff_login_success", 12 * 3600
+    return role_for_name("user"), "login_success", 7 * 24 * 3600
 
 
 class EditDeletePermission(permissions.BasePermission):
@@ -3185,145 +3193,10 @@ class TokenApi(APIView):
             _log_security_event(None, User, object_id=username or "unknown", changes={"event": "login_failed", "ip": ip})
             raise ValidationError({"detail": "Unable to log in with provided credentials."})
 
-        if user_has_permission(user, "settings.global.read") or user_has_permission(user, "settings.global.write") or user_has_permission(user, "admin.users.read"):
-            raise PermissionDenied("Use the staff/admin login flow for this account.")
-        role = role_for_name("user")
-        token = issue_access_token(user=user, role=role, expires_seconds=7 * 24 * 3600)
-        logger.info("login_success ip=%s user_id=%s", ip or "unknown", str(getattr(user, "pk", "")))
-        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": "login_success", "ip": ip})
-        remember = bool(request.data.get("remember"))
-        resp = Response({"token": token.key, "role": role.name, "expires_at": token.expires_at.isoformat() if token.expires_at else None}, status=status.HTTP_200_OK)
-        _set_auth_cookie(resp, token, remember=remember)
-        return resp
-
-
-class StaffTokenApi(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        ip = _client_ip(request)
-        if _rate_limit(f"staff_login:ip:{ip}", limit=30, window_seconds=60):
-            return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        username = str(request.data.get("username") or "").strip()
-        password = str(request.data.get("password") or "")
-        if not username or not password:
-            raise ValidationError({"detail": "username and password are required"})
-
-        User = get_user_model()
-        user = authenticate(request=request, username=username, password=password)
-        if user is None:
-            _log_security_event(None, User, object_id=username or "unknown", changes={"event": "staff_login_failed", "ip": ip})
-            raise ValidationError({"detail": "Unable to log in with provided credentials."})
-
-        if not user_has_permission(user, "settings.global.read"):
-            raise PermissionDenied("You do not have permission to use staff login.")
-
-        role = role_for_name("staff")
-        token = issue_access_token(user=user, role=role, expires_seconds=12 * 3600)
-        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": "staff_login_success", "ip": ip})
-        remember = bool(request.data.get("remember"))
-        resp = Response({"token": token.key, "role": role.name, "expires_at": token.expires_at.isoformat() if token.expires_at else None}, status=status.HTTP_200_OK)
-        _set_auth_cookie(resp, token, remember=remember)
-        return resp
-
-
-class AdminTokenApi(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        ip = _client_ip(request)
-        if _rate_limit(f"admin_login:ip:{ip}", limit=20, window_seconds=60):
-            return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        username = str(request.data.get("username") or "").strip()
-        password = str(request.data.get("password") or "")
-        code = str(request.data.get("code") or "").strip()
-        if not username or not password:
-            raise ValidationError({"detail": "username and password are required"})
-        if len(password) < 12:
-            raise ValidationError({"password": "Admin passwords must be at least 12 characters."})
-        if not code:
-            raise ValidationError({"code": "MFA code is required"})
-
-        User = get_user_model()
-        user = authenticate(request=request, username=username, password=password)
-        if user is None:
-            _log_security_event(None, User, object_id=username or "unknown", changes={"event": "admin_login_failed", "ip": ip})
-            raise ValidationError({"detail": "Unable to log in with provided credentials."})
-
-        if not user_has_permission(user, "settings.global.write"):
-            raise PermissionDenied("You do not have permission to use admin login.")
-
-        admin_mfa_assert(user, code)
-        role = role_for_name("admin")
-        token = issue_access_token(user=user, role=role, expires_seconds=3600)
-        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": "admin_login_success", "ip": ip})
-        remember = bool(request.data.get("remember"))
-        resp = Response({"token": token.key, "role": role.name, "expires_at": token.expires_at.isoformat() if token.expires_at else None}, status=status.HTTP_200_OK)
-        _set_auth_cookie(resp, token, remember=remember)
-        return resp
-
-
-class AdminMfaSetupApi(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        ip = _client_ip(request)
-        if _rate_limit(f"admin_mfa_setup:ip:{ip}", limit=10, window_seconds=60):
-            return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        username = str(request.data.get("username") or "").strip()
-        password = str(request.data.get("password") or "")
-        if not username or not password:
-            raise ValidationError({"detail": "username and password are required"})
-        if len(password) < 12:
-            raise ValidationError({"password": "Admin passwords must be at least 12 characters."})
-
-        User = get_user_model()
-        user = authenticate(request=request, username=username, password=password)
-        if user is None:
-            _log_security_event(None, User, object_id=username or "unknown", changes={"event": "admin_mfa_setup_failed", "ip": ip})
-            raise ValidationError({"detail": "Unable to log in with provided credentials."})
-        if not user_has_permission(user, "settings.global.write"):
-            raise PermissionDenied("You do not have permission to set up admin MFA.")
-
-        force_reset = bool(request.data.get("force_reset"))
-        payload = admin_mfa_setup(user, force_reset=force_reset, allow_reset=bool(getattr(settings, "DEBUG", False)))
-        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": "admin_mfa_setup_started", "ip": ip})
-        return Response(payload, status=status.HTTP_200_OK)
-
-
-class AdminMfaConfirmApi(APIView):
-    permission_classes = [permissions.AllowAny]
-
-    def post(self, request):
-        ip = _client_ip(request)
-        if _rate_limit(f"admin_mfa_confirm:ip:{ip}", limit=20, window_seconds=60):
-            return Response({"detail": "Too many requests. Please try again later."}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-        username = str(request.data.get("username") or "").strip()
-        password = str(request.data.get("password") or "")
-        code = str(request.data.get("code") or "").strip()
-        if not username or not password:
-            raise ValidationError({"detail": "username and password are required"})
-        if len(password) < 12:
-            raise ValidationError({"password": "Admin passwords must be at least 12 characters."})
-        if not code:
-            raise ValidationError({"code": "MFA code is required"})
-
-        User = get_user_model()
-        user = authenticate(request=request, username=username, password=password)
-        if user is None:
-            _log_security_event(None, User, object_id=username or "unknown", changes={"event": "admin_mfa_confirm_failed", "ip": ip})
-            raise ValidationError({"detail": "Unable to log in with provided credentials."})
-        if not user_has_permission(user, "settings.global.write"):
-            raise PermissionDenied("You do not have permission to set up admin MFA.")
-
-        admin_mfa_confirm(user, code)
-        role = role_for_name("admin")
-        token = issue_access_token(user=user, role=role, expires_seconds=3600)
-        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": "admin_mfa_enabled", "ip": ip})
+        role, event_name, expires_seconds = _login_role_config_for_user(user)
+        token = issue_access_token(user=user, role=role, expires_seconds=expires_seconds)
+        logger.info("%s ip=%s user_id=%s", event_name, ip or "unknown", str(getattr(user, "pk", "")))
+        _log_security_event(user, User, object_id=str(getattr(user, "pk", "")), changes={"event": event_name, "ip": ip})
         remember = bool(request.data.get("remember"))
         resp = Response({"token": token.key, "role": role.name, "expires_at": token.expires_at.isoformat() if token.expires_at else None}, status=status.HTTP_200_OK)
         _set_auth_cookie(resp, token, remember=remember)

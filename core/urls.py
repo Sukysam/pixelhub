@@ -31,10 +31,6 @@ from .views import (
     AdminSendTestEmailApi,
     MeApi,
     TokenApi,
-    StaffTokenApi,
-    AdminTokenApi,
-    AdminMfaSetupApi,
-    AdminMfaConfirmApi,
     RegisterApi,
     VerifyEmailApi,
     ResendVerificationApi,
@@ -77,10 +73,6 @@ router.register(r'business-accounts', BusinessAccountViewSet, basename='business
 
 urlpatterns = [
     path("auth/token/", TokenApi.as_view(), name="api-token"),
-    path("auth/staff/token/", StaffTokenApi.as_view(), name="api-staff-token"),
-    path("auth/admin/token/", AdminTokenApi.as_view(), name="api-admin-token"),
-    path("auth/admin/mfa/setup/", AdminMfaSetupApi.as_view(), name="api-admin-mfa-setup"),
-    path("auth/admin/mfa/confirm/", AdminMfaConfirmApi.as_view(), name="api-admin-mfa-confirm"),
     path("auth/me/", MeApi.as_view(), name="api-me"),
     path("auth/logout/", LogoutApi.as_view(), name="auth-logout"),
     path("auth/register/", RegisterApi.as_view(), name="auth-register"),

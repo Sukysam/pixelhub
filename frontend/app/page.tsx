@@ -138,18 +138,6 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
               </Button>
               <div className="text-xs text-gray-500">Social sign-in requires provider configuration on the backend.</div>
             </div>
-            <div className="rounded-md border border-gray-200 bg-gray-50 p-4 space-y-2">
-              <div className="font-medium text-gray-900">Need a different portal?</div>
-              <div className="text-sm text-gray-600">Administrative sign-in is separated from the standard user login.</div>
-              <div className="flex flex-wrap gap-3">
-                <Link href="/staff-login" prefetch={false} className="text-sm text-blue-700 underline">
-                  Staff sign in
-                </Link>
-                <Link href="/admin-login" prefetch={false} className="text-sm text-blue-700 underline">
-                  Admin sign in
-                </Link>
-              </div>
-            </div>
           </CardContent>
         </Card>
 

@@ -19,15 +19,12 @@ const navItems = [
 export function Sidebar() {
   const { lang, setLang, t } = useI18n();
   const [hasToken, setHasToken] = useState(false);
-  const [hasPrivilegedRole, setHasPrivilegedRole] = useState(false);
   const [brandLabel, setBrandLabel] = useState("PIXELHUB");
 
   useEffect(() => {
     const sync = () => {
       const user = getAuthUser();
-      const roles = user?.roles ?? [];
       setHasToken(!!user);
-      setHasPrivilegedRole(roles.includes("staff") || roles.includes("admin"));
       const company = (user?.company_name ?? "").trim();
       if (company) {
         setBrandLabel(company.length > 24 ? `${company.slice(0, 21)}…` : company);
@@ -72,16 +69,6 @@ export function Sidebar() {
             </Link>
           );
         })}
-        {hasPrivilegedRole ? (
-          <Link
-            href="/admin/settings"
-            prefetch={false}
-            className="flex items-center px-3 py-2 rounded-md text-sm font-medium hover:bg-gray-800 transition-colors"
-          >
-            <Settings className="mr-3 h-5 w-5" />
-            Admin Settings
-          </Link>
-        ) : null}
       </nav>
 
       <div className="mt-auto p-4 space-y-3">
@@ -107,7 +94,6 @@ export function Sidebar() {
               clearAuthToken();
               clearAuthUser();
               setHasToken(false);
-              setHasPrivilegedRole(false);
             }}
           >
             {t("logout")}

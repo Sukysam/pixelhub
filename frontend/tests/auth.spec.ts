@@ -23,6 +23,8 @@ test("guest can register an account on desktop without captcha", async ({ page }
   await expect(page.getByRole("button", { name: "Continue with Google" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue with Facebook" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continue with GitHub" })).toHaveCount(0);
+  await expect(page.getByText("Need a different portal?")).toHaveCount(0);
+  await expect(page.getByText("Administrative sign-in is separated from the standard user login.")).toHaveCount(0);
 
   await fillRegistrationForm(page, email, signupSecret);
   await expect(page.getByLabel("Captcha")).toHaveCount(0);
@@ -32,6 +34,13 @@ test("guest can register an account on desktop without captcha", async ({ page }
 
   await expect(page.getByText(/Account created successfully/i)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("link", { name: "Go to login" })).toBeVisible();
+});
+
+test("removed standalone admin portal routes return not found", async ({ page }) => {
+  for (const path of ["/admin-login", "/staff-login", "/admin/settings", "/admin/users"]) {
+    const res = await page.request.get(path);
+    expect(res.status(), `${path} should not be reachable`).toBe(404);
+  }
 });
 
 test("signup validation works on mobile-sized viewport without broken captcha UI", async ({ page }) => {

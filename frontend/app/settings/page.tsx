@@ -3,13 +3,14 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DashboardLayout } from "@/components/DashboardLayout";
+import { AdminSettingsModule } from "@/components/AdminSettingsModule";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getErrorMessage, resolveMediaUrl } from "@/lib/api";
+import { apiRequest, getAuthUser, getErrorMessage, resolveMediaUrl } from "@/lib/api";
 
 type Currency = {
   id: number;
@@ -86,6 +87,8 @@ export default function SettingsPage() {
 }
 
 function SettingsPageInner() {
+  const authUser = getAuthUser();
+  const isAdmin = (authUser?.roles ?? []).includes("admin");
   const searchParams = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -251,9 +254,10 @@ function SettingsPageInner() {
         ) : !form ? (
           <div className="text-sm text-gray-600">Unable to load user settings.</div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div className="space-y-6">
-              <Card>
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="space-y-6">
+                <Card>
                 <CardHeader>
                   <CardTitle>Connected Accounts</CardTitle>
                   <CardDescription>Link Google or Facebook so you can sign in with either provider on the same profile.</CardDescription>
@@ -281,7 +285,7 @@ function SettingsPageInner() {
                 </CardContent>
               </Card>
 
-              <Card>
+                <Card>
                 <CardHeader>
                   <CardTitle>Preferences</CardTitle>
                   <CardDescription>Language, formats, and notifications.</CardDescription>
@@ -395,7 +399,7 @@ function SettingsPageInner() {
                 </CardContent>
               </Card>
 
-              <Card>
+                <Card>
                 <CardHeader>
                   <CardTitle>Invoice Template</CardTitle>
                   <CardDescription>Logo, colors, and layout options.</CardDescription>
@@ -643,10 +647,10 @@ function SettingsPageInner() {
                   </div>
                 </CardContent>
               </Card>
-            </div>
+              </div>
 
-            <div className="space-y-6">
-              <Card>
+              <div className="space-y-6">
+                <Card>
                 <CardHeader>
                   <CardTitle>Invoice Preview</CardTitle>
                   <CardDescription>Updates as you change template settings.</CardDescription>
@@ -741,7 +745,7 @@ function SettingsPageInner() {
                 </CardContent>
               </Card>
 
-              <Card>
+                <Card>
                 <CardHeader>
                   <CardTitle>Receipt Preview</CardTitle>
                   <CardDescription>Updates as you change template settings.</CardDescription>
@@ -813,7 +817,10 @@ function SettingsPageInner() {
                   </div>
                 </CardContent>
               </Card>
+              </div>
             </div>
+
+            {isAdmin ? <AdminSettingsModule /> : null}
           </div>
         )}
       </div>

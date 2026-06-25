@@ -63,7 +63,7 @@ function AuthCallbackInner() {
                 : oauthError === "rate_limited"
                   ? "Too many attempts. Please try again later."
                   : oauthError === "privileged_account"
-                    ? "This account must use the staff or admin password login flow."
+                    ? "This account must use the main sign-in form to continue."
                     : oauthError === "link_requires_login"
                       ? "Sign in first, then try linking the account again."
                       : oauthError === "already_linked"

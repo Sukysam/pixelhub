@@ -4,39 +4,6 @@ import crypto from "crypto";
 const API_BASE_URL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 let cachedAdminTokenValue: string | null = null;
 
-function base32Decode(input: string): Buffer {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const cleaned = String(input || "")
-    .toUpperCase()
-    .replace(/=+$/g, "")
-    .replace(/[^A-Z2-7]/g, "");
-  let bits = 0;
-  let value = 0;
-  const out: number[] = [];
-  for (const ch of cleaned) {
-    const idx = alphabet.indexOf(ch);
-    if (idx < 0) continue;
-    value = (value << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((value >> bits) & 0xff);
-    }
-  }
-  return Buffer.from(out);
-}
-
-function totpNow(secretB32: string, digits = 6, periodSeconds = 30): string {
-  const key = base32Decode(secretB32);
-  const counter = Math.floor(Date.now() / 1000 / periodSeconds);
-  const msg = Buffer.alloc(8);
-  msg.writeBigUInt64BE(BigInt(counter));
-  const hmac = crypto.createHmac("sha1", key).update(msg).digest();
-  const offset = hmac[hmac.length - 1] & 0x0f;
-  const code = (hmac.readUInt32BE(offset) & 0x7fffffff) % 10 ** digits;
-  return String(code).padStart(digits, "0");
-}
-
 async function adminToken(request: any) {
   if (cachedAdminTokenValue) return cachedAdminTokenValue;
   const username = process.env.E2E_USERNAME;
@@ -45,21 +12,13 @@ async function adminToken(request: any) {
     throw new Error("E2E_USERNAME and E2E_PASSWORD are required");
   }
 
-  const setupRes = await request.post(`${API_BASE_URL}/auth/admin/mfa/setup/`, { data: { username, password, force_reset: true } });
-  if (!setupRes.ok()) {
-    const body = await setupRes.text();
-    throw new Error(`MFA setup failed: status=${setupRes.status()} body=${body}`);
+  const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, { data: { username, password, remember: true } });
+  if (!loginRes.ok()) {
+    const body = await loginRes.text();
+    throw new Error(`Admin login failed: status=${loginRes.status()} body=${body}`);
   }
-  const setup = (await setupRes.json()) as { secret: string };
-  const code = totpNow(setup.secret);
-
-  const confirmRes = await request.post(`${API_BASE_URL}/auth/admin/mfa/confirm/`, { data: { username, password, code } });
-  if (!confirmRes.ok()) {
-    const body = await confirmRes.text();
-    throw new Error(`MFA confirm failed: status=${confirmRes.status()} body=${body}`);
-  }
-  const confirmed = (await confirmRes.json()) as { token: string };
-  cachedAdminTokenValue = confirmed.token;
+  const login = (await loginRes.json()) as { token: string };
+  cachedAdminTokenValue = login.token;
   return cachedAdminTokenValue;
 }
 
@@ -124,11 +83,58 @@ async function registerAndReachDashboard(page: any) {
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
 }
 
+test("standard user settings does not expose administration controls", async ({ page }) => {
+  await registerAndReachDashboard(page);
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Administration" })).toHaveCount(0);
+});
+
+test("admin can manage roles and users from settings", async ({ page, request }) => {
+  const token = await adminToken(request);
+  await setSession(page, request, token);
+
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "User Management" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Permission Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
+
+  const roleName = `ops_ui_${Date.now()}`;
+  await page.getByRole("button", { name: "New Role" }).click();
+  const roleDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create Role" }) });
+  await roleDialog.getByLabel("Role Name").fill(roleName);
+  await roleDialog.getByLabel("Description").fill("Operations role created from settings UI");
+  await roleDialog.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
+  await roleDialog.getByRole("button", { name: "Create role" }).evaluate((node: HTMLButtonElement) => node.click());
+  await expect(page.getByText("Role created successfully.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(roleName)).toBeVisible();
+
+  const email = `settings_admin_${Date.now()}@example.com`;
+  const phone = `8${String(Date.now()).slice(-9)}`;
+  await page.getByRole("button", { name: "New User" }).click();
+  const userDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create User" }) });
+  await userDialog.getByLabel("Username").fill(email);
+  await userDialog.getByLabel("Email").fill(email);
+  await userDialog.getByLabel("Full Name").fill("Settings Admin User");
+  await userDialog.getByLabel("Company Name").fill("Settings Admin Co");
+  await userDialog.getByLabel("Phone").fill(phone);
+  await userDialog.getByLabel("Primary Role").selectOption("user");
+  await userDialog.getByPlaceholder("Minimum 6 characters").fill("pw_settings_ui_A1!");
+  await userDialog.locator("label").filter({ hasText: roleName }).locator('input[type="checkbox"]').check();
+  await userDialog.getByRole("button", { name: "Create user" }).click();
+  await expect(page.getByText("User created successfully.")).toBeVisible({ timeout: 30_000 });
+
+  const userRow = page.getByRole("row", { name: new RegExp(email) });
+  await expect(userRow).toContainText(roleName);
+});
+
 test("user can update invoice footer in settings", async ({ page }) => {
   await registerAndReachDashboard(page);
 
   await page.getByRole("link", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Connected Accounts" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect", exact: true }).first()).toBeVisible();
 
@@ -148,7 +154,7 @@ test("user can select NGN currency in settings", async ({ page }) => {
   await registerAndReachDashboard(page);
 
   await page.getByRole("link", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
 
   const currency = page.getByLabel("Currency");
   await expect(currency).toBeVisible({ timeout: 30_000 });
@@ -165,8 +171,9 @@ test("admin can upload PNG logo, save global settings, and logo shows in user Se
   const token = await adminToken(request);
   await setSession(page, request, token);
 
-  await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "Admin Settings" })).toBeVisible();
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
 
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
@@ -187,7 +194,7 @@ test("admin can upload PNG logo, save global settings, and logo shows in user Se
   await expect(page.getByText("Global settings saved.")).toBeVisible({ timeout: 30_000 });
 
   await page.goto("/settings");
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   const invoiceLogo = page.getByLabel("Invoice preview").locator('img[alt="Logo"]');
   await expect(invoiceLogo).toBeVisible({ timeout: 30_000 });
   await expect(invoiceLogo).toHaveAttribute("src", /127\.0\.0\.1:8000\/media\/uploads\/logos\//);
@@ -201,8 +208,8 @@ test("admin logo upload validation: rejects unsupported and oversized files; han
   const token = await adminToken(request);
   await setSession(page, request, token);
 
-  await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "Admin Settings" })).toBeVisible();
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
   const fileInput = page.locator("#logo_upload");
 
   await fileInput.setInputFiles({ name: "logo.txt", mimeType: "text/plain", buffer: Buffer.from("nope") });
@@ -224,8 +231,8 @@ test("admin can upload SVG logo and thumbnail is generated", async ({ page, requ
   const token = await adminToken(request);
   await setSession(page, request, token);
 
-  await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "Admin Settings" })).toBeVisible();
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
 
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
@@ -242,8 +249,8 @@ test("admin can upload JPG logo and thumbnail is generated", async ({ page, requ
   const token = await adminToken(request);
   await setSession(page, request, token);
 
-  await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "Admin Settings" })).toBeVisible();
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
 
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
@@ -261,8 +268,8 @@ test("admin logo upload blocks concurrent uploads while in progress", async ({ p
   const token = await adminToken(request);
   await setSession(page, request, token);
 
-  await page.goto("/admin/settings");
-  await expect(page.getByRole("heading", { name: "Admin Settings" })).toBeVisible();
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Administration" })).toBeVisible();
 
   await page.route("**/api/admin/logo/upload/", async (route) => {
     await new Promise((r) => setTimeout(r, 2000));

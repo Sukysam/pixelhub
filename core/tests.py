@@ -41,7 +41,6 @@ from .models import (
     SocialAuthConnection,
     EmailVerificationToken,
     AccessToken,
-    AdminMfaDevice,
     Role,
     UserRole,
     DocumentDelivery,
@@ -51,7 +50,6 @@ from .models import (
     evaluate_invoice_payment_status,
 )
 from .views import _rate_limit
-from .auth_service import totp_now
 from .documents import create_delivery
 
 
@@ -1493,6 +1491,49 @@ class ApiCoverageTests(APITestCase):
         fx_del = self.client.delete(f"/api/exchange-rates/{fx_id}/")
         self.assertEqual(fx_del.status_code, status.HTTP_204_NO_CONTENT)
 
+    def test_admin_roles_and_audit_logs_enforce_rbac(self):
+        self.client.force_authenticate(user=self.staff)
+        self.assertEqual(self.client.get("/api/admin/roles/").status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get("/api/admin/audit-logs/?page=1").status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.user)
+        self.assertEqual(self.client.get("/api/admin/roles/").status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get("/api/admin/audit-logs/?page=1").status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.admin)
+        roles = self.client.get("/api/admin/roles/")
+        self.assertEqual(roles.status_code, status.HTTP_200_OK)
+        self.assertIn("permissions", roles.data)
+
+        created = self.client.post(
+            "/api/admin/roles/",
+            {
+                "name": "ops_e2e",
+                "description": "Operations role for regression coverage",
+                "permission_codes": ["data.items.read", "data.invoices.read"],
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+
+        patched = self.client.patch(
+            "/api/admin/roles/",
+            {
+                "id": created.data["id"],
+                "description": "Updated operations role",
+                "permission_codes": ["data.items.read"],
+            },
+            format="json",
+        )
+        self.assertEqual(patched.status_code, status.HTTP_200_OK)
+        role = Role.objects.get(pk=created.data["id"])
+        self.assertEqual(role.description, "Updated operations role")
+
+        audit = self.client.get("/api/admin/audit-logs/?page=1&q=ops_e2e")
+        self.assertEqual(audit.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(audit.data["count"], 1)
+        self.assertTrue(any(row["object_id"] == str(role.id) for row in audit.data["results"]))
+
     def test_invoice_pdf_and_receipt_print(self):
         self.client.force_authenticate(user=self.user)
         customer = Customer.objects.create(name="PDF Buyer", email="p@example.com")
@@ -1609,37 +1650,27 @@ class AuthApiTests(APITestCase):
         self.assertEqual(res.data.get("role"), "user")
         self.assertTrue(AccessToken.objects.filter(user=user, role__name="user").exists())
 
-    def test_staff_login_requires_staff_role(self):
-        plain_secret = _test_secret()
+    def test_privileged_accounts_can_login_via_standard_token(self):
         staff_secret = _test_secret()
-        User.objects.create_user(username="plain", password=plain_secret, is_active=True)
+        admin_secret = _test_secret()
         staff = User.objects.create_user(username="staff_user", password=staff_secret, is_active=True, is_staff=True)
+        admin = User.objects.create_user(username="admin_user", password=admin_secret, is_active=True, is_staff=True, is_superuser=True)
 
-        denied = self.client.post("/api/auth/staff/token/", {"username": "plain", "password": plain_secret}, format="json")
-        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
-
-        ok = self.client.post("/api/auth/staff/token/", {"username": "staff_user", "password": staff_secret}, format="json")
-        self.assertEqual(ok.status_code, status.HTTP_200_OK)
-        self.assertEqual(ok.data.get("role"), "staff")
+        staff_res = self.client.post("/api/auth/token/", {"username": "staff_user", "password": staff_secret}, format="json")
+        self.assertEqual(staff_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(staff_res.data.get("role"), "staff")
         self.assertTrue(AccessToken.objects.filter(user=staff, role__name="staff").exists())
 
-    def test_admin_login_requires_mfa(self):
-        login_secret = _test_secret()
-        admin = User.objects.create_user(username="admin_user", password=login_secret, is_active=True, is_staff=True, is_superuser=True)
-
-        denied = self.client.post("/api/auth/admin/token/", {"username": "admin_user", "password": login_secret, "code": "123456"}, format="json")
-        self.assertEqual(denied.status_code, status.HTTP_400_BAD_REQUEST)
-
-        setup = self.client.post("/api/auth/admin/mfa/setup/", {"username": "admin_user", "password": login_secret}, format="json")
-        self.assertEqual(setup.status_code, status.HTTP_200_OK)
-        mfa_secret = setup.data.get("secret")
-        self.assertTrue(mfa_secret)
-
-        code = totp_now(mfa_secret)
-        confirm = self.client.post("/api/auth/admin/mfa/confirm/", {"username": "admin_user", "password": login_secret, "code": code}, format="json")
-        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
-        self.assertEqual(confirm.data.get("role"), "admin")
+        admin_res = self.client.post("/api/auth/token/", {"username": "admin_user", "password": admin_secret}, format="json")
+        self.assertEqual(admin_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(admin_res.data.get("role"), "admin")
         self.assertTrue(AccessToken.objects.filter(user=admin, role__name="admin").exists())
+
+    def test_removed_standalone_admin_auth_endpoints_return_404(self):
+        self.assertEqual(self.client.post("/api/auth/staff/token/", {}, format="json").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.post("/api/auth/admin/token/", {}, format="json").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.post("/api/auth/admin/mfa/setup/", {}, format="json").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.post("/api/auth/admin/mfa/confirm/", {}, format="json").status_code, status.HTTP_404_NOT_FOUND)
 
     def test_me_includes_company_name(self):
         user = User.objects.create_user(username="u_me", password=_test_secret(), is_active=True)

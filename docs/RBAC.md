@@ -1,36 +1,35 @@
 # RBAC (Role-Based Access Control) – PIXELHUB
 
 ## Overview
-PIXELHUB uses an explicit RBAC data model (roles + permissions) and scoped access tokens to separate authentication and authorization for:
-- **User**: regular product user
-- **Staff**: operational role with read-only visibility into selected system configuration
-- **Admin**: elevated role with write access to system-wide settings and admin functionality
+PIXELHUB uses database-backed roles, permissions, and scoped access tokens to separate standard user activity from elevated administration.
 
-Authentication and authorization are enforced on the API layer and mirrored on the frontend via role-aware UI rendering.
+- **user**: regular product access
+- **staff**: operational access to selected read-only administrative data
+- **admin**: full administrative access
+
+Authentication and authorization are enforced on the API and mirrored in the frontend. Administrative tools now live inside the main `/settings` screen and are rendered only for authorized admin users.
 
 ## Role Hierarchy
-- **admin**: highest privilege (includes all permissions)
-- **staff**: limited privilege (subset of admin; read-only for admin settings)
-- **user**: default role (no admin permissions)
+- **admin**: highest privilege, including write access to administrative features
+- **staff**: limited privilege with selected read-only access
+- **user**: default role with no administrative permissions
 
 ## Tokens and Sessions
 All authenticated requests use `Authorization: Token <token>` where `<token>` is an `AccessToken`.
-- Tokens are scoped to a **role** at issuance time.
-- Tokens are revocable (`revoked_at`) and may have expirations (`expires_at`).
 
-### Distinct Authentication Flows
-- `POST /api/auth/token/` issues a **user** token
-- `POST /api/auth/staff/token/` issues a **staff** token
-- `POST /api/auth/admin/token/` issues an **admin** token (requires MFA code)
-- `POST /api/auth/admin/mfa/setup/` starts MFA enrollment for admin accounts
-- `POST /api/auth/admin/mfa/confirm/` confirms MFA and issues an admin token
-- Social sign-in (`/api/auth/google/*`, `/api/auth/facebook/*`) is limited to standard user sessions and will refuse privileged accounts so admin/staff users must stay on the password+MFA flow.
-
-### Logout
+- `POST /api/auth/token/` is the single password-based login endpoint for all accounts.
+- The issued token is scoped to the resolved session role (`user`, `staff`, or `admin`).
+- Tokens are revocable (`revoked_at`) and may expire (`expires_at`).
 - `POST /api/auth/logout/` revokes the current token.
 
+## Authentication Model
+- Standard, staff, and admin accounts all sign in through the main login form.
+- Standalone privileged login routes and privileged token endpoints were removed.
+- Social sign-in remains available for standard user sessions.
+- If a privileged account attempts a social login path that is not allowed, the UI redirects the user back to the main sign-in flow.
+
 ## Permissions Matrix
-Permission codes are stored in the database and assigned via role-permission mapping.
+Permission codes are stored in the database and assigned through role-permission mappings.
 
 | Capability | Permission code | user | staff | admin |
 |---|---:|:---:|:---:|:---:|
@@ -46,29 +45,34 @@ Permission codes are stored in the database and assigned via role-permission map
 | Manage currencies | `currency.write` | ✗ | ✗ | ✓ |
 
 ## Sensitive Data Handling
-Some fields are treated as sensitive and are not returned to staff:
+Sensitive fields are filtered for non-admin callers.
+
 - `tax_identification_number` is hidden for non-admin callers in:
   - `GET /api/settings/global/`
   - `GET /api/settings/effective/`
 
-## Admin MFA Requirements
-Admin authentication requires MFA:
-- Admin accounts must enroll in TOTP MFA via `/api/auth/admin/mfa/setup/` and `/api/auth/admin/mfa/confirm/`.
-- Admin login requires a current TOTP code (`code`) and enforces basic replay protection.
+## Administrative Surface
+Administrative APIs still live under `/api/admin/*`, but the user-facing admin interface is no longer split into separate portals.
 
-## Password Policy (Admin)
-Admin login enforces a minimum password length of **12 characters**.
+- Admin UI entry point: `/settings`
+- Main admin sections inside Settings:
+  - system configuration
+  - exchange rates
+  - user management
+  - permission settings
+  - audit log
 
 ## Audit Logging
-Admin and security-relevant actions are recorded in the audit log:
-- Authentication security events (success/failure/rate limits/MFA flows)
-- Global settings updates (before/after snapshots)
-- Admin operations (e.g., user management, logo upload)
-- Social account linking events (provider connected to a user profile)
+Administrative and security-relevant actions are recorded in the audit log.
 
-## OWASP / Security Best Practices
-- Always enforce authorization on the server (UI checks are advisory only).
-- Use rate limiting on login and MFA endpoints to reduce brute-force attempts.
+- Authentication security events
+- Global settings updates
+- User and role management actions
+- Logo upload activity
+- Social account linking events
+
+## Security Notes
+- Always enforce authorization on the server; frontend checks are advisory only.
+- Keep rate limiting on authentication endpoints to reduce brute-force attempts.
 - Revoke tokens on logout and on password reset confirmation.
 - Do not return sensitive fields to roles that do not require them.
-- Keep admin MFA mandatory; avoid bypass mechanisms in production.
