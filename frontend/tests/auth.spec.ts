@@ -1,13 +1,18 @@
 import { test, expect } from "@playwright/test";
 
-async function fillRegistrationForm(page: any, email: string, password: string) {
+function uniqueNgPhone() {
+  const suffix = `${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-9);
+  return `8${suffix}`;
+}
+
+async function fillRegistrationForm(page: any, email: string, password: string, phoneNumber = uniqueNgPhone()) {
   await page.goto("/register");
 
   await page.getByLabel("Email Address").fill(email);
   await page.getByLabel("Create New Password (6 Characters Minimum)").fill(password);
   await page.getByLabel("Confirm Password").fill(password);
   await page.getByLabel("Your Company Name").fill("E2E Company Ltd");
-  await page.getByLabel("Phone Number").fill("8012345678");
+  await page.getByLabel("Phone Number").fill(phoneNumber);
 }
 
 test("guest can register an account on desktop without captcha", async ({ page }) => {
