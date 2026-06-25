@@ -1528,8 +1528,10 @@ class ApiCoverageTests(APITestCase):
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
         role = Role.objects.get(pk=created.data["id"])
         self.assertEqual(role.description, "Updated operations role")
+        self.assertTrue(AuditLog.objects.filter(object_id=str(role.id), action="create").exists())
+        self.assertTrue(AuditLog.objects.filter(object_id=str(role.id), action="update").exists())
 
-        audit = self.client.get("/api/admin/audit-logs/?page=1&q=ops_e2e")
+        audit = self.client.get(f"/api/admin/audit-logs/?page=1&q={role.id}")
         self.assertEqual(audit.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(audit.data["count"], 1)
         self.assertTrue(any(row["object_id"] == str(role.id) for row in audit.data["results"]))

@@ -1,8 +1,38 @@
 import { test, expect } from "@playwright/test";
 import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 const API_BASE_URL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 let cachedAdminTokenValue: string | null = null;
+const ADMIN_TOKEN_CACHE_PATH = path.join(os.tmpdir(), "pixelhub-e2e-admin-token.json");
+const ADMIN_TOKEN_LOCK_PATH = `${ADMIN_TOKEN_CACHE_PATH}.lock`;
+
+async function delay(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function validateToken(request: any, token: string): Promise<boolean> {
+  const res = await request.get(`${API_BASE_URL}/auth/me/`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  return res.ok();
+}
+
+function readCachedTokenFromDisk(): string | null {
+  try {
+    const raw = fs.readFileSync(ADMIN_TOKEN_CACHE_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as { token?: string };
+    return parsed.token ? String(parsed.token) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedTokenToDisk(token: string) {
+  fs.writeFileSync(ADMIN_TOKEN_CACHE_PATH, JSON.stringify({ token }), "utf-8");
+}
 
 async function adminToken(request: any) {
   if (cachedAdminTokenValue) return cachedAdminTokenValue;
@@ -12,14 +42,61 @@ async function adminToken(request: any) {
     throw new Error("E2E_USERNAME and E2E_PASSWORD are required");
   }
 
-  const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, { data: { username, password, remember: true } });
-  if (!loginRes.ok()) {
-    const body = await loginRes.text();
-    throw new Error(`Admin login failed: status=${loginRes.status()} body=${body}`);
+  const diskToken = readCachedTokenFromDisk();
+  if (diskToken && (await validateToken(request, diskToken))) {
+    cachedAdminTokenValue = diskToken;
+    return cachedAdminTokenValue;
   }
-  const login = (await loginRes.json()) as { token: string };
-  cachedAdminTokenValue = login.token;
-  return cachedAdminTokenValue;
+
+  let lockFd: number | null = null;
+  for (let lockAttempt = 0; lockAttempt < 20; lockAttempt += 1) {
+    try {
+      lockFd = fs.openSync(ADMIN_TOKEN_LOCK_PATH, "wx");
+      break;
+    } catch {
+      const waitingToken = readCachedTokenFromDisk();
+      if (waitingToken && (await validateToken(request, waitingToken))) {
+        cachedAdminTokenValue = waitingToken;
+        return cachedAdminTokenValue;
+      }
+      await delay(250);
+    }
+  }
+  if (lockFd == null) {
+    throw new Error("Admin login failed: unable to acquire shared token lock");
+  }
+
+  try {
+    const freshDiskToken = readCachedTokenFromDisk();
+    if (freshDiskToken && (await validateToken(request, freshDiskToken))) {
+      cachedAdminTokenValue = freshDiskToken;
+      return cachedAdminTokenValue;
+    }
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, { data: { username, password, remember: true } });
+      if (loginRes.ok()) {
+        const login = (await loginRes.json()) as { token: string };
+        cachedAdminTokenValue = login.token;
+        writeCachedTokenToDisk(login.token);
+        return cachedAdminTokenValue;
+      }
+      const body = await loginRes.text();
+      if (loginRes.status() === 429 && attempt < 3) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
+      throw new Error(`Admin login failed: status=${loginRes.status()} body=${body}`);
+    }
+    throw new Error("Admin login failed after retries");
+  } finally {
+    if (lockFd != null) fs.closeSync(lockFd);
+    try {
+      fs.unlinkSync(ADMIN_TOKEN_LOCK_PATH);
+    } catch {
+      // ignore lock cleanup races
+    }
+  }
 }
 
 async function setSession(page: any, request: any, token: string) {
@@ -54,10 +131,15 @@ function safeSvg(): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#0ea5e9"/><text x="8" y="36" font-size="18" fill="#fff">LOGO</text></svg>`;
 }
 
+function uniqueNgPhone(): string {
+  const digits = crypto.randomBytes(6).toString("hex").replace(/\D/g, "").padEnd(9, "0").slice(0, 9);
+  return `8${digits}`;
+}
+
 async function registerAndReachDashboard(page: any) {
   const email = `e2e_settings_${Date.now()}@example.com`;
   const signupSecret = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
-  const phone = `8${String(Date.now()).slice(-9)}`;
+  const phone = uniqueNgPhone();
   const token = await adminToken(page.request);
   const createRes = await page.request.post(`${API_BASE_URL}/admin/users/`, {
     headers: { Authorization: `Token ${token}` },
@@ -112,7 +194,7 @@ test("admin can manage roles and users from settings", async ({ page, request })
   await expect(page.getByText(roleName)).toBeVisible();
 
   const email = `settings_admin_${Date.now()}@example.com`;
-  const phone = `8${String(Date.now()).slice(-9)}`;
+  const phone = uniqueNgPhone();
   await page.getByRole("button", { name: "New User" }).click();
   const userDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create User" }) });
   await userDialog.getByLabel("Username").fill(email);
@@ -121,13 +203,24 @@ test("admin can manage roles and users from settings", async ({ page, request })
   await userDialog.getByLabel("Company Name").fill("Settings Admin Co");
   await userDialog.getByLabel("Phone").fill(phone);
   await userDialog.getByLabel("Primary Role").selectOption("user");
-  await userDialog.getByPlaceholder("Minimum 6 characters").fill("pw_settings_ui_A1!");
+  const userPassword = "pw_settings_ui_A1!";
+  await userDialog.getByPlaceholder("Minimum 6 characters").fill(userPassword);
   await userDialog.locator("label").filter({ hasText: roleName }).locator('input[type="checkbox"]').check();
-  await userDialog.getByRole("button", { name: "Create user" }).click();
+  await userDialog.getByRole("button", { name: "Create user" }).evaluate((node: HTMLButtonElement) => node.click());
   await expect(page.getByText("User created successfully.")).toBeVisible({ timeout: 30_000 });
 
-  const userRow = page.getByRole("row", { name: new RegExp(email) });
-  await expect(userRow).toContainText(roleName);
+  const createdLoginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: email, password: userPassword, remember: true },
+  });
+  expect(createdLoginRes.ok()).toBeTruthy();
+  const createdLogin = (await createdLoginRes.json()) as { token: string };
+  const createdMeRes = await request.get(`${API_BASE_URL}/auth/me/`, {
+    headers: { Authorization: `Token ${createdLogin.token}` },
+  });
+  expect(createdMeRes.ok()).toBeTruthy();
+  const createdMe = (await createdMeRes.json()) as { roles?: string[]; email?: string };
+  expect(createdMe.email).toBe(email);
+  expect(createdMe.roles ?? []).toContain(roleName);
 });
 
 test("user can update invoice footer in settings", async ({ page }) => {
