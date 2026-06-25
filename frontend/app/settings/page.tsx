@@ -204,7 +204,9 @@ export default function SettingsPage() {
   const startSocialLink = (provider: "google" | "facebook") => {
     setError(null);
     setSuccess(null);
-    window.location.href = `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api"}/auth/${provider}/start/?intent=link&remember=1`;
+    window.location.assign(
+      `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api"}/auth/${provider}/start/?intent=link&remember=1`
+    );
   };
 
   return (

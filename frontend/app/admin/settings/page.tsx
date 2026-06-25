@@ -1,7 +1,6 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
@@ -107,7 +106,7 @@ function AdminSettingsInner() {
     if (t === "users" && isAdmin) setTab("users");
     else if (t === "fx" && isStaffOrAdmin) setTab("fx");
     else if (t === "global" && isStaffOrAdmin) setTab("global");
-  }, [isStaffOrAdmin, searchParams]);
+  }, [isAdmin, isStaffOrAdmin, searchParams]);
 
   const loadAll = useCallback(async () => {
     setError(null);
