@@ -11,8 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
-import { uploadLogoFile, validateLogoFile, type LogoUploadScope } from "../../lib/logoUpload";
+import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl, uploadLogoFile, validateLogoFile, type LogoUploadScope } from "@/lib/api";
 
 type Currency = {
   id: number;

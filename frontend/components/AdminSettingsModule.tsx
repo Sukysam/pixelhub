@@ -8,8 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { LogoUploadField } from "@/components/LogoUploadField";
-import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
-import { uploadLogoFile, validateLogoFile } from "../lib/logoUpload";
+import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl, uploadLogoFile, validateLogoFile } from "@/lib/api";
 
 type Currency = {
   id: number;

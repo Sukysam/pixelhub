@@ -2,7 +2,7 @@
 
 import { useMemo, useRef } from "react";
 import { Label } from "@/components/ui/label";
-import { LOGO_ACCEPT } from "../lib/logoUpload";
+import { LOGO_ACCEPT } from "@/lib/api";
 
 type Props = {
   id: string;
