@@ -1,4 +1,11 @@
 import { test, expect } from "@playwright/test";
+import {
+  API_BASE_URL,
+  adminInvitationTokenForEmail,
+  adminInvitationUrlForEmail,
+  createAdminInvitedUser,
+  expireAdminInvitationForEmail,
+} from "./helpers/admin";
 
 function uniqueNgPhone() {
   const suffix = `${Date.now()}${Math.floor(Math.random() * 1000)}`.slice(-9);
@@ -67,4 +74,97 @@ test("guest can request password reset", async ({ page }) => {
   await page.getByRole("button", { name: "Send reset link" }).click();
 
   await expect(page.getByText(/password reset link has been sent/i)).toBeVisible({ timeout: 30_000 });
+});
+
+test("admin invited user accepts invitation, sets a password, and reaches the dashboard", async ({ page, request }) => {
+  test.slow();
+  const invited = await createAdminInvitedUser(request, {
+    email: `e2e_invite_success_${Date.now()}@example.com`,
+    companyName: "Invite Success Co",
+    fullName: "Invite Success User",
+  });
+
+  const preLoginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: invited.username, password: invited.password, remember: true },
+  });
+  expect(preLoginRes.ok()).toBeFalsy();
+  expect(await preLoginRes.text()).toMatch(/invitation pending|not active/i);
+
+  await page.goto(adminInvitationUrlForEmail(invited.email));
+  await page.waitForURL(/\/reset-password\?/i, { timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Set your password" })).toBeVisible();
+
+  const newPassword = `Invite_${Date.now()}Aa!`;
+  await page.getByLabel("New password", { exact: true }).fill(newPassword);
+  await page.getByLabel("Confirm new password").fill(newPassword);
+  await page.getByRole("button", { name: "Reset password" }).click();
+
+  await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
+
+  const postLoginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: invited.username, password: newPassword, remember: true },
+  });
+  expect(postLoginRes.ok()).toBeTruthy();
+  const postLogin = (await postLoginRes.json()) as { token: string };
+
+  const meRes = await request.get(`${API_BASE_URL}/auth/me/`, {
+    headers: { Authorization: `Token ${postLogin.token}` },
+  });
+  expect(meRes.ok()).toBeTruthy();
+  const me = (await meRes.json()) as { email?: string; roles?: string[]; permissions?: string[] };
+  expect(me.email).toBe(invited.email);
+  expect(me.roles ?? []).toContain("editor");
+  expect(me.permissions ?? []).toContain("data.customers.write");
+  expect(me.permissions ?? []).toContain("data.invoices.write");
+  expect(me.permissions ?? []).toContain("data.receipts.write");
+});
+
+test("password reset remains gated until the admin invitation is accepted", async ({ request }) => {
+  const invited = await createAdminInvitedUser(request, {
+    email: `e2e_invite_gate_${Date.now()}@example.com`,
+    companyName: "Invite Gate Co",
+    fullName: "Invite Gate User",
+  });
+
+  const resetBeforeAcceptanceRes = await request.post(`${API_BASE_URL}/auth/password-reset/`, {
+    data: { email: invited.email },
+  });
+  expect(resetBeforeAcceptanceRes.ok()).toBeTruthy();
+  expect((await resetBeforeAcceptanceRes.json()) as { sent?: boolean }).toEqual({ sent: true });
+
+  const blockedLoginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: invited.username, password: invited.password, remember: true },
+  });
+  expect(blockedLoginRes.ok()).toBeFalsy();
+  expect(await blockedLoginRes.text()).toMatch(/invitation pending|not active/i);
+
+  const acceptRes = await request.post(`${API_BASE_URL}/auth/verify-email/`, {
+    data: { token: adminInvitationTokenForEmail(invited.email), token_type: "admin_invitation" },
+  });
+  expect(acceptRes.ok()).toBeTruthy();
+  const accepted = (await acceptRes.json()) as {
+    invitation_accepted?: boolean;
+    password_reset_unlocked?: boolean;
+    reset_uid?: string;
+    reset_token?: string;
+  };
+  expect(accepted.invitation_accepted).toBeTruthy();
+  expect(accepted.password_reset_unlocked).toBeTruthy();
+  expect(accepted.reset_uid).toBeTruthy();
+  expect(accepted.reset_token).toBeTruthy();
+});
+
+test("expired admin invitation shows a verification error", async ({ page, request }) => {
+  const invited = await createAdminInvitedUser(request, {
+    email: `e2e_invite_expired_${Date.now()}@example.com`,
+    companyName: "Invite Expired Co",
+    fullName: "Invite Expired User",
+  });
+
+  const expiredToken = expireAdminInvitationForEmail(invited.email);
+  await page.goto(`/verify-email?token=${encodeURIComponent(expiredToken)}&token_type=admin_invitation`);
+
+  await expect(page.getByRole("heading", { name: "Verify email" })).toBeVisible();
+  await expect(page.getByText(/expired/i)).toBeVisible({ timeout: 30_000 });
+  await expect(page).toHaveURL(/\/verify-email\?/i);
 });

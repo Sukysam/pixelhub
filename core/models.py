@@ -1,5 +1,3 @@
-import uuid
-
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
@@ -309,6 +307,7 @@ class GlobalSettings(models.Model):
     default_currency = models.ForeignKey(Currency, blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
     tax_configuration = models.JSONField(default=dict, blank=True)
     appearance = models.JSONField(default=dict, blank=True)
+    appearance_logo = models.ForeignKey("LogoAsset", blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
     tax_identification_number = models.CharField(max_length=100, blank=True, null=True)
     allow_user_overrides = models.BooleanField(default=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
@@ -328,10 +327,49 @@ class UserSettings(models.Model):
     notifications = models.JSONField(default=dict, blank=True)
     invoice_template = models.JSONField(default=dict, blank=True)
     receipt_template = models.JSONField(default=dict, blank=True)
+    invoice_logo = models.ForeignKey("LogoAsset", blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
+    receipt_logo = models.ForeignKey("LogoAsset", blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Settings for {self.user_id}"
+
+
+class LogoAsset(models.Model):
+    SCOPE_GLOBAL_APPEARANCE = "global_appearance"
+    SCOPE_INVOICE_TEMPLATE = "invoice_template"
+    SCOPE_RECEIPT_TEMPLATE = "receipt_template"
+    SCOPE_CHOICES = [
+        (SCOPE_GLOBAL_APPEARANCE, "Global appearance"),
+        (SCOPE_INVOICE_TEMPLATE, "Invoice template"),
+        (SCOPE_RECEIPT_TEMPLATE, "Receipt template"),
+    ]
+
+    scope = models.CharField(max_length=40, choices=SCOPE_CHOICES)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
+    original_name = models.CharField(max_length=255)
+    file = models.FileField(upload_to="uploads/logos/")
+    thumbnail = models.FileField(upload_to="uploads/logos/", blank=True, null=True)
+    content_type = models.CharField(max_length=100)
+    sha256 = models.CharField(max_length=64)
+    size_bytes = models.PositiveIntegerField(default=0)
+    width = models.PositiveIntegerField(blank=True, null=True)
+    height = models.PositiveIntegerField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def file_url(self):
+        return self.file.url if self.file else None
+
+    @property
+    def thumbnail_url(self):
+        if self.thumbnail:
+            return self.thumbnail.url
+        return self.file_url
+
+    def __str__(self):
+        return f"{self.scope}:{self.original_name}"
 
 
 class UserProfile(models.Model):
@@ -431,6 +469,29 @@ class EmailVerificationToken(models.Model):
 
     def __str__(self):
         return f"EmailVerificationToken {self.user_id}"
+
+
+class AdminUserInvitation(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="admin_invitation")
+    invited_by = models.ForeignKey(settings.AUTH_USER_MODEL, blank=True, null=True, on_delete=models.SET_NULL, related_name="+")
+    token_key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    confirmation_email_sent_at = models.DateTimeField(blank=True, null=True)
+    accepted_at = models.DateTimeField(blank=True, null=True)
+    password_reset_completed_at = models.DateTimeField(blank=True, null=True)
+    activated_at = models.DateTimeField(blank=True, null=True)
+    welcome_email_sent_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "expires_at"]),
+            models.Index(fields=["token_key"]),
+        ]
+
+    def __str__(self):
+        return f"AdminUserInvitation {self.user_id}"
 
 
 class DocumentDelivery(models.Model):

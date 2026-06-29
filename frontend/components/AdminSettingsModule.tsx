@@ -1,13 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getAuthToken, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
+import { LogoUploadField } from "@/components/LogoUploadField";
+import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
+import { uploadLogoFile, validateLogoFile } from "@/lib/logoUpload";
 
 type Currency = {
   id: number;
@@ -50,6 +52,9 @@ type AdminUser = {
   full_name?: string | null;
   phone?: string | null;
   company_name?: string | null;
+  invitation_status?: "pending_acceptance" | "accepted_pending_password" | "password_set" | "active" | "expired" | null;
+  invitation_expires_at?: string | null;
+  invitation_accepted_at?: string | null;
   last_login_at?: string | null;
 };
 
@@ -102,7 +107,7 @@ const EMPTY_USER_FORM: UserForm = {
   full_name: "",
   company_name: "",
   phone: "",
-  is_active: true,
+  is_active: false,
   primary_role: "user",
   custom_roles: [],
   password: "",
@@ -114,10 +119,23 @@ const EMPTY_ROLE_DRAFT: RoleDraft = {
   permission_codes: [],
 };
 
+function describeUserAccessStatus(user: AdminUser) {
+  if (user.is_active) return "Active";
+  switch (user.invitation_status) {
+    case "pending_acceptance":
+      return "Invited";
+    case "accepted_pending_password":
+      return "Accepted - set password";
+    case "expired":
+      return "Invitation expired";
+    default:
+      return "Inactive";
+  }
+}
+
 export function AdminSettingsModule() {
   const authUser = getAuthUser();
   const isAdmin = hasAdminSettingsAccess(authUser);
-  const logoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -129,6 +147,7 @@ export function AdminSettingsModule() {
   const [logoUploading, setLogoUploading] = useState(false);
   const [logoProgress, setLogoProgress] = useState(0);
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState("");
 
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
@@ -176,6 +195,12 @@ export function AdminSettingsModule() {
       setLoading(false);
     }
   }, [isAdmin]);
+
+  useEffect(() => {
+    return () => {
+      if (logoPreviewUrl.startsWith("blob:")) URL.revokeObjectURL(logoPreviewUrl);
+    };
+  }, [logoPreviewUrl]);
 
   useEffect(() => {
     void loadAll();
@@ -229,61 +254,35 @@ export function AdminSettingsModule() {
 
   const uploadLogo = async (file: File) => {
     setLogoUploadError(null);
+    const validationError = validateLogoFile(file);
+    if (validationError) {
+      setLogoUploadError(validationError);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    setLogoPreviewUrl((prev) => {
+      if (prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+      return objectUrl;
+    });
     setLogoUploading(true);
     setLogoProgress(0);
-
-    const type = (file.type || "").toLowerCase();
-    const name = (file.name || "").toLowerCase();
-    const isJpeg = type === "image/jpeg" || type === "image/jpg" || name.endsWith(".jpg") || name.endsWith(".jpeg");
-    const isPng = type === "image/png" || name.endsWith(".png");
-    const isSvg = type === "image/svg+xml" || name.endsWith(".svg");
-    if (!(isJpeg || isPng || isSvg)) {
-      setLogoUploadError("Unsupported file type. Only JPG, PNG, SVG are allowed.");
-      setLogoUploading(false);
-      return;
-    }
-    if (file.size > 2_000_000) {
-      setLogoUploadError("File too large. Maximum size is 2MB.");
-      setLogoUploading(false);
-      return;
-    }
-
-    const form = new FormData();
-    form.append("file", file, file.name);
-
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const token = getAuthToken();
-      xhr.open("POST", `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api"}/admin/logo/upload/`);
-      xhr.withCredentials = true;
-      if (token) xhr.setRequestHeader("Authorization", `Token ${token}`);
-      xhr.upload.onprogress = (evt) => {
-        if (evt.lengthComputable) setLogoProgress(Math.round((evt.loaded / evt.total) * 100));
-      };
-      xhr.onload = () => {
-        try {
-          const ok = xhr.status >= 200 && xhr.status < 300;
-          const data = xhr.responseText ? (JSON.parse(xhr.responseText) as { logo_url: string; thumbnail_url: string }) : null;
-          if (!ok || !data?.logo_url) {
-            reject(new Error("Upload failed"));
-            return;
-          }
-          setGlobalSettings((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  appearance: { ...prev.appearance, logo_url: data.logo_url, logo_thumbnail_url: data.thumbnail_url },
-                }
-              : prev
-          );
-          resolve();
-        } catch (e) {
-          reject(e);
-        }
-      };
-      xhr.onerror = () => reject(new Error("Upload failed"));
-      xhr.send(form);
+    await uploadLogoFile({
+      endpointPath: "/admin/logo/upload/",
+      file,
+      scope: "global_appearance",
+      onProgress: setLogoProgress,
     })
+      .then((data) => {
+        setGlobalSettings((prev) =>
+          prev
+            ? {
+                ...prev,
+                appearance: { ...prev.appearance, logo_url: data.logo_url, logo_thumbnail_url: data.logo_thumbnail_url ?? data.thumbnail_url },
+              }
+            : prev
+        );
+        setLogoPreviewUrl(resolveMediaUrl(data.logo_thumbnail_url ?? data.thumbnail_url ?? data.logo_url));
+      })
       .catch((e: unknown) => {
         setLogoUploadError(getErrorMessage(e, "Upload failed"));
         throw e;
@@ -299,8 +298,6 @@ export function AdminSettingsModule() {
       await uploadLogo(files[0]);
     } catch {
       // surfaced through component state
-    } finally {
-      if (logoInputRef.current) logoInputRef.current.value = "";
     }
   };
 
@@ -405,8 +402,12 @@ export function AdminSettingsModule() {
         await apiRequest("/admin/users/", { method: "PATCH", body: JSON.stringify(payload) });
         setSuccess("User updated successfully.");
       } else {
-        await apiRequest("/admin/users/", { method: "POST", body: JSON.stringify(payload) });
-        setSuccess("User created successfully.");
+        const created = await apiRequest<{ invitation_sent?: boolean; detail?: string }>("/admin/users/", { method: "POST", body: JSON.stringify(payload) });
+        setSuccess(
+          created.invitation_sent
+            ? "User created and invitation email sent."
+            : created.detail || "User created, but the invitation email could not be delivered."
+        );
       }
       setUserDialogOpen(false);
       setUserForm(EMPTY_USER_FORM);
@@ -620,68 +621,22 @@ export function AdminSettingsModule() {
                 </div>
               </div>
 
-              <div>
-                <Label htmlFor="logo_upload">Logo</Label>
-                {logoUploadError ? <div className="mt-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{logoUploadError}</div> : null}
-                <input
-                  id="logo_upload"
-                  ref={logoInputRef}
-                  type="file"
-                  accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml"
-                  className="hidden"
-                  onChange={(e) => void onPickLogo(e.target.files)}
-                  disabled={logoUploading}
-                />
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="mt-2 rounded-md border-2 border-dashed bg-white p-4 text-sm text-gray-700"
-                  onClick={() => logoInputRef.current?.click()}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") logoInputRef.current?.click();
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void onPickLogo(e.dataTransfer.files);
-                  }}
-                  aria-label="Upload logo"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium">Drag & drop or click to upload</div>
-                      <div className="text-xs text-gray-500">JPG, PNG, SVG • max 2MB • auto-compressed and thumbnailed</div>
-                    </div>
-                    {String((globalSettings.appearance as Record<string, unknown>).logo_thumbnail_url ?? "") ? (
-                      <img
-                        src={resolveMediaUrl(String((globalSettings.appearance as Record<string, unknown>).logo_thumbnail_url))}
-                        alt="Logo thumbnail"
-                        className="h-12 w-12 rounded border object-contain bg-white"
-                      />
-                    ) : String(globalSettings.appearance.logo_url ?? "") ? (
-                      <img
-                        src={resolveMediaUrl(String(globalSettings.appearance.logo_url))}
-                        alt="Logo"
-                        className="h-12 w-12 rounded border object-contain bg-white"
-                      />
-                    ) : (
-                      <div className="h-12 w-12 rounded border bg-gray-50" />
-                    )}
-                  </div>
-                  {logoUploading ? (
-                    <div className="mt-3">
-                      <div className="h-2 w-full overflow-hidden rounded bg-gray-100">
-                        <div className="h-full bg-blue-600" style={{ width: `${logoProgress}%` }} />
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">Uploading… {logoProgress}%</div>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
+              <LogoUploadField
+                id="logo_upload"
+                label="Logo"
+                helpText="JPG, PNG, SVG, WebP. Maximum size 5MB. Files are sanitized and stored securely."
+                previewUrl={
+                  logoPreviewUrl ||
+                  resolveMediaUrl(
+                    String((globalSettings.appearance as Record<string, unknown>).logo_thumbnail_url ?? globalSettings.appearance.logo_url ?? "")
+                  )
+                }
+                previewAlt="Global logo preview"
+                error={logoUploadError}
+                uploading={logoUploading}
+                progress={logoProgress}
+                onFilesSelected={onPickLogo}
+              />
             </>
           )}
         </CardContent>
@@ -758,7 +713,7 @@ export function AdminSettingsModule() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <CardTitle>User Management</CardTitle>
-              <CardDescription>Create accounts, edit users, reset passwords, activate or deactivate access, and assign roles.</CardDescription>
+              <CardDescription>Create invited accounts, track onboarding status, edit users, activate or deactivate access, and assign roles.</CardDescription>
             </div>
             <div className="flex flex-wrap gap-2">
               <Button type="button" variant="outline" onClick={() => void loadAll()} disabled={loading || saving}>
@@ -797,7 +752,12 @@ export function AdminSettingsModule() {
                       {user.custom_roles.length > 0 ? <div className="text-xs text-gray-500">{user.custom_roles.join(", ")}</div> : null}
                     </td>
                     <td className="p-2">{user.company_name || "—"}</td>
-                    <td className="p-2">{user.is_active ? "Active" : "Inactive"}</td>
+                    <td className="p-2">
+                      <div>{describeUserAccessStatus(user)}</div>
+                      {!user.is_active && user.invitation_expires_at ? (
+                        <div className="text-xs text-gray-500">Expires {new Date(user.invitation_expires_at).toLocaleString()}</div>
+                      ) : null}
+                    </td>
                     <td className="p-2">{user.last_login_at ? new Date(user.last_login_at).toLocaleString() : "—"}</td>
                     <td className="p-2 text-right">
                       <Button type="button" variant="outline" onClick={() => openEditUser(user)}>
@@ -881,7 +841,11 @@ export function AdminSettingsModule() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{userForm.id ? "Edit User" : "Create User"}</DialogTitle>
-            <DialogDescription>Maintain account details, role assignments, and password resets in one place.</DialogDescription>
+            <DialogDescription>
+              {userForm.id
+                ? "Maintain account details, role assignments, and activation controls in one place."
+                : "Create an invited account. The user stays inactive until they accept the invitation and set a password."}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-1 gap-4 p-6 pt-0 md:grid-cols-2">
             <div>
@@ -918,13 +882,14 @@ export function AdminSettingsModule() {
               </select>
             </div>
             <div className="md:col-span-2">
-              <Label>{userForm.id ? "Reset Password" : "Password"}</Label>
+              <Label>{userForm.id ? "Reset Password" : "Temporary Password"}</Label>
               <Input
                 type="password"
                 value={userForm.password}
                 onChange={(e) => setUserForm((prev) => ({ ...prev, password: e.target.value }))}
                 placeholder={userForm.id ? "Leave blank to keep the current password" : "Minimum 6 characters"}
               />
+              {!userForm.id ? <div className="mt-1 text-xs text-gray-500">The invited user will choose their own password during onboarding.</div> : null}
             </div>
             <div className="md:col-span-2">
               <Label>Custom Roles</Label>
@@ -949,9 +914,11 @@ export function AdminSettingsModule() {
                   className="h-4 w-4"
                   checked={userForm.is_active}
                   onChange={(e) => setUserForm((prev) => ({ ...prev, is_active: e.target.checked }))}
+                  disabled={!userForm.id}
                 />
                 Active account
               </label>
+              {!userForm.id ? <div className="mt-1 text-xs text-gray-500">New invited users activate automatically after accepting the invitation and setting a password.</div> : null}
             </div>
             <div className="md:col-span-2 flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setUserDialogOpen(false)} disabled={saving}>

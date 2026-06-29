@@ -296,13 +296,27 @@ class GlobalSettingsSerializer(serializers.ModelSerializer):
 
         appearance = attrs.get("appearance", {})
         if isinstance(appearance, dict):
+            appearance = dict(appearance)
+            appearance.pop("logo_url", None)
+            appearance.pop("logo_thumbnail_url", None)
             primary = appearance.get("primary_color")
             if primary is not None and not (isinstance(primary, str) and primary.startswith("#") and len(primary) in (4, 7)):
                 raise serializers.ValidationError({"appearance": {"primary_color": "Invalid color"}})
             logo_url = appearance.get("logo_url")
             if logo_url not in (None, "") and not isinstance(logo_url, str):
                 raise serializers.ValidationError({"appearance": {"logo_url": "Invalid logo URL"}})
+            attrs["appearance"] = appearance
         return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        appearance = dict(data.get("appearance") or {})
+        asset = getattr(instance, "appearance_logo", None)
+        if asset is not None:
+            appearance["logo_url"] = asset.file_url
+            appearance["logo_thumbnail_url"] = asset.thumbnail_url
+        data["appearance"] = appearance
+        return data
 
 
 class UserSettingsSerializer(serializers.ModelSerializer):
@@ -312,6 +326,30 @@ class UserSettingsSerializer(serializers.ModelSerializer):
         model = UserSettings
         fields = "__all__"
         read_only_fields = ("id", "user", "updated_at", "currency_code")
+
+    def validate(self, attrs):
+        for field_name in ("invoice_template", "receipt_template"):
+            payload = attrs.get(field_name)
+            if isinstance(payload, dict):
+                payload = dict(payload)
+                payload.pop("logo_url", None)
+                payload.pop("logo_thumbnail_url", None)
+                attrs[field_name] = payload
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        invoice_template = dict(data.get("invoice_template") or {})
+        receipt_template = dict(data.get("receipt_template") or {})
+        if getattr(instance, "invoice_logo", None) is not None:
+            invoice_template["logo_url"] = instance.invoice_logo.file_url
+            invoice_template["logo_thumbnail_url"] = instance.invoice_logo.thumbnail_url
+        if getattr(instance, "receipt_logo", None) is not None:
+            receipt_template["logo_url"] = instance.receipt_logo.file_url
+            receipt_template["logo_thumbnail_url"] = instance.receipt_logo.thumbnail_url
+        data["invoice_template"] = invoice_template
+        data["receipt_template"] = receipt_template
+        return data
 
 
 class BusinessAccountSerializer(serializers.ModelSerializer):
@@ -446,6 +484,7 @@ class RegisterSerializer(serializers.Serializer):
 
 class VerifyEmailSerializer(serializers.Serializer):
     token = serializers.CharField()
+    token_type = serializers.CharField(required=False, allow_blank=True)
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):

@@ -10,6 +10,7 @@ import { apiRequest, getErrorMessage } from "@/lib/api";
 function VerifyEmailInner() {
   const params = useSearchParams();
   const token = useMemo(() => params.get("token") || "", [params]);
+  const tokenType = useMemo(() => params.get("token_type") || "", [params]);
   const [loading, setLoading] = useState(true);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +26,17 @@ function VerifyEmailInner() {
       }
       try {
         setLoading(true);
-        await apiRequest("/auth/verify-email/", { method: "POST", body: JSON.stringify({ token }) });
+        const res = await apiRequest<{
+          verified: boolean;
+          invitation_accepted?: boolean;
+          reset_uid?: string;
+          reset_token?: string;
+        }>("/auth/verify-email/", { method: "POST", body: JSON.stringify({ token, token_type: tokenType }) });
+        if (res.invitation_accepted && res.reset_uid && res.reset_token) {
+          setSuccess("Invitation accepted. Redirecting you to set your password.")
+          window.location.replace(`/reset-password?uid=${encodeURIComponent(res.reset_uid)}&token=${encodeURIComponent(res.reset_token)}&mode=invite`);
+          return;
+        }
         setSuccess("Email verified. You can now log in.");
       } catch (e: unknown) {
         setError(getErrorMessage(e, "Verification failed"));
@@ -33,7 +44,7 @@ function VerifyEmailInner() {
         setLoading(false);
       }
     })();
-  }, [token]);
+  }, [token, tokenType]);
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
@@ -41,7 +52,11 @@ function VerifyEmailInner() {
         <Card>
           <CardHeader>
             <CardTitle>Verify email</CardTitle>
-            <CardDescription>Activate your account by verifying your email address.</CardDescription>
+            <CardDescription>
+              {tokenType === "admin_invitation"
+                ? "Accept your invitation to continue with your initial password setup."
+                : "Activate your account by verifying your email address."}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {loading ? <div className="text-sm text-gray-600">Verifying…</div> : null}
@@ -75,7 +90,9 @@ export default function VerifyEmailPage() {
             <Card>
               <CardHeader>
                 <CardTitle>Verify email</CardTitle>
-                <CardDescription>Activate your account by verifying your email address.</CardDescription>
+                <CardDescription>
+                  Accept your invitation or verify your email address to continue.
+                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="text-sm text-gray-600">Loading…</div>

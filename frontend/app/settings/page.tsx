@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { AdminSettingsModule } from "@/components/AdminSettingsModule";
+import { LogoUploadField } from "@/components/LogoUploadField";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
+import { uploadLogoFile, validateLogoFile, type LogoUploadScope } from "@/lib/logoUpload";
 
 type Currency = {
   id: number;
@@ -63,6 +65,24 @@ type SocialConnection = {
   last_login_at: string | null;
 };
 
+type UserLogoScope = Extract<LogoUploadScope, "invoice_template" | "receipt_template">;
+const EMPTY_UPLOAD_FLAGS: Record<UserLogoScope, boolean> = {
+  invoice_template: false,
+  receipt_template: false,
+};
+const EMPTY_UPLOAD_PROGRESS: Record<UserLogoScope, number> = {
+  invoice_template: 0,
+  receipt_template: 0,
+};
+const EMPTY_UPLOAD_ERRORS: Record<UserLogoScope, string | null> = {
+  invoice_template: null,
+  receipt_template: null,
+};
+const EMPTY_UPLOAD_PREVIEWS: Record<UserLogoScope, string> = {
+  invoice_template: "",
+  receipt_template: "",
+};
+
 function localeFor(language: string, country: string | null) {
   const lang = (language || "en").toLowerCase();
   const cc = (country || "").toUpperCase();
@@ -100,6 +120,10 @@ function SettingsPageInner() {
 
   const [form, setForm] = useState<UserSettings | null>(null);
   const [globalAppearance, setGlobalAppearance] = useState<Record<string, unknown>>({});
+  const [logoUploading, setLogoUploading] = useState<Record<UserLogoScope, boolean>>(EMPTY_UPLOAD_FLAGS);
+  const [logoProgress, setLogoProgress] = useState<Record<UserLogoScope, number>>(EMPTY_UPLOAD_PROGRESS);
+  const [logoErrors, setLogoErrors] = useState<Record<UserLogoScope, string | null>>(EMPTY_UPLOAD_ERRORS);
+  const [logoPreviews, setLogoPreviews] = useState<Record<UserLogoScope, string>>(EMPTY_UPLOAD_PREVIEWS);
 
   const load = useCallback(async () => {
     setError(null);
@@ -129,6 +153,14 @@ function SettingsPageInner() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(logoPreviews).forEach((url) => {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      });
+    };
+  }, [logoPreviews]);
 
   useEffect(() => {
     const linkedProvider = (searchParams.get("socialLinked") || "").trim();
@@ -194,6 +226,58 @@ function SettingsPageInner() {
     const paid = 400;
     return { primary, font, logoUrl, showItems, showDesc, companyName, companyTagline, titleText, footerText, nf, df, today, items, paid };
   }, [authUser?.company_name, form?.receipt_template, globalAppearance, locale, selectedCurrencyCode]);
+
+  const setScopedPreview = useCallback((scope: UserLogoScope, nextUrl: string) => {
+    setLogoPreviews((prev) => {
+      const current = prev[scope];
+      if (current && current.startsWith("blob:") && current !== nextUrl) URL.revokeObjectURL(current);
+      return { ...prev, [scope]: nextUrl };
+    });
+  }, []);
+
+  const onPickTemplateLogo = useCallback(
+    async (scope: UserLogoScope, files: FileList | null) => {
+      if (!files || files.length === 0) return;
+      const file = files[0];
+      const validationError = validateLogoFile(file);
+      setLogoErrors((prev) => ({ ...prev, [scope]: validationError }));
+      if (validationError) return;
+
+      setScopedPreview(scope, URL.createObjectURL(file));
+      setLogoUploading((prev) => ({ ...prev, [scope]: true }));
+      setLogoProgress((prev) => ({ ...prev, [scope]: 0 }));
+
+      try {
+        const data = await uploadLogoFile({
+          endpointPath: "/settings/logo/upload/",
+          file,
+          scope,
+          onProgress: (progress) => {
+            setLogoProgress((prev) => ({ ...prev, [scope]: progress }));
+          },
+        });
+        const previewUrl = resolveMediaUrl(data.logo_thumbnail_url ?? data.thumbnail_url ?? data.logo_url);
+        setScopedPreview(scope, previewUrl);
+        setForm((prev) => {
+          if (!prev) return prev;
+          const fieldName = scope === "invoice_template" ? "invoice_template" : "receipt_template";
+          return {
+            ...prev,
+            [fieldName]: {
+              ...(prev[fieldName] || {}),
+              logo_url: data.logo_url,
+              logo_thumbnail_url: data.logo_thumbnail_url ?? data.thumbnail_url,
+            },
+          };
+        });
+      } catch (e: unknown) {
+        setLogoErrors((prev) => ({ ...prev, [scope]: getErrorMessage(e, "Logo upload failed") }));
+      } finally {
+        setLogoUploading((prev) => ({ ...prev, [scope]: false }));
+      }
+    },
+    [setScopedPreview]
+  );
 
   const onSave = async () => {
     if (!form) return;
@@ -410,19 +494,26 @@ function SettingsPageInner() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <Label htmlFor="inv_logo">Logo URL</Label>
-                      <Input
-                        id="inv_logo"
-                        value={String((form.invoice_template as Record<string, unknown>).logo_url ?? "")}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            invoice_template: { ...(form.invoice_template || {}), logo_url: e.target.value },
-                          })
-                        }
-                      />
-                    </div>
+                    <LogoUploadField
+                      id="inv_logo_upload"
+                      label="Invoice Logo"
+                      helpText="Upload a JPG, PNG, SVG, or WebP logo up to 5MB for invoice documents."
+                      previewUrl={
+                        logoPreviews.invoice_template ||
+                        resolveMediaUrl(
+                          String(
+                            (form.invoice_template as Record<string, unknown>).logo_thumbnail_url ??
+                              (form.invoice_template as Record<string, unknown>).logo_url ??
+                              ""
+                          )
+                        )
+                      }
+                      previewAlt="Invoice logo preview"
+                      error={logoErrors.invoice_template}
+                      uploading={logoUploading.invoice_template}
+                      progress={logoProgress.invoice_template}
+                      onFilesSelected={(files) => onPickTemplateLogo("invoice_template", files)}
+                    />
                     <div>
                       <Label htmlFor="inv_primary">Primary Color</Label>
                       <div className="flex gap-2">
@@ -561,19 +652,26 @@ function SettingsPageInner() {
                       />
                       <div className="text-xs text-gray-500 mt-1">Use {"{id}"} or {"{invoice_number}"} placeholders.</div>
                     </div>
-                    <div>
-                      <Label htmlFor="rcpt_logo">Logo URL</Label>
-                      <Input
-                        id="rcpt_logo"
-                        value={String((form.receipt_template as Record<string, unknown>).logo_url ?? "")}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            receipt_template: { ...(form.receipt_template || {}), logo_url: e.target.value },
-                          })
-                        }
-                      />
-                    </div>
+                    <LogoUploadField
+                      id="rcpt_logo_upload"
+                      label="Receipt Logo"
+                      helpText="Upload a JPG, PNG, SVG, or WebP logo up to 5MB for receipt documents."
+                      previewUrl={
+                        logoPreviews.receipt_template ||
+                        resolveMediaUrl(
+                          String(
+                            (form.receipt_template as Record<string, unknown>).logo_thumbnail_url ??
+                              (form.receipt_template as Record<string, unknown>).logo_url ??
+                              ""
+                          )
+                        )
+                      }
+                      previewAlt="Receipt logo preview"
+                      error={logoErrors.receipt_template}
+                      uploading={logoUploading.receipt_template}
+                      progress={logoProgress.receipt_template}
+                      onFilesSelected={(files) => onPickTemplateLogo("receipt_template", files)}
+                    />
                     <div>
                       <Label htmlFor="rcpt_primary">Primary Color</Label>
                       <div className="flex gap-2">
@@ -668,7 +766,7 @@ function SettingsPageInner() {
                     <div className="flex items-start justify-between gap-4 border-b pb-3">
                       <div>
                         {previewInvoice.logoUrl ? (
-                          <img src={previewInvoice.logoUrl} alt="Logo" className="h-10 w-auto mb-2" />
+                          <img src={previewInvoice.logoUrl} alt="Invoice logo" className="h-10 w-auto mb-2" />
                         ) : null}
                         <div className="text-xl font-bold" style={{ color: previewInvoice.primary }}>
                           {previewInvoice.companyName}
@@ -763,7 +861,7 @@ function SettingsPageInner() {
                     <div className="flex items-start justify-between gap-4 border-b pb-3">
                       <div>
                         {previewReceipt.logoUrl ? (
-                          <img src={previewReceipt.logoUrl} alt="Logo" className="h-10 w-auto mb-2" />
+                          <img src={previewReceipt.logoUrl} alt="Receipt logo" className="h-10 w-auto mb-2" />
                         ) : null}
                         <div className="text-xl font-bold" style={{ color: previewReceipt.primary }}>
                           {previewReceipt.companyName}

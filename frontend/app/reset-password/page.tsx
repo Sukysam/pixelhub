@@ -39,6 +39,7 @@ function ResetPasswordInner() {
   const params = useSearchParams();
   const uid = params.get("uid") || "";
   const token = params.get("token") || "";
+  const mode = params.get("mode") || "";
 
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
@@ -64,7 +65,7 @@ function ResetPasswordInner() {
       });
       const me = await apiRequest<AuthUser>("/auth/me/");
       setAuthUser(me);
-      setSuccess("Password reset successfully.");
+      setSuccess(mode === "invite" ? "Password set successfully. Your account is now active." : "Password reset successfully.");
       router.replace("/");
     } catch (e2: unknown) {
       setError(getErrorMessage(e2, "Unable to reset password"));
@@ -77,7 +78,7 @@ function ResetPasswordInner() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <CardTitle>Choose a new password</CardTitle>
+          <CardTitle>{mode === "invite" ? "Set your password" : "Choose a new password"}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {success ? <div className="text-sm text-green-800 bg-green-50 border border-green-200 rounded-md px-3 py-2">{success}</div> : null}

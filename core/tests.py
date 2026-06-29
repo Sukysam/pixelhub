@@ -1,5 +1,5 @@
 from decimal import Decimal
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import hmac
 import io
@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import tempfile
+import urllib.parse
 from unittest.mock import patch
 
 from django.urls import reverse
@@ -47,6 +48,8 @@ from .models import (
     PaymentTransaction,
     BusinessAccount,
     BusinessMembership,
+    LogoAsset,
+    AdminUserInvitation,
     evaluate_invoice_payment_status,
 )
 from .views import _rate_limit
@@ -55,6 +58,20 @@ from .documents import create_delivery, render_invoice, render_receipt
 
 def _test_secret() -> str:
     return f"Aa1!{secrets.token_urlsafe(12)}"
+
+
+def _png_logo_upload_file(name: str = "logo.png") -> SimpleUploadedFile:
+    img = Image.new("RGBA", (400, 120), (200, 10, 10, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return SimpleUploadedFile(name, buf.getvalue(), content_type="image/png")
+
+
+def _webp_logo_upload_file(name: str = "logo.webp") -> SimpleUploadedFile:
+    img = Image.new("RGBA", (320, 120), (10, 120, 210, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP")
+    return SimpleUploadedFile(name, buf.getvalue(), content_type="image/webp")
 
 
 class _MockJsonResponse:
@@ -892,31 +909,30 @@ class AdminLogoUploadTests(APITestCase):
     def test_non_admin_cannot_upload_logo(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
-                img = Image.new("RGB", (10, 10), (200, 10, 10))
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                file = SimpleUploadedFile("logo.png", buf.getvalue(), content_type="image/png")
+                file = _png_logo_upload_file()
                 self.client.force_authenticate(user=self.user)
                 res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
                 self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_upload_png_logo_creates_thumbnail(self):
+    def test_upload_png_logo_creates_thumbnail_and_updates_global_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
-                img = Image.new("RGB", (400, 120), (200, 10, 10))
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                file = SimpleUploadedFile("logo.png", buf.getvalue(), content_type="image/png")
+                file = _png_logo_upload_file()
                 self.client.force_authenticate(user=self.admin)
                 res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
                 self.assertEqual(res.status_code, status.HTTP_201_CREATED)
                 self.assertTrue(str(res.data.get("logo_url", "")).startswith("/media/uploads/logos/"))
                 self.assertTrue(str(res.data.get("thumbnail_url", "")).startswith("/media/uploads/logos/"))
+                self.assertEqual(res.data.get("scope"), "global_appearance")
+                self.assertEqual(len(str(res.data.get("sha256") or "")), 64)
 
                 logo_path = str(res.data["logo_url"]).replace("/media/", "", 1)
                 thumb_path = str(res.data["thumbnail_url"]).replace("/media/", "", 1)
                 self.assertTrue(os.path.exists(os.path.join(tmp, logo_path)))
                 self.assertTrue(os.path.exists(os.path.join(tmp, thumb_path)))
+                gs = GlobalSettings.objects.get(singleton_key="global")
+                self.assertIsNotNone(gs.appearance_logo_id)
+                self.assertTrue(LogoAsset.objects.filter(pk=gs.appearance_logo_id, scope="global_appearance").exists())
 
     def test_upload_rejects_unsupported_type(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -926,6 +942,25 @@ class AdminLogoUploadTests(APITestCase):
                 res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
                 self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_upload_accepts_webp_logo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                file = _webp_logo_upload_file()
+                self.client.force_authenticate(user=self.admin)
+                res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
+                self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+                self.assertIn(".webp", str(res.data.get("logo_url", "")))
+                self.assertTrue(str(res.data.get("thumbnail_url", "")).endswith(".png"))
+
+    def test_upload_rejects_oversized_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                file = SimpleUploadedFile("huge.png", b"\x89PNG\r\n\x1a\n" + (b"x" * (5 * 1024 * 1024)), content_type="image/png")
+                self.client.force_authenticate(user=self.admin)
+                res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
+                self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("5MB", str(res.data))
+
     def test_upload_rejects_svg_with_script(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
@@ -934,6 +969,109 @@ class AdminLogoUploadTests(APITestCase):
                 self.client.force_authenticate(user=self.admin)
                 res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
                 self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class SettingsLogoUploadTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(username="u_settings_logo", password=_test_secret())
+
+    def test_user_can_upload_invoice_logo_and_effective_settings_use_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                self.client.force_authenticate(user=self.user)
+                res = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _png_logo_upload_file(), "scope": "invoice_template"},
+                    format="multipart",
+                )
+                self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+                us = UserSettings.objects.get(user=self.user)
+                self.assertIsNotNone(us.invoice_logo_id)
+                effective = self.client.get("/api/settings/effective/")
+                self.assertEqual(effective.status_code, status.HTTP_200_OK)
+                self.assertEqual(effective.data["user"]["invoice_template"]["logo_url"], res.data["logo_url"])
+                self.assertEqual(effective.data["effective"]["templates"]["invoice_template"]["logo_url"], res.data["logo_url"])
+
+    def test_user_can_upload_receipt_logo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                self.client.force_authenticate(user=self.user)
+                res = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _webp_logo_upload_file(), "scope": "receipt_template"},
+                    format="multipart",
+                )
+                self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+                us = UserSettings.objects.get(user=self.user)
+                self.assertIsNotNone(us.receipt_logo_id)
+                self.assertTrue(str(res.data["logo_url"]).endswith(".webp"))
+
+    def test_uploaded_logos_render_in_invoice_and_receipt_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                self.client.force_authenticate(user=self.user)
+                invoice_logo = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _png_logo_upload_file("invoice-logo.png"), "scope": "invoice_template"},
+                    format="multipart",
+                )
+                receipt_logo = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _webp_logo_upload_file("receipt-logo.webp"), "scope": "receipt_template"},
+                    format="multipart",
+                )
+                self.assertEqual(invoice_logo.status_code, status.HTTP_201_CREATED)
+                self.assertEqual(receipt_logo.status_code, status.HTTP_201_CREATED)
+
+                customer = Customer.objects.create(name="Logo Buyer", email="logo@example.com")
+                item = Item.objects.create(name="Logo Widget", unit_price=Decimal("10.00"), stock_quantity=10)
+                invoice = Invoice.objects.create(
+                    invoice_number="INV-2026-LOGO",
+                    customer=customer,
+                    status="Draft",
+                    issue_date=timezone.localdate(),
+                    subtotal=Decimal("10.00"),
+                    tax_total=Decimal("0.00"),
+                    total_amount=Decimal("10.00"),
+                )
+                InvoiceItem.objects.create(
+                    invoice=invoice,
+                    item=item,
+                    quantity=1,
+                    unit_price=Decimal("10.00"),
+                    line_subtotal=Decimal("10.00"),
+                    line_tax=Decimal("0.00"),
+                    line_total=Decimal("10.00"),
+                )
+                receipt = Receipt.objects.create(
+                    invoice=invoice,
+                    amount_paid=Decimal("10.00"),
+                    payment_method="Cash",
+                    reference_number="LOGO-RCPT-1",
+                )
+
+                request_stub = type("Req", (), {"user": self.user, "query_params": {}, "headers": {}})()
+                rendered_invoice = render_invoice(request_stub, invoice, "html").content.decode("utf-8")
+                rendered_receipt = render_receipt(request_stub, receipt, "html").content.decode("utf-8")
+                self.assertIn(str(invoice_logo.data["logo_url"]), rendered_invoice)
+                self.assertIn(str(receipt_logo.data["logo_url"]), rendered_receipt)
+
+                receipt_html = self.client.get(f"/api/receipts/{receipt.id}/print_html/")
+                self.assertEqual(receipt_html.status_code, status.HTTP_200_OK)
+                self.assertContains(receipt_html, str(receipt_logo.data["logo_url"]))
+
+    def test_user_settings_patch_ignores_manual_logo_url(self):
+        self.client.force_authenticate(user=self.user)
+        res = self.client.patch(
+            "/api/settings/me/",
+            {"invoice_template": {"logo_url": "https://evil.example/logo.png", "footer_text": "hello"}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        us = UserSettings.objects.get(user=self.user)
+        self.assertEqual(us.invoice_template.get("footer_text"), "hello")
+        self.assertNotIn("logo_url", us.invoice_template)
 
 
 class InvoiceFiltersAndSavedViewsTests(APITestCase):
@@ -1451,6 +1589,163 @@ class PasswordResetTests(APITestCase):
         self.assertTrue(AccessToken.objects.filter(user=u, revoked_at__isnull=True, role__name="user").exists())
 
 
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    DEFAULT_FROM_EMAIL="no-reply@test.local",
+    FRONTEND_BASE_URL="http://frontend.test",
+)
+class AdminInvitationOnboardingTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        mail.outbox.clear()
+        self.admin = User.objects.create_user(
+            username="admin_inviter",
+            email="admin_inviter@example.com",
+            password=_test_secret(),
+            is_active=True,
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def _create_invited_user(self, *, username="invited_user", email="invited_user@example.com"):
+        return self.client.post(
+            "/api/admin/users/",
+            {
+                "username": username,
+                "password": _test_secret(),
+                "email": email,
+                "company_name": "Invited Co",
+                "phone": "8034567890",
+                "primary_role": "user",
+                "custom_roles": [],
+            },
+            format="json",
+        )
+
+    def _invitation_token_from_email(self) -> str:
+        self.assertGreaterEqual(len(mail.outbox), 1)
+        body = mail.outbox[-1].body or ""
+        token_fragment = body.split("token=", 1)[1].split("&", 1)[0].strip()
+        return urllib.parse.unquote(token_fragment)
+
+    def test_admin_create_user_sends_signed_invitation_and_keeps_user_inactive(self):
+        res = self._create_invited_user()
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(res.data.get("invitation_sent"))
+
+        user = User.objects.get(username="invited_user")
+        self.assertFalse(user.is_active)
+        profile = UserProfile.objects.get(user=user)
+        self.assertIsNone(profile.email_verified_at)
+
+        invitation = AdminUserInvitation.objects.get(user=user)
+        self.assertIsNotNone(invitation.confirmation_email_sent_at)
+        self.assertGreater(invitation.expires_at, timezone.now() + timedelta(hours=71))
+        self.assertLess(invitation.expires_at, timezone.now() + timedelta(hours=73, minutes=5))
+        self.assertIn("Accept account invitation", mail.outbox[-1].alternatives[0][0])
+        self.assertIn("token_type=admin_invitation", mail.outbox[-1].body)
+
+        users = self.client.get("/api/admin/users/?page=1")
+        self.assertEqual(users.status_code, status.HTTP_200_OK)
+        created_row = next(row for row in users.data["results"] if row["id"] == user.id)
+        self.assertEqual(created_row["invitation_status"], "pending_acceptance")
+        self.assertFalse(created_row["is_active"])
+
+    def test_admin_invitation_flow_accepts_then_activates_after_password_setup(self):
+        create_res = self._create_invited_user(username="workflow_user", email="workflow_user@example.com")
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        self.client.force_authenticate(user=None)
+
+        blocked_reset = self.client.post("/api/auth/password-reset/", {"email": "workflow_user@example.com"}, format="json")
+        self.assertEqual(blocked_reset.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+
+        invite_token = self._invitation_token_from_email()
+        accept_res = self.client.post(
+            "/api/auth/verify-email/",
+            {"token": invite_token, "token_type": "admin_invitation"},
+            format="json",
+        )
+        self.assertEqual(accept_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(accept_res.data.get("invitation_accepted"))
+
+        user = User.objects.get(username="workflow_user")
+        user.refresh_from_db()
+        self.assertFalse(user.is_active)
+        profile = UserProfile.objects.get(user=user)
+        self.assertIsNotNone(profile.email_verified_at)
+
+        new_secret = _test_secret()
+        confirm_res = self.client.post(
+            "/api/auth/password-reset-confirm/",
+            {
+                "uid": accept_res.data["reset_uid"],
+                "token": accept_res.data["reset_token"],
+                "new_password": new_secret,
+                "new_password_confirm": new_secret,
+            },
+            format="json",
+        )
+        self.assertEqual(confirm_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(confirm_res.data.get("activated"))
+        self.assertTrue(confirm_res.data.get("activation_email_sent"))
+
+        user.refresh_from_db()
+        self.assertTrue(user.is_active)
+        self.assertTrue(user.check_password(new_secret))
+        invitation = AdminUserInvitation.objects.get(user=user)
+        self.assertIsNotNone(invitation.accepted_at)
+        self.assertIsNotNone(invitation.password_reset_completed_at)
+        self.assertIsNotNone(invitation.activated_at)
+        self.assertIsNotNone(invitation.welcome_email_sent_at)
+        self.assertEqual(len(mail.outbox), 2)
+        self.assertIn("Your account is now active", mail.outbox[-1].subject)
+        self.assertTrue(
+            AuditLog.objects.filter(object_id=str(user.pk), changes__event="admin_invitation_accepted").exists()
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(object_id=str(user.pk), changes__event="password_reset_completed").exists()
+        )
+        self.assertTrue(
+            AuditLog.objects.filter(object_id=str(user.pk), changes__event="account_activated").exists()
+        )
+
+        login = self.client.post(
+            "/api/auth/token/",
+            {"username": "workflow_user", "password": new_secret},
+            format="json",
+        )
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+
+    def test_admin_invitation_rejects_invalid_or_expired_verification(self):
+        res = self._create_invited_user(username="expired_user", email="expired_user@example.com")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        invitation = AdminUserInvitation.objects.get(user__username="expired_user")
+        invitation.expires_at = timezone.now() - timedelta(minutes=1)
+        invitation.save(update_fields=["expires_at", "updated_at"])
+
+        invite_token = self._invitation_token_from_email()
+        accept_res = self.client.post(
+            "/api/auth/verify-email/",
+            {"token": invite_token, "token_type": "admin_invitation"},
+            format="json",
+        )
+        self.assertEqual(accept_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("expired", str(accept_res.data).lower())
+
+    def test_admin_invitation_email_failure_returns_warning_and_logs_event(self):
+        with patch("core.views._send_html_email_message", side_effect=RuntimeError("smtp down")):
+            res = self._create_invited_user(username="mail_fail_user", email="mail_fail_user@example.com")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(res.data.get("invitation_sent"))
+        self.assertIn("could not be delivered", str(res.data.get("detail", "")).lower())
+        user = User.objects.get(username="mail_fail_user")
+        self.assertTrue(
+            AuditLog.objects.filter(action="security", object_id=str(user.pk), changes__event="admin_invitation_email_failed").exists()
+        )
+
 class LogoutTests(APITestCase):
     def test_logout_deletes_token(self):
         u = User.objects.create_user(username="u3", password=_test_secret(), email="u3@example.com")
@@ -1566,6 +1861,7 @@ class ApiCoverageTests(APITestCase):
             format="json",
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(created.data.get("invitation_sent"))
         self.assertTrue(AuditLog.objects.filter(action="create", object_id=str(created.data["id"])).exists())
         patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "primary_role": "staff"}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
@@ -1589,11 +1885,32 @@ class ApiCoverageTests(APITestCase):
             format="json",
         )
         self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(create_res.data.get("invitation_sent"))
 
         self.client.force_authenticate(user=None)
+        invitation_email = mail.outbox[-1].body or ""
+        invite_token = urllib.parse.unquote(invitation_email.split("token=", 1)[1].split("&", 1)[0].strip())
+        accept = self.client.post(
+            "/api/auth/verify-email/",
+            {"token": invite_token, "token_type": "admin_invitation"},
+            format="json",
+        )
+        self.assertEqual(accept.status_code, status.HTTP_200_OK)
+        reset_secret = _test_secret()
+        confirm = self.client.post(
+            "/api/auth/password-reset-confirm/",
+            {
+                "uid": accept.data["reset_uid"],
+                "token": accept.data["reset_token"],
+                "new_password": reset_secret,
+                "new_password_confirm": reset_secret,
+            },
+            format="json",
+        )
+        self.assertEqual(confirm.status_code, status.HTTP_200_OK)
         login = self.client.post(
             "/api/auth/token/",
-            {"username": "ops_admin_created@example.com", "password": secret},
+            {"username": "ops_admin_created@example.com", "password": reset_secret},
             format="json",
         )
         self.assertEqual(login.status_code, status.HTTP_200_OK)

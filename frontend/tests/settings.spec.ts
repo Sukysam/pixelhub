@@ -1,157 +1,13 @@
 import { test, expect } from "@playwright/test";
 import crypto from "crypto";
-import fs from "fs";
-import os from "os";
-import path from "path";
-
-const API_BASE_URL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8000/api";
-let cachedAdminTokenValue: string | null = null;
-const ADMIN_TOKEN_CACHE_PATH = path.join(os.tmpdir(), "pixelhub-e2e-admin-token.json");
-const ADMIN_TOKEN_LOCK_PATH = `${ADMIN_TOKEN_CACHE_PATH}.lock`;
-type MePayload = { roles?: string[]; permissions?: string[]; email?: string };
-
-async function delay(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function validateToken(request: any, token: string): Promise<boolean> {
-  const res = await request.get(`${API_BASE_URL}/auth/me/`, {
-    headers: { Authorization: `Token ${token}` },
-  });
-  return res.ok();
-}
-
-function readCachedTokenFromDisk(): string | null {
-  try {
-    const raw = fs.readFileSync(ADMIN_TOKEN_CACHE_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { token?: string };
-    return parsed.token ? String(parsed.token) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedTokenToDisk(token: string) {
-  fs.writeFileSync(ADMIN_TOKEN_CACHE_PATH, JSON.stringify({ token }), "utf-8");
-}
-
-async function adminToken(request: any) {
-  if (cachedAdminTokenValue) return cachedAdminTokenValue;
-  const username = process.env.E2E_USERNAME;
-  const password = process.env.E2E_PASSWORD;
-  if (!username || !password) {
-    throw new Error("E2E_USERNAME and E2E_PASSWORD are required");
-  }
-
-  const diskToken = readCachedTokenFromDisk();
-  if (diskToken && (await validateToken(request, diskToken))) {
-    cachedAdminTokenValue = diskToken;
-    return cachedAdminTokenValue;
-  }
-
-  let lockFd: number | null = null;
-  for (let lockAttempt = 0; lockAttempt < 20; lockAttempt += 1) {
-    try {
-      lockFd = fs.openSync(ADMIN_TOKEN_LOCK_PATH, "wx");
-      break;
-    } catch {
-      const waitingToken = readCachedTokenFromDisk();
-      if (waitingToken && (await validateToken(request, waitingToken))) {
-        cachedAdminTokenValue = waitingToken;
-        return cachedAdminTokenValue;
-      }
-      await delay(250);
-    }
-  }
-  if (lockFd == null) {
-    throw new Error("Admin login failed: unable to acquire shared token lock");
-  }
-
-  try {
-    const freshDiskToken = readCachedTokenFromDisk();
-    if (freshDiskToken && (await validateToken(request, freshDiskToken))) {
-      cachedAdminTokenValue = freshDiskToken;
-      return cachedAdminTokenValue;
-    }
-
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, { data: { username, password, remember: true } });
-      if (loginRes.ok()) {
-        const login = (await loginRes.json()) as { token: string };
-        cachedAdminTokenValue = login.token;
-        writeCachedTokenToDisk(login.token);
-        return cachedAdminTokenValue;
-      }
-      const body = await loginRes.text();
-      if (loginRes.status() === 429 && attempt < 3) {
-        await delay(500 * (attempt + 1));
-        continue;
-      }
-      throw new Error(`Admin login failed: status=${loginRes.status()} body=${body}`);
-    }
-    throw new Error("Admin login failed after retries");
-  } finally {
-    if (lockFd != null) fs.closeSync(lockFd);
-    try {
-      fs.unlinkSync(ADMIN_TOKEN_LOCK_PATH);
-    } catch {
-      // ignore lock cleanup races
-    }
-  }
-}
-
-async function setSession(page: any, request: any, token: string) {
-  const meRes = await request.get(`${API_BASE_URL}/auth/me/`, { headers: { Authorization: `Token ${token}` } });
-  expect(meRes.ok()).toBeTruthy();
-  const me = await meRes.json();
-
-  await page.addInitScript(
-    (payload: { t: string; u: unknown }) => {
-      window.localStorage.setItem("auth_token", String(payload.t));
-      window.localStorage.setItem("auth_user", JSON.stringify(payload.u));
-    },
-    { t: token, u: me }
-  );
-}
-
-async function createStandardBusinessUserSession(request: any) {
-  const email = `e2e_business_${Date.now()}_${crypto.randomBytes(3).toString("hex")}@example.com`;
-  const password = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
-  const phone = uniqueNgPhone();
-  const token = await adminToken(request);
-  const createRes = await request.post(`${API_BASE_URL}/admin/users/`, {
-    headers: { Authorization: `Token ${token}` },
-    data: {
-      username: email,
-      email,
-      password,
-      company_name: "E2E Business Co",
-      phone,
-      is_active: true,
-      primary_role: "user",
-      custom_roles: [],
-    },
-  });
-  expect(createRes.ok()).toBeTruthy();
-
-  const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
-    data: { username: email, password, remember: true },
-  });
-  expect(loginRes.ok()).toBeTruthy();
-  const login = (await loginRes.json()) as { token: string };
-
-  const meRes = await request.get(`${API_BASE_URL}/auth/me/`, {
-    headers: { Authorization: `Token ${login.token}` },
-  });
-  expect(meRes.ok()).toBeTruthy();
-  const me = (await meRes.json()) as MePayload;
-  expect(me.roles ?? []).toContain("editor");
-  expect(me.permissions ?? []).toContain("data.customers.write");
-  expect(me.permissions ?? []).toContain("data.invoices.write");
-  expect(me.permissions ?? []).toContain("data.receipts.write");
-
-  return { email, password, token: login.token, me };
-}
+import {
+  API_BASE_URL,
+  BACKEND_ORIGIN,
+  adminToken,
+  createStandardBusinessUserSession,
+  setSession,
+  uniqueNgPhone,
+} from "./helpers/admin";
 
 async function getJson(request: any, token: string, apiPath: string) {
   const res = await request.get(`${API_BASE_URL}${apiPath}`, {
@@ -159,6 +15,11 @@ async function getJson(request: any, token: string, apiPath: string) {
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
+}
+
+async function waitForUploadedLogoSrc(locator: any) {
+  await expect.poll(async () => (await locator.getAttribute("src")) ?? "", { timeout: 30_000 }).toContain("/media/uploads/logos/");
+  return (await locator.getAttribute("src")) ?? "";
 }
 
 function png1x1(): Buffer {
@@ -170,18 +31,13 @@ function png1x1(): Buffer {
 
 function jpg1x1(): Buffer {
   return Buffer.from(
-    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAALCAABAAEBAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCeAAX/2Q==",
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z",
     "base64"
   );
 }
 
 function safeSvg(): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#0ea5e9"/><text x="8" y="36" font-size="18" fill="#fff">LOGO</text></svg>`;
-}
-
-function uniqueNgPhone(): string {
-  const digits = crypto.randomBytes(6).toString("hex").replace(/\D/g, "").padEnd(9, "0").slice(0, 9);
-  return `8${digits}`;
 }
 
 async function registerAndReachDashboard(page: any) {
@@ -232,22 +88,33 @@ test("admin can manage roles and users from settings", async ({ page, request })
   await userDialog.getByLabel("Primary Role").selectOption("user");
   const userPassword = "pw_settings_ui_A1!";
   await userDialog.getByPlaceholder("Minimum 6 characters").fill(userPassword);
-  await userDialog.locator("label").filter({ hasText: roleName }).locator('input[type="checkbox"]').check();
+  const customRoleCheckbox = userDialog.locator("label").filter({ hasText: roleName }).locator('input[type="checkbox"]').first();
+  await customRoleCheckbox.evaluate((node: HTMLInputElement) => node.click());
   await userDialog.getByRole("button", { name: "Create user" }).evaluate((node: HTMLButtonElement) => node.click());
-  await expect(page.getByText("User created successfully.")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("User created and invitation email sent.")).toBeVisible({ timeout: 30_000 });
 
-  const createdLoginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
-    data: { username: email, password: userPassword, remember: true },
+  const createdUsersRes = await request.get(`${API_BASE_URL}/admin/users/?page=1`, {
+    headers: { Authorization: `Token ${token}` },
   });
-  expect(createdLoginRes.ok()).toBeTruthy();
-  const createdLogin = (await createdLoginRes.json()) as { token: string };
-  const createdMeRes = await request.get(`${API_BASE_URL}/auth/me/`, {
-    headers: { Authorization: `Token ${createdLogin.token}` },
-  });
-  expect(createdMeRes.ok()).toBeTruthy();
-  const createdMe = (await createdMeRes.json()) as { roles?: string[]; email?: string };
-  expect(createdMe.email).toBe(email);
-  expect(createdMe.roles ?? []).toContain(roleName);
+  expect(createdUsersRes.ok()).toBeTruthy();
+  const createdUsers = (await createdUsersRes.json()) as {
+    count: number;
+    results: Array<{ email?: string; custom_roles?: string[]; invitation_status?: string; is_active?: boolean }>;
+  };
+  const finalPage = Math.max(1, Math.ceil(createdUsers.count / 25));
+  const pageToInspect =
+    finalPage === 1
+      ? createdUsers
+      : ((await (
+          await request.get(`${API_BASE_URL}/admin/users/?page=${finalPage}`, {
+            headers: { Authorization: `Token ${token}` },
+          })
+        ).json()) as typeof createdUsers);
+  const createdUser = pageToInspect.results.find((row) => row.email === email);
+  expect(createdUser).toBeTruthy();
+  expect(createdUser?.custom_roles ?? []).toContain(roleName);
+  expect(createdUser?.invitation_status).toBe("pending_acceptance");
+  expect(createdUser?.is_active).toBeFalsy();
 });
 
 test("user can update invoice footer in settings", async ({ page }) => {
@@ -444,14 +311,12 @@ test("admin can upload PNG logo, save global settings, and logo shows in user Se
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
   await fileInput.setInputFiles({ name: "logo.png", mimeType: "image/png", buffer: png1x1() });
-  await expect(page.getByAltText("Logo thumbnail")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByAltText("Global logo preview")).toBeVisible({ timeout: 30_000 });
   const elapsedMs = Date.now() - start;
   console.log(`PNG logo upload -> thumbnail visible in ${elapsedMs}ms`);
 
-  const thumbSrc = await page.getByAltText("Logo thumbnail").getAttribute("src");
-  expect(thumbSrc ?? "").toContain("http://127.0.0.1:8000/");
-  expect(thumbSrc ?? "").toContain("/media/uploads/logos/");
-  expect(thumbSrc ?? "").toContain("_thumb");
+  const thumbSrc = await waitForUploadedLogoSrc(page.getByAltText("Global logo preview"));
+  expect(thumbSrc).toContain("_thumb");
 
   const currencySelect = page.getByLabel("Default Currency");
   await expect(currencySelect).toBeVisible({ timeout: 30_000 });
@@ -464,11 +329,11 @@ test("admin can upload PNG logo, save global settings, and logo shows in user Se
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByLabel("Invoice preview")).toContainText(officialCompanyName);
   await expect(page.getByLabel("Receipt preview")).toContainText(officialCompanyName);
-  const invoiceLogo = page.getByLabel("Invoice preview").locator('img[alt="Logo"]');
+  const invoiceLogo = page.getByLabel("Invoice preview").locator('img[alt="Invoice logo"]');
   await expect(invoiceLogo).toBeVisible({ timeout: 30_000 });
   await expect(invoiceLogo).toHaveAttribute("src", /127\.0\.0\.1:8000\/media\/uploads\/logos\//);
 
-  const receiptLogo = page.getByLabel("Receipt preview").locator('img[alt="Logo"]');
+  const receiptLogo = page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]');
   await expect(receiptLogo).toBeVisible({ timeout: 30_000 });
   await expect(receiptLogo).toHaveAttribute("src", /127\.0\.0\.1:8000\/media\/uploads\/logos\//);
 });
@@ -482,11 +347,11 @@ test("admin logo upload validation: rejects unsupported and oversized files; han
   const fileInput = page.locator("#logo_upload");
 
   await fileInput.setInputFiles({ name: "logo.txt", mimeType: "text/plain", buffer: Buffer.from("nope") });
-  await expect(page.getByText("Unsupported file type. Only JPG, PNG, SVG are allowed.")).toBeVisible();
+  await expect(page.getByText("Unsupported file type. Only JPG, PNG, SVG, and WebP are allowed.")).toBeVisible();
 
-  const oversized = Buffer.alloc(2_000_001, 0);
+  const oversized = Buffer.alloc(5 * 1024 * 1024 + 1, 0);
   await fileInput.setInputFiles({ name: "big.png", mimeType: "image/png", buffer: oversized });
-  await expect(page.getByText("File too large. Maximum size is 2MB.")).toBeVisible();
+  await expect(page.getByText("File too large. Maximum size is 5MB.")).toBeVisible();
 
   await page.route("**/api/admin/logo/upload/", async (route) => {
     await route.abort();
@@ -506,12 +371,11 @@ test("admin can upload SVG logo and thumbnail is generated", async ({ page, requ
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
   await fileInput.setInputFiles({ name: "logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from(safeSvg(), "utf-8") });
-  await expect(page.getByAltText("Logo thumbnail")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByAltText("Global logo preview")).toBeVisible({ timeout: 30_000 });
   const elapsedMs = Date.now() - start;
   console.log(`SVG logo upload -> thumbnail visible in ${elapsedMs}ms`);
 
-  const thumbSrc = await page.getByAltText("Logo thumbnail").getAttribute("src");
-  expect(thumbSrc ?? "").toContain("/media/uploads/logos/");
+  await waitForUploadedLogoSrc(page.getByAltText("Global logo preview"));
 });
 
 test("admin can upload JPG logo and thumbnail is generated", async ({ page, request }) => {
@@ -524,13 +388,12 @@ test("admin can upload JPG logo and thumbnail is generated", async ({ page, requ
   const fileInput = page.locator("#logo_upload");
   const start = Date.now();
   await fileInput.setInputFiles({ name: "logo.jpg", mimeType: "image/jpeg", buffer: jpg1x1() });
-  await expect(page.getByAltText("Logo thumbnail")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByAltText("Global logo preview")).toBeVisible({ timeout: 30_000 });
   const elapsedMs = Date.now() - start;
   console.log(`JPG logo upload -> thumbnail visible in ${elapsedMs}ms`);
 
-  const thumbSrc = await page.getByAltText("Logo thumbnail").getAttribute("src");
-  expect(thumbSrc ?? "").toContain("/media/uploads/logos/");
-  expect(thumbSrc ?? "").toContain("_thumb");
+  const thumbSrc = await waitForUploadedLogoSrc(page.getByAltText("Global logo preview"));
+  expect(thumbSrc).toContain("_thumb");
 });
 
 test("admin logo upload blocks concurrent uploads while in progress", async ({ page, request }) => {
@@ -551,8 +414,50 @@ test("admin logo upload blocks concurrent uploads while in progress", async ({ p
   await expect(page.getByText(/uploading/i)).toBeVisible({ timeout: 10_000 });
   await expect(fileInput).toBeDisabled();
 
-  await expect(page.getByAltText("Logo thumbnail")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByAltText("Global logo preview")).toBeVisible({ timeout: 30_000 });
   await page.unroute("**/api/admin/logo/upload/");
+});
+
+test("standard user can upload invoice and receipt logos with preview and persistence", async ({ page, request }) => {
+  const session = await registerAndReachDashboard(page);
+
+  await page.goto("/settings");
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+
+  const invoiceFileInput = page.locator("#inv_logo_upload");
+  await invoiceFileInput.setInputFiles({ name: "invoice-logo.png", mimeType: "image/png", buffer: png1x1() });
+  await expect(page.getByAltText("Invoice logo preview")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Invoice preview").locator('img[alt="Invoice logo"]')).toBeVisible({ timeout: 30_000 });
+
+  const receiptFileInput = page.locator("#rcpt_logo_upload");
+  await receiptFileInput.setInputFiles({ name: "receipt-logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from(safeSvg(), "utf-8") });
+  await expect(page.getByAltText("Receipt logo preview")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]')).toBeVisible({ timeout: 30_000 });
+
+  const effective = (await getJson(request, session.token, "/settings/effective/")) as {
+    effective: {
+      templates: {
+        invoice_template: { logo_url?: string | null };
+        receipt_template: { logo_url?: string | null };
+      };
+    };
+  };
+  const invoiceLogoUrl = String(effective.effective.templates.invoice_template.logo_url ?? "");
+  const receiptLogoUrl = String(effective.effective.templates.receipt_template.logo_url ?? "");
+  expect(invoiceLogoUrl).toContain("/media/uploads/logos/");
+  expect(receiptLogoUrl).toContain("/media/uploads/logos/");
+
+  const invoiceLogoResponse = await request.get(`${BACKEND_ORIGIN}${invoiceLogoUrl}`);
+  expect(invoiceLogoResponse.ok()).toBeTruthy();
+  expect((await invoiceLogoResponse.body()).length).toBeGreaterThan(0);
+
+  const receiptLogoResponse = await request.get(`${BACKEND_ORIGIN}${receiptLogoUrl}`);
+  expect(receiptLogoResponse.ok()).toBeTruthy();
+  expect((await receiptLogoResponse.body()).length).toBeGreaterThan(0);
+
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(page.getByLabel("Invoice preview").locator('img[alt="Invoice logo"]')).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]')).toBeVisible({ timeout: 30_000 });
 });
 
 test("record payment button validates, confirms, and records a payment", async ({ page, request }) => {

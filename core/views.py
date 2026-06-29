@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional, Tuple
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from django.core import signing
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from rest_framework import viewsets, status, permissions
@@ -27,7 +28,7 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.views import APIView
 from django.core.cache import cache
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import transaction
 from django.db import models
@@ -61,6 +62,7 @@ from .models import (
     SocialAuthConnection,
     SavedInvoiceView,
     EmailVerificationToken,
+    AdminUserInvitation,
     AccessToken,
     Role,
     Permission,
@@ -71,9 +73,18 @@ from .models import (
     PaymentWebhookEvent,
     BusinessAccount,
     BusinessMembership,
+    LogoAsset,
 )
 from .rbac import user_role_names, user_has_permission
 from .auth_service import ensure_user_role, issue_access_token, revoke_token, role_for_name
+from .logo_uploads import (
+    LOGO_SCOPE_GLOBAL,
+    LOGO_SCOPE_INVOICE,
+    LOGO_SCOPE_RECEIPT,
+    cleanup_logo_asset_if_unreferenced,
+    create_logo_asset,
+    normalize_logo_scope,
+)
 from .serializers import (
     CustomerSerializer,
     ItemSerializer,
@@ -293,6 +304,7 @@ def _latest_login_timestamps_by_user(user_ids: list[int]) -> dict[int, Optional[
 
 def _serialize_admin_user(user, *, latest_login_at: Optional[str] = None) -> dict[str, Any]:
     profile = UserProfile.objects.filter(user=user).only("full_name", "phone", "company_legal_name").first()
+    invitation = _admin_invitation_for_user(user)
     roles = user_role_names(user)
     system_role = "user"
     if "admin" in roles or bool(getattr(user, "is_superuser", False)):
@@ -313,6 +325,9 @@ def _serialize_admin_user(user, *, latest_login_at: Optional[str] = None) -> dic
         "full_name": getattr(profile, "full_name", None) if profile else None,
         "phone": getattr(profile, "phone", None) if profile else None,
         "company_name": getattr(profile, "company_legal_name", None) if profile else None,
+        "invitation_status": _admin_invitation_status_for_user(user, invitation),
+        "invitation_expires_at": invitation.expires_at.isoformat() if invitation and invitation.expires_at else None,
+        "invitation_accepted_at": invitation.accepted_at.isoformat() if invitation and invitation.accepted_at else None,
         "last_login_at": latest_login_at,
     }
 
@@ -370,22 +385,37 @@ def _get_user_settings(user) -> UserSettings:
     return obj
 
 
+def _logo_urls_for_asset(asset: Optional[LogoAsset]) -> dict[str, Optional[str]]:
+    if asset is None:
+        return {"logo_url": None, "logo_thumbnail_url": None}
+    return {
+        "logo_url": asset.file_url,
+        "logo_thumbnail_url": asset.thumbnail_url,
+    }
+
+
 def _effective_templates_for_user(user) -> dict:
     gs = _get_global_settings()
     global_appearance = gs.appearance or {}
     invoice_template = {}
     receipt_template = {}
+    global_logo = getattr(gs, "appearance_logo", None)
+    invoice_logo = None
+    receipt_logo = None
     identity = _effective_company_identity_for_user(user)
     if getattr(user, "is_authenticated", False):
         us = _get_user_settings(user)
         if gs.allow_user_overrides:
             invoice_template = us.invoice_template or {}
             receipt_template = us.receipt_template or {}
+            invoice_logo = getattr(us, "invoice_logo", None)
+            receipt_logo = getattr(us, "receipt_logo", None)
 
     invoice_template = {
         "primary_color": None,
         "font_family": None,
         "logo_url": None,
+        "logo_thumbnail_url": None,
         "footer_text": None,
         "layout": None,
         "show_item_description": False,
@@ -396,6 +426,7 @@ def _effective_templates_for_user(user) -> dict:
         "primary_color": None,
         "font_family": None,
         "logo_url": None,
+        "logo_thumbnail_url": None,
         "header_text": None,
         "footer_text": None,
         "numbering_format": None,
@@ -408,12 +439,18 @@ def _effective_templates_for_user(user) -> dict:
         "primary_color": None,
         "font_family": None,
         "logo_url": None,
+        "logo_thumbnail_url": None,
         "company_name": identity["company_name"],
         "company_tagline": identity["company_tagline"],
         "invoice_footer_text": None,
         "receipt_footer_text": None,
         **(global_appearance if isinstance(global_appearance, dict) else {}),
     }
+    global_appearance.update(_logo_urls_for_asset(global_logo))
+    if invoice_logo is not None:
+        invoice_template.update(_logo_urls_for_asset(invoice_logo))
+    if receipt_logo is not None:
+        receipt_template.update(_logo_urls_for_asset(receipt_logo))
     return {
         "global_appearance": global_appearance,
         "invoice_template": invoice_template,
@@ -486,9 +523,97 @@ def _hash_email(email: str) -> str:
     return hashlib.sha256(str(email).strip().lower().encode("utf-8")).hexdigest()
 
 
+ADMIN_INVITATION_TOKEN_TYPE = "admin_invitation"
+ADMIN_INVITATION_SIGNING_SALT = "core.admin_user_invitation"
+ADMIN_INVITATION_MAX_AGE_SECONDS = 72 * 3600
+
+
+def _frontend_base_url() -> str:
+    return str(getattr(settings, "FRONTEND_BASE_URL", "http://127.0.0.1:3000")).rstrip("/")
+
+
+def _password_reset_link_for_user(user) -> tuple[str, str, str]:
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = PasswordResetTokenGenerator().make_token(user)
+    link = f"{_frontend_base_url()}/reset-password?uid={urllib.parse.quote(uid)}&token={urllib.parse.quote(token)}"
+    return uid, token, link
+
+
+def _sign_admin_invitation(invitation: AdminUserInvitation) -> str:
+    payload = {
+        "invitation_id": int(invitation.pk),
+        "user_id": int(invitation.user_id),
+        "token_key": str(invitation.token_key),
+        "token_type": ADMIN_INVITATION_TOKEN_TYPE,
+    }
+    return signing.dumps(payload, salt=ADMIN_INVITATION_SIGNING_SALT)
+
+
+def _get_admin_invitation_by_signed_token(token: str) -> AdminUserInvitation:
+    try:
+        payload = signing.loads(token, salt=ADMIN_INVITATION_SIGNING_SALT, max_age=ADMIN_INVITATION_MAX_AGE_SECONDS)
+    except signing.SignatureExpired as exc:
+        raise ValidationError({"token": "Token expired"}) from exc
+    except signing.BadSignature as exc:
+        raise ValidationError({"token": "Invalid token"}) from exc
+
+    try:
+        invitation_id = int(payload.get("invitation_id"))
+        user_id = int(payload.get("user_id"))
+    except (TypeError, ValueError):
+        raise ValidationError({"token": "Invalid token"})
+
+    token_key = str(payload.get("token_key") or "").strip()
+    if not token_key:
+        raise ValidationError({"token": "Invalid token"})
+
+    try:
+        invitation = AdminUserInvitation.objects.select_related("user", "invited_by").get(pk=invitation_id, user_id=user_id)
+    except AdminUserInvitation.DoesNotExist as exc:
+        raise ValidationError({"token": "Invalid token"}) from exc
+
+    if invitation.token_key != token_key:
+        raise ValidationError({"token": "Invalid token"})
+    if invitation.expires_at <= timezone.now():
+        raise ValidationError({"token": "Token expired"})
+    return invitation
+
+
+def _admin_invitation_for_user(user) -> Optional[AdminUserInvitation]:
+    if getattr(user, "pk", None) is None:
+        return None
+    return AdminUserInvitation.objects.filter(user=user).first()
+
+
+def _admin_invitation_status_for_user(user, invitation: Optional[AdminUserInvitation] = None) -> Optional[str]:
+    invitation = invitation or _admin_invitation_for_user(user)
+    if invitation is None:
+        return None
+    if invitation.activated_at is not None or bool(getattr(user, "is_active", False)):
+        return "active"
+    if invitation.password_reset_completed_at is not None:
+        return "password_set"
+    if invitation.accepted_at is not None:
+        return "accepted_pending_password"
+    if invitation.expires_at <= timezone.now():
+        return "expired"
+    return "pending_acceptance"
+
+
+def _send_html_email_message(subject: str, recipient: str, text_body: str, html_body: str) -> bool:
+    message = EmailMultiAlternatives(
+        subject,
+        text_body,
+        getattr(settings, "DEFAULT_FROM_EMAIL", "no-reply@example.com"),
+        [recipient],
+    )
+    message.attach_alternative(html_body, "text/html")
+    sent = message.send(fail_silently=False)
+    return int(sent) > 0
+
+
 def _send_verification_email(email: str, token: str, *, user=None, ip: Optional[str] = None, source: str = "register") -> bool:
-    frontend_base = getattr(settings, "FRONTEND_BASE_URL", "http://127.0.0.1:3000")
-    link = f"{frontend_base}/verify-email?token={token}"
+    link = f"{_frontend_base_url()}/verify-email?token={token}"
     subject = "Verify your email"
     message = f"Please verify your email by opening this link:\n\n{link}\n"
     email_backend = getattr(settings, "EMAIL_BACKEND", "")
@@ -519,6 +644,88 @@ def _send_verification_email(email: str, token: str, *, user=None, ip: Optional[
             User,
             object_id=object_id,
             changes={"event": "verification_email_failed", "ok": False, "backend": email_backend, "source": source, "ip": ip, "error": e.__class__.__name__},
+        )
+        return False
+
+
+def _send_admin_invitation_email(invitation: AdminUserInvitation, *, ip: Optional[str] = None) -> bool:
+    email = str(getattr(invitation.user, "email", "") or "").strip().lower()
+    if not email:
+        return False
+    link = f"{_frontend_base_url()}/verify-email?token={urllib.parse.quote(_sign_admin_invitation(invitation))}&token_type={ADMIN_INVITATION_TOKEN_TYPE}"
+    subject = "Accept your account invitation"
+    text_body = (
+        "An administrator created an account for you on PXL-HUB INVOICE.\n\n"
+        f"Accept your invitation: {link}\n\n"
+        "This invitation expires in 72 hours."
+    )
+    html_body = (
+        "<p>An administrator created an account for you on <strong>PXL-HUB INVOICE</strong>.</p>"
+        "<p>Accept the invitation to confirm your account and continue to your initial password setup.</p>"
+        f'<p><a href="{link}" style="display:inline-block;padding:12px 18px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;">Accept account invitation</a></p>'
+        "<p>This invitation expires in 72 hours.</p>"
+    )
+    email_backend = getattr(settings, "EMAIL_BACKEND", "")
+    object_id = str(invitation.user_id)
+    try:
+        ok = _send_html_email_message(subject, email, text_body, html_body)
+        logger.info("admin_invitation_email_sent ok=%s backend=%s user_id=%s ip=%s", ok, email_backend, object_id, ip or "unknown")
+        if ok:
+            invitation.confirmation_email_sent_at = timezone.now()
+            invitation.save(update_fields=["confirmation_email_sent_at", "updated_at"])
+        _log_security_event(
+            invitation.invited_by,
+            get_user_model(),
+            object_id=object_id,
+            changes={"event": "admin_invitation_email_sent", "ok": ok, "backend": email_backend, "ip": ip},
+        )
+        return ok
+    except Exception as e:
+        logger.exception("admin_invitation_email_failed backend=%s user_id=%s ip=%s", email_backend, object_id, ip or "unknown")
+        _log_security_event(
+            invitation.invited_by,
+            get_user_model(),
+            object_id=object_id,
+            changes={"event": "admin_invitation_email_failed", "ok": False, "backend": email_backend, "ip": ip, "error": e.__class__.__name__},
+        )
+        return False
+
+
+def _send_account_activation_email(user, *, ip: Optional[str] = None, invitation: Optional[AdminUserInvitation] = None) -> bool:
+    email = str(getattr(user, "email", "") or "").strip().lower()
+    if not email:
+        return False
+    subject = "Your account is now active"
+    text_body = (
+        "Welcome to PXL-HUB INVOICE.\n\n"
+        "Your account has been activated successfully and your assigned access is now available."
+    )
+    html_body = (
+        "<p>Welcome to <strong>PXL-HUB INVOICE</strong>.</p>"
+        "<p>Your account has been activated successfully and your assigned access is now available.</p>"
+    )
+    email_backend = getattr(settings, "EMAIL_BACKEND", "")
+    object_id = str(getattr(user, "pk", ""))
+    try:
+        ok = _send_html_email_message(subject, email, text_body, html_body)
+        logger.info("account_activation_email_sent ok=%s backend=%s user_id=%s ip=%s", ok, email_backend, object_id, ip or "unknown")
+        if ok and invitation is not None:
+            invitation.welcome_email_sent_at = timezone.now()
+            invitation.save(update_fields=["welcome_email_sent_at", "updated_at"])
+        _log_security_event(
+            user,
+            get_user_model(),
+            object_id=object_id,
+            changes={"event": "account_activation_email_sent", "ok": ok, "backend": email_backend, "ip": ip},
+        )
+        return ok
+    except Exception as e:
+        logger.exception("account_activation_email_failed backend=%s user_id=%s ip=%s", email_backend, object_id, ip or "unknown")
+        _log_security_event(
+            user,
+            get_user_model(),
+            object_id=object_id,
+            changes={"event": "account_activation_email_failed", "ok": False, "backend": email_backend, "ip": ip, "error": e.__class__.__name__},
         )
         return False
 
@@ -3007,7 +3214,7 @@ class MySettingsApi(APIView):
 
     def patch(self, request):
         with transaction.atomic():
-            us = UserSettings.objects.select_for_update().get(user=request.user)
+            us = UserSettings.objects.select_for_update().get(pk=_get_user_settings(request.user).pk)
             before = _serialize_settings_for_audit(us)
             serializer = UserSettingsSerializer(us, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
@@ -3270,9 +3477,17 @@ class TokenApi(APIView):
         User = get_user_model()
         existing = User.objects.filter(username=username).first()
         if existing is not None and not bool(getattr(existing, "is_active", True)) and existing.check_password(password):
+            invitation = _admin_invitation_for_user(existing)
+            detail = "Account is not active. Please verify your email before signing in."
+            if invitation is not None:
+                status_name = _admin_invitation_status_for_user(existing, invitation)
+                if status_name == "pending_acceptance":
+                    detail = "Account invitation pending. Please accept the invitation sent to your email before signing in."
+                elif status_name == "accepted_pending_password":
+                    detail = "Account invitation accepted. Please finish setting your password before signing in."
             logger.info("login_inactive ip=%s user_id=%s", ip or "unknown", str(getattr(existing, "pk", "")))
-            _log_security_event(existing, User, object_id=str(getattr(existing, "pk", "")), changes={"event": "login_inactive", "ip": ip})
-            raise PermissionDenied("Account is not active. Please verify your email before signing in.")
+            _log_security_event(existing, User, object_id=str(getattr(existing, "pk", "")), changes={"event": "login_inactive", "ip": ip, "invitation_status": _admin_invitation_status_for_user(existing, invitation)})
+            raise PermissionDenied(detail)
 
         user = authenticate(request=request, username=username, password=password)
         if user is None:
@@ -3365,6 +3580,41 @@ class VerifyEmailApi(APIView):
         serializer = VerifyEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = str(serializer.validated_data["token"]).strip()
+        token_type = str(serializer.validated_data.get("token_type") or "").strip().lower()
+
+        if token_type == ADMIN_INVITATION_TOKEN_TYPE:
+            try:
+                invitation = _get_admin_invitation_by_signed_token(token)
+            except ValidationError:
+                _log_security_event(None, get_user_model(), object_id=_hash_email(token), changes={"event": "admin_invitation_invalid", "ip": _client_ip(request)})
+                raise
+            if invitation.accepted_at is not None:
+                _log_security_event(invitation.user, get_user_model(), object_id=str(invitation.user_id), changes={"event": "admin_invitation_reused", "ip": _client_ip(request)})
+                raise ValidationError({"token": "Invitation already accepted"})
+
+            with transaction.atomic():
+                invitation.accepted_at = timezone.now()
+                invitation.save(update_fields=["accepted_at", "updated_at"])
+                profile, _ = UserProfile.objects.get_or_create(user=invitation.user)
+                if profile.email_verified_at is None:
+                    profile.email_verified_at = timezone.now()
+                    profile.save(update_fields=["email_verified_at", "updated_at"])
+                _log_audit(None, "update", invitation.user, {"event": "admin_invitation_accepted"})
+                _log_security_event(invitation.user, get_user_model(), object_id=str(invitation.user_id), changes={"event": "admin_invitation_accepted", "ip": _client_ip(request)})
+
+            reset_uid, reset_token, reset_url = _password_reset_link_for_user(invitation.user)
+            return Response(
+                {
+                    "verified": True,
+                    "invitation_accepted": True,
+                    "password_reset_unlocked": True,
+                    "reset_uid": reset_uid,
+                    "reset_token": reset_token,
+                    "reset_url": reset_url,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         try:
             row = EmailVerificationToken.objects.select_related("user").get(token=token)
         except EmailVerificationToken.DoesNotExist:
@@ -3448,10 +3698,12 @@ class PasswordResetApi(APIView):
         User = get_user_model()
         user = User.objects.filter(email=email).first()
         if user is not None:
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            token = PasswordResetTokenGenerator().make_token(user)
-            frontend_base = getattr(settings, "FRONTEND_BASE_URL", "http://127.0.0.1:3000")
-            link = f"{frontend_base}/reset-password?uid={urllib.parse.quote(uid)}&token={urllib.parse.quote(token)}"
+            invitation = _admin_invitation_for_user(user)
+            if invitation is not None and invitation.accepted_at is None:
+                logger.info("password_reset_blocked_pending_acceptance user_id=%s ip=%s", str(user.pk), ip or "unknown")
+                _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset_blocked_pending_acceptance", "ip": ip})
+                return Response({"sent": True}, status=status.HTTP_200_OK)
+            uid, token, link = _password_reset_link_for_user(user)
             subject = "Reset your password"
             message = f"Open this link to reset your password:\n\n{link}\n"
             try:
@@ -3491,23 +3743,59 @@ class PasswordResetConfirmApi(APIView):
             _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset_invalid_token", "ip": ip})
             raise ValidationError({"token": "Invalid or expired token"})
 
+        invitation = _admin_invitation_for_user(user)
+        if invitation is not None and invitation.accepted_at is None:
+            _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset_blocked_pending_acceptance", "ip": ip})
+            raise PermissionDenied("Account invitation must be accepted before setting a password.")
+
+        activated_by_onboarding = False
         with transaction.atomic():
             user.set_password(new_password)
             if not bool(getattr(user, "is_active", True)):
                 user.is_active = True
+                activated_by_onboarding = invitation is not None
             user.save()
             profile, _ = UserProfile.objects.get_or_create(user=user)
             if profile.email_verified_at is None:
                 profile.email_verified_at = timezone.now()
                 profile.save(update_fields=["email_verified_at", "updated_at"])
-            _log_audit(user, "update", user, {"event": "password_reset"})
-            _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset", "ip": ip})
+            if invitation is not None:
+                now = timezone.now()
+                update_fields = ["updated_at"]
+                if invitation.password_reset_completed_at is None:
+                    invitation.password_reset_completed_at = now
+                    update_fields.append("password_reset_completed_at")
+                if invitation.activated_at is None:
+                    invitation.activated_at = now
+                    update_fields.append("activated_at")
+                invitation.save(update_fields=update_fields)
+                _ensure_default_business_role(user)
+                _log_audit(None, "update", user, {"event": "password_reset_completed", "onboarding": "admin_invite"})
+                _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset_completed", "ip": ip})
+                _log_audit(None, "update", user, {"event": "account_activated", "roles": user_role_names(user)})
+                _log_security_event(user, User, object_id=str(user.pk), changes={"event": "account_activated", "ip": ip, "roles": user_role_names(user)})
+            else:
+                _log_audit(user, "update", user, {"event": "password_reset"})
+                _log_security_event(user, User, object_id=str(user.pk), changes={"event": "password_reset", "ip": ip})
 
         AccessToken.objects.filter(user=user, revoked_at__isnull=True).update(revoked_at=timezone.now())
-        role = role_for_name("user")
-        token_row = issue_access_token(user=user, role=role, expires_seconds=7 * 24 * 3600)
+        role, _, expires_seconds = _login_role_config_for_user(user)
+        token_row = issue_access_token(user=user, role=role, expires_seconds=expires_seconds)
         remember = bool(request.data.get("remember"))
-        resp = Response({"reset": True, "token": token_row.key, "role": role.name, "expires_at": token_row.expires_at.isoformat() if token_row.expires_at else None}, status=status.HTTP_200_OK)
+        activation_email_sent = False
+        if activated_by_onboarding and invitation is not None:
+            activation_email_sent = _send_account_activation_email(user, ip=ip, invitation=invitation)
+        resp = Response(
+            {
+                "reset": True,
+                "token": token_row.key,
+                "role": role.name,
+                "expires_at": token_row.expires_at.isoformat() if token_row.expires_at else None,
+                "activated": bool(getattr(user, "is_active", False)),
+                "activation_email_sent": activation_email_sent,
+            },
+            status=status.HTTP_200_OK,
+        )
         _set_auth_cookie(resp, token_row, remember=remember)
         return resp
 
@@ -4038,11 +4326,12 @@ class AdminUsersApi(APIView):
         email = str(request.data.get("email") or "").strip().lower()
         full_name = str(request.data.get("full_name") or "").strip()
         company_name = str(request.data.get("company_name") or "").strip()
-        is_active = bool(request.data.get("is_active", True))
         primary_role = str(request.data.get("primary_role") or "user").strip().lower()
         custom_role_names = _parse_custom_role_names(request.data.get("custom_roles"))
         if not username or not password:
             raise ValidationError({"detail": "username and password are required"})
+        if not email:
+            raise ValidationError({"email": "Email is required"})
         validate_application_password(password, min_length=6)
         phone_value = str(request.data.get("phone") or "").strip()
         country_code = str(request.data.get("country_code") or DEFAULT_COUNTRY_CODE).strip() or DEFAULT_COUNTRY_CODE
@@ -4059,8 +4348,9 @@ class AdminUsersApi(APIView):
             raise ValidationError({"email": "Email already exists"})
         if phone_e164 and UserProfile.objects.filter(phone=phone_e164).exists():
             raise ValidationError({"phone": "Phone number already exists"})
+        invitation = None
         with transaction.atomic():
-            u = User(username=username, email=email, is_active=is_active)
+            u = User(username=username, email=email, is_active=False)
             u.set_password(password)
             u.save()
             _apply_admin_user_roles(u, primary_role=primary_role, custom_role_names=custom_role_names)
@@ -4070,8 +4360,14 @@ class AdminUsersApi(APIView):
                     "full_name": full_name or None,
                     "phone": phone_e164,
                     "company_legal_name": company_name or None,
-                    "email_verified_at": timezone.now() if email else None,
+                    "email_verified_at": None,
                 },
+            )
+            invitation = AdminUserInvitation.objects.create(
+                user=u,
+                invited_by=request.user,
+                token_key=secrets.token_urlsafe(24),
+                expires_at=timezone.now() + timedelta(hours=72),
             )
             _log_audit(
                 request.user,
@@ -4080,12 +4376,18 @@ class AdminUsersApi(APIView):
                 {
                     "username": username,
                     "email": email or None,
-                    "is_active": is_active,
+                    "is_active": False,
                     "primary_role": primary_role,
                     "custom_roles": custom_role_names,
+                    "onboarding": "admin_invitation_pending",
+                    "invitation_expires_at": invitation.expires_at.isoformat(),
                 },
             )
-        return Response({"id": u.id, "created": True}, status=status.HTTP_201_CREATED)
+        invite_sent = _send_admin_invitation_email(invitation, ip=_client_ip(request)) if invitation is not None else False
+        payload = {"id": u.id, "created": True, "invitation_sent": bool(invite_sent)}
+        if not invite_sent:
+            payload["detail"] = "User created, but the invitation email could not be delivered."
+        return Response(payload, status=status.HTTP_201_CREATED)
 
     def patch(self, request):
         if not user_has_permission(request.user, "admin.users.write"):
@@ -4116,7 +4418,11 @@ class AdminUsersApi(APIView):
             u.email = email
             update_fields.append("email")
         if "is_active" in request.data:
-            u.is_active = bool(request.data.get("is_active"))
+            invitation = _admin_invitation_for_user(u)
+            requested_active = bool(request.data.get("is_active"))
+            if invitation is not None and invitation.activated_at is None and requested_active:
+                raise ValidationError({"is_active": "Admin-invited users activate only after invitation acceptance and password setup."})
+            u.is_active = requested_active
             update_fields.append("is_active")
 
         primary_role = before["primary_role"]
@@ -4343,6 +4649,50 @@ class AdminOAuthStatusApi(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
 
+def _logo_upload_payload(asset: LogoAsset) -> dict[str, Any]:
+    return {
+        "asset_id": asset.id,
+        "scope": asset.scope,
+        "logo_url": asset.file_url,
+        "thumbnail_url": asset.thumbnail_url,
+        "logo_thumbnail_url": asset.thumbnail_url,
+        "content_type": asset.content_type,
+        "size_bytes": asset.size_bytes,
+        "sha256": asset.sha256,
+    }
+
+
+def _assign_logo_asset_for_scope(*, user, scope: str, asset: LogoAsset) -> None:
+    if scope == LOGO_SCOPE_GLOBAL:
+        gs = GlobalSettings.objects.select_for_update().get(singleton_key=_get_global_settings().singleton_key)
+        before = _serialize_settings_for_audit(gs)
+        previous_asset = gs.appearance_logo
+        gs.appearance_logo = asset
+        gs.updated_by = user
+        gs.save(update_fields=["appearance_logo", "updated_by", "updated_at"])
+        after = _serialize_settings_for_audit(gs)
+        _log_audit(user, "update", gs, {"before": before, "after": after, "scope": "global_logo_upload"})
+        cleanup_logo_asset_if_unreferenced(previous_asset)
+        return
+
+    us = UserSettings.objects.select_for_update().get(pk=_get_user_settings(user).pk)
+    before = _serialize_settings_for_audit(us)
+    if scope == LOGO_SCOPE_INVOICE:
+        previous_asset = us.invoice_logo
+        us.invoice_logo = asset
+        update_fields = ["invoice_logo", "updated_at"]
+    elif scope == LOGO_SCOPE_RECEIPT:
+        previous_asset = us.receipt_logo
+        us.receipt_logo = asset
+        update_fields = ["receipt_logo", "updated_at"]
+    else:
+        raise ValidationError({"scope": "Invalid logo scope"})
+    us.save(update_fields=update_fields)
+    after = _serialize_settings_for_audit(us)
+    _log_audit(user, "update", us, {"before": before, "after": after, "scope": f"{scope}_logo_upload"})
+    cleanup_logo_asset_if_unreferenced(previous_asset)
+
+
 class AdminLogoUploadApi(APIView):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
@@ -4350,100 +4700,41 @@ class AdminLogoUploadApi(APIView):
     def post(self, request):
         if not user_has_permission(request.user, "admin.logo.upload"):
             raise PermissionDenied("You do not have permission to upload logos.")
-        file = request.FILES.get("file")
-        if file is None:
+        upload = request.FILES.get("file")
+        if upload is None:
             raise ValidationError({"file": "file is required"})
-
-        max_bytes = int(getattr(settings, "LOGO_UPLOAD_MAX_BYTES", 2_000_000))
-        if file.size and int(file.size) > max_bytes:
-            raise ValidationError({"file": f"File too large (max {max_bytes} bytes)"})
-
-        content_type = (getattr(file, "content_type", "") or "").lower()
-        name = (getattr(file, "name", "") or "").lower()
-        is_jpeg = content_type in ("image/jpeg", "image/jpg") or name.endswith((".jpg", ".jpeg"))
-        is_png = content_type == "image/png" or name.endswith(".png")
-        is_svg = content_type in ("image/svg+xml", "image/svg") or name.endswith(".svg")
-        if not (is_jpeg or is_png or is_svg):
-            raise ValidationError({"file": "Unsupported file type. Only JPG, PNG, SVG are allowed."})
-
-        media_root = getattr(settings, "MEDIA_ROOT", "")
-        media_url = getattr(settings, "MEDIA_URL", "/media/")
-        if not media_root:
-            raise ValidationError({"detail": "MEDIA_ROOT is not configured"})
-
-        base_dir = os.path.join(str(media_root), "uploads", "logos")
-        os.makedirs(base_dir, exist_ok=True)
-        token = uuid.uuid4().hex
-
-        if is_svg:
-            raw = file.read()
-            text = raw.decode("utf-8", errors="ignore")
-            lowered = text.lower()
-            if "<script" in lowered or "onload=" in lowered or "javascript:" in lowered:
-                raise ValidationError({"file": "SVG contains disallowed content"})
-
-            logo_rel = os.path.join("uploads", "logos", f"{token}.svg")
-            logo_abs = os.path.join(str(media_root), logo_rel)
-            with open(logo_abs, "wb") as f:
-                f.write(raw)
-
-            thumb_rel = os.path.join("uploads", "logos", f"{token}_thumb.png")
-            thumb_abs = os.path.join(str(media_root), thumb_rel)
-            img = Image.new("RGBA", (256, 256), (245, 245, 245, 255))
-            draw = ImageDraw.Draw(img)
-            draw.text((96, 118), "SVG", fill=(30, 30, 30, 255))
-            img.save(thumb_abs, format="PNG", optimize=True)
-
-            return Response(
-                {
-                    "logo_url": media_url.rstrip("/") + "/" + logo_rel.replace(os.sep, "/"),
-                    "thumbnail_url": media_url.rstrip("/") + "/" + thumb_rel.replace(os.sep, "/"),
-                },
-                status=status.HTTP_201_CREATED,
-            )
-
+        scope = normalize_logo_scope(request.data.get("scope") or LOGO_SCOPE_GLOBAL)
+        if scope != LOGO_SCOPE_GLOBAL:
+            raise ValidationError({"scope": "Admin logo uploads only support the global appearance scope."})
+        asset = create_logo_asset(upload, scope=scope, owner=request.user)
         try:
-            raw = file.read()
-            img = Image.open(io.BytesIO(raw))
-            img.load()
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGBA" if is_png else "RGB")
-        except (UnidentifiedImageError, OSError):
-            raise ValidationError({"file": "Invalid image file"})
+            with transaction.atomic():
+                _assign_logo_asset_for_scope(user=request.user, scope=scope, asset=asset)
+        except Exception:
+            cleanup_logo_asset_if_unreferenced(asset)
+            raise
+        return Response(_logo_upload_payload(asset), status=status.HTTP_201_CREATED)
 
-        max_dim = 1024
-        if max(img.size) > max_dim:
-            img.thumbnail((max_dim, max_dim))
 
-        thumb = img.copy()
-        thumb.thumbnail((256, 256))
+class SettingsLogoUploadApi(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
-        if is_png:
-            ext = "png"
-            save_kwargs = {"format": "PNG", "optimize": True}
-        else:
-            ext = "jpg"
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            if thumb.mode != "RGB":
-                thumb = thumb.convert("RGB")
-            save_kwargs = {"format": "JPEG", "quality": 85, "optimize": True, "progressive": True}
-
-        logo_rel = os.path.join("uploads", "logos", f"{token}.{ext}")
-        thumb_rel = os.path.join("uploads", "logos", f"{token}_thumb.{ext}")
-        logo_abs = os.path.join(str(media_root), logo_rel)
-        thumb_abs = os.path.join(str(media_root), thumb_rel)
-
-        img.save(logo_abs, **save_kwargs)
-        thumb.save(thumb_abs, **save_kwargs)
-
-        return Response(
-            {
-                "logo_url": media_url.rstrip("/") + "/" + logo_rel.replace(os.sep, "/"),
-                "thumbnail_url": media_url.rstrip("/") + "/" + thumb_rel.replace(os.sep, "/"),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+    def post(self, request):
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "file is required"})
+        scope = normalize_logo_scope(request.data.get("scope"))
+        if scope == LOGO_SCOPE_GLOBAL:
+            raise PermissionDenied("Global logo uploads must use the admin settings endpoint.")
+        asset = create_logo_asset(upload, scope=scope, owner=request.user)
+        try:
+            with transaction.atomic():
+                _assign_logo_asset_for_scope(user=request.user, scope=scope, asset=asset)
+        except Exception:
+            cleanup_logo_asset_if_unreferenced(asset)
+            raise
+        return Response(_logo_upload_payload(asset), status=status.HTTP_201_CREATED)
 
 
 def _delivery_backoff_seconds(attempt_count: int) -> int:

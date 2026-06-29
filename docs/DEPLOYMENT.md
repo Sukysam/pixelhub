@@ -164,7 +164,7 @@ In another terminal:
 ```
 
 ### UI (Playwright)
-Start backend and frontend, then run (requires `E2E_USERNAME` and `E2E_PASSWORD` in the environment):
+Start backend and frontend, then run. For local `127.0.0.1`/`localhost` backends the suite can self-bootstrap a superuser; remote runs should still provide `E2E_USERNAME` and `E2E_PASSWORD`:
 ```bash
 cd frontend
 npm run test:e2e
