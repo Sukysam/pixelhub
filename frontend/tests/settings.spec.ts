@@ -8,6 +8,7 @@ const API_BASE_URL = process.env.E2E_API_BASE_URL ?? "http://127.0.0.1:8000/api"
 let cachedAdminTokenValue: string | null = null;
 const ADMIN_TOKEN_CACHE_PATH = path.join(os.tmpdir(), "pixelhub-e2e-admin-token.json");
 const ADMIN_TOKEN_LOCK_PATH = `${ADMIN_TOKEN_CACHE_PATH}.lock`;
+type MePayload = { roles?: string[]; permissions?: string[]; email?: string };
 
 async function delay(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -113,6 +114,53 @@ async function setSession(page: any, request: any, token: string) {
   );
 }
 
+async function createStandardBusinessUserSession(request: any) {
+  const email = `e2e_business_${Date.now()}_${crypto.randomBytes(3).toString("hex")}@example.com`;
+  const password = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
+  const phone = uniqueNgPhone();
+  const token = await adminToken(request);
+  const createRes = await request.post(`${API_BASE_URL}/admin/users/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: {
+      username: email,
+      email,
+      password,
+      company_name: "E2E Business Co",
+      phone,
+      is_active: true,
+      primary_role: "user",
+      custom_roles: [],
+    },
+  });
+  expect(createRes.ok()).toBeTruthy();
+
+  const loginRes = await request.post(`${API_BASE_URL}/auth/token/`, {
+    data: { username: email, password, remember: true },
+  });
+  expect(loginRes.ok()).toBeTruthy();
+  const login = (await loginRes.json()) as { token: string };
+
+  const meRes = await request.get(`${API_BASE_URL}/auth/me/`, {
+    headers: { Authorization: `Token ${login.token}` },
+  });
+  expect(meRes.ok()).toBeTruthy();
+  const me = (await meRes.json()) as MePayload;
+  expect(me.roles ?? []).toContain("editor");
+  expect(me.permissions ?? []).toContain("data.customers.write");
+  expect(me.permissions ?? []).toContain("data.invoices.write");
+  expect(me.permissions ?? []).toContain("data.receipts.write");
+
+  return { email, password, token: login.token, me };
+}
+
+async function getJson(request: any, token: string, apiPath: string) {
+  const res = await request.get(`${API_BASE_URL}${apiPath}`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(res.ok()).toBeTruthy();
+  return res.json();
+}
+
 function png1x1(): Buffer {
   return Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5n6nQAAAAASUVORK5CYII=",
@@ -137,32 +185,11 @@ function uniqueNgPhone(): string {
 }
 
 async function registerAndReachDashboard(page: any) {
-  const email = `e2e_settings_${Date.now()}@example.com`;
-  const signupSecret = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
-  const phone = uniqueNgPhone();
-  const token = await adminToken(page.request);
-  const createRes = await page.request.post(`${API_BASE_URL}/admin/users/`, {
-    headers: { Authorization: `Token ${token}` },
-    data: {
-      username: email,
-      email,
-      password: signupSecret,
-      company_name: "E2E Settings Co",
-      phone,
-      is_active: true,
-      primary_role: "user",
-      custom_roles: [],
-    },
-  });
-  expect(createRes.ok()).toBeTruthy();
-  const loginRes = await page.request.post(`${API_BASE_URL}/auth/token/`, {
-    data: { username: email, password: signupSecret, remember: true },
-  });
-  expect(loginRes.ok()).toBeTruthy();
-  const login = (await loginRes.json()) as { token: string };
-  await setSession(page, page.request, login.token);
+  const session = await createStandardBusinessUserSession(page.request);
+  await setSession(page, page.request, session.token);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
+  return session;
 }
 
 test("standard user settings does not expose administration controls", async ({ page }) => {
@@ -258,6 +285,151 @@ test("user can select NGN currency in settings", async ({ page }) => {
 
   await expect(currency).toHaveValue(/^\d+$/);
   await expect(page.getByLabel("Invoice preview")).toContainText(/NGN|₦/);
+});
+
+test("standard business user can persist customer invoice and receipt records", async ({ page, request }) => {
+  test.slow();
+  const session = await registerAndReachDashboard(page);
+  const authHeaders = { Authorization: `Token ${session.token}` };
+  const suffix = `${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
+  const customerName = `E2E Customer ${suffix}`;
+  const customerEmail = `customer_${suffix}@example.com`;
+  const customerPhone = "08011112222";
+  const customerAddress = `12 Persistence Street ${suffix}`;
+  const updatedCustomerAddress = `24 Updated Avenue ${suffix}`;
+
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible();
+  await page.getByRole("button", { name: "Add Customer" }).click();
+  const customerDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Add New Customer" }) });
+  await customerDialog.getByLabel("Name").fill(customerName);
+  await customerDialog.getByLabel("Email").fill(customerEmail);
+  await customerDialog.getByLabel("Phone").fill(customerPhone);
+  await customerDialog.getByLabel("Billing Address").fill(customerAddress);
+  await customerDialog.getByRole("button", { name: "Add Customer" }).click();
+  await expect(page.getByText(customerName)).toBeVisible({ timeout: 30_000 });
+
+  const customersAfterCreate = (await getJson(request, session.token, "/customers/?page=1")) as {
+    results: Array<{ id: number; name: string; billing_address?: string | null }>;
+  };
+  const createdCustomer = customersAfterCreate.results.find((row) => row.name === customerName);
+  expect(createdCustomer).toBeTruthy();
+  expect(createdCustomer?.billing_address).toBe(customerAddress);
+
+  const customerRow = page.locator("tbody tr", { hasText: customerName }).first();
+  await customerRow.getByRole("button", { name: "Edit" }).click();
+  const customerEditRow = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: "Save" }) }).first();
+  await customerEditRow.locator("input").last().fill(updatedCustomerAddress);
+  await customerEditRow.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(customerRow).toContainText(updatedCustomerAddress, { timeout: 30_000 });
+
+  const customersAfterUpdate = (await getJson(request, session.token, "/customers/?page=1")) as {
+    results: Array<{ id: number; name: string; billing_address?: string | null }>;
+  };
+  const updatedCustomer = customersAfterUpdate.results.find((row) => row.name === customerName);
+  expect(updatedCustomer?.billing_address).toBe(updatedCustomerAddress);
+
+  const itemRes = await request.post(`${API_BASE_URL}/items/`, {
+    headers: authHeaders,
+    data: {
+      name: `E2E Widget ${suffix}`,
+      unit_price: "30.00",
+      tax_rate: "0",
+      stock_quantity: 8,
+    },
+  });
+  expect(itemRes.ok()).toBeTruthy();
+  const item = (await itemRes.json()) as { id: number; name: string };
+
+  await page.goto("/invoices");
+  await expect(page.getByRole("heading", { name: "Create Invoice" })).toBeVisible();
+  const invoiceCustomerSelect = page.locator("select").first();
+  const invoiceCustomerValue = await invoiceCustomerSelect.locator('option[value]:not([value=""])').first().getAttribute("value");
+  expect(invoiceCustomerValue).toBeTruthy();
+  await invoiceCustomerSelect.selectOption(invoiceCustomerValue!);
+  await page.getByRole("button", { name: "Add Item" }).click();
+  const pickerDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Select Item" }) });
+  await expect(pickerDialog).toBeVisible();
+  await pickerDialog.getByRole("button", { name: new RegExp(item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
+  const invoiceLineItemRow = page.locator("tr").filter({ has: page.getByRole("button", { name: new RegExp(item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }) }).first();
+  await expect(invoiceLineItemRow).toBeVisible();
+  await invoiceLineItemRow.locator('input[type="number"]').nth(1).fill("1");
+  await page.getByRole("button", { name: "Save Invoice" }).click();
+  const summaryDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Invoice Summary" }) });
+  await expect(summaryDialog).toBeVisible({ timeout: 30_000 });
+  await summaryDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText(/Invoice .* saved\./)).toBeVisible({ timeout: 30_000 });
+  const newestInvoiceRow = page.locator("tr").filter({ hasText: /INV-\d{4}-\d+/ }).first();
+  await expect(newestInvoiceRow).toBeVisible({ timeout: 30_000 });
+  const createdInvoiceNumber = ((await newestInvoiceRow.textContent()) || "").match(/INV-\d{4}-\d+/)?.[0];
+  expect(createdInvoiceNumber).toBeTruthy();
+
+  const invoicesAfterCreate = (await getJson(request, session.token, "/invoices/?page=1")) as {
+    results: Array<{ id: number; invoice_number: string; status: string }>;
+  };
+  const createdInvoice = invoicesAfterCreate.results.find((row) => row.invoice_number === createdInvoiceNumber);
+  expect(createdInvoice).toBeTruthy();
+  expect(createdInvoice?.status).toBe("Draft");
+
+  const invoiceRow = page.locator("tbody tr", { hasText: createdInvoiceNumber ?? "" }).first();
+  await invoiceRow.getByRole("button", { name: "Edit" }).click();
+  await invoiceRow.locator("select").first().selectOption("Sent");
+  await invoiceRow.locator('input[type="date"]').fill("2026-07-31");
+  const invoiceUpdateResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${API_BASE_URL}/invoices/${createdInvoice?.id}/` &&
+      response.request().method() === "PATCH" &&
+      response.status() === 200
+  );
+  await invoiceRow.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await invoiceUpdateResponse;
+  await expect(invoiceRow).toContainText("Sent", { timeout: 30_000 });
+
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${createdInvoice?.id}/`, {
+    headers: authHeaders,
+  });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const updatedInvoice = (await invoiceDetailRes.json()) as { status: string; due_date?: string | null };
+  expect(updatedInvoice.status).toBe("Sent");
+  expect(updatedInvoice.due_date).toBe("2026-07-31");
+
+  await page.goto("/receipts");
+  await expect(page.getByRole("heading", { name: "Receipts" })).toBeVisible();
+  await page.getByRole("button", { name: "Record Payment" }).click();
+  const paymentDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Make Payment" }) });
+  await paymentDialog.getByLabel("Invoice").selectOption(String(createdInvoice?.id));
+  await paymentDialog.getByLabel("Amount Paid").fill("30.00");
+  await paymentDialog.getByLabel("Transaction Date").fill("2026-07-01");
+  await paymentDialog.getByLabel("Payment Method").selectOption("Cash");
+  await paymentDialog.getByRole("button", { name: "Process Payment" }).click();
+  const confirmPaymentDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Confirm Payment" }) });
+  await confirmPaymentDialog.getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByText("Payment processed and receipt generated.")).toBeVisible({ timeout: 30_000 });
+
+  const receiptsAfterCreate = (await getJson(request, session.token, "/receipts/?page=1")) as {
+    results: Array<{ id: number; invoice: number; reference_number?: string | null; amount_paid: string }>;
+  };
+  const createdReceipt = receiptsAfterCreate.results.find((row) => row.invoice === createdInvoice?.id);
+  expect(createdReceipt).toBeTruthy();
+  expect(createdReceipt?.amount_paid).toBe("30.00");
+
+  const receiptRow = page.locator("tbody tr", { hasText: `#${createdInvoice?.id}` }).first();
+  await receiptRow.getByRole("button", { name: "Edit" }).click();
+  const receiptEditRow = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: "Save" }) }).first();
+  await receiptEditRow.locator("input").last().fill(`RCPT-${suffix}`);
+  await receiptEditRow.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await expect(receiptRow).toContainText(`RCPT-${suffix}`, { timeout: 30_000 });
+
+  const receiptDetailRes = await request.get(`${API_BASE_URL}/receipts/${createdReceipt?.id}/`, {
+    headers: authHeaders,
+  });
+  expect(receiptDetailRes.ok()).toBeTruthy();
+  const updatedReceipt = (await receiptDetailRes.json()) as { reference_number?: string | null; invoice: number };
+  expect(updatedReceipt.invoice).toBe(createdInvoice?.id);
+  expect(updatedReceipt.reference_number).toBe(`RCPT-${suffix}`);
 });
 
 test("admin can upload PNG logo, save global settings, and logo shows in user Settings previews", async ({ page, request }) => {

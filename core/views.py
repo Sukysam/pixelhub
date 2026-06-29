@@ -612,6 +612,46 @@ def _is_privileged_account(user) -> bool:
     )
 
 
+DEFAULT_BUSINESS_ROLE_NAME = "editor"
+
+
+def _ensure_default_business_role(user) -> None:
+    if user is None or not getattr(user, "pk", None):
+        return
+    if bool(getattr(user, "is_superuser", False)) or bool(getattr(user, "is_staff", False)):
+        return
+    existing_roles = set(user_role_names(user))
+    if "admin" in existing_roles or "staff" in existing_roles:
+        return
+    if any(role_name not in SYSTEM_ROLE_NAMES for role_name in existing_roles):
+        return
+    role = Role.objects.filter(name=DEFAULT_BUSINESS_ROLE_NAME).first()
+    if role is None:
+        return
+    UserRole.objects.get_or_create(user=user, role=role)
+
+
+def _log_record_save_failure(*, request, entity: str, operation: str, exc: Exception) -> None:
+    user_id = getattr(getattr(request, "user", None), "id", None)
+    if isinstance(exc, (ValidationError, NotFound, PermissionDenied, ConflictError, APIException)):
+        logger.warning(
+            "save.%s_failed entity=%s user_id=%s detail=%s",
+            operation,
+            entity,
+            user_id,
+            getattr(exc, "detail", str(exc)),
+        )
+        return
+    logger.exception("save.%s_failed entity=%s user_id=%s", operation, entity, user_id)
+
+
+def _raise_record_save_failure(*, request, entity: str, operation: str, exc: Exception) -> None:
+    _log_record_save_failure(request=request, entity=entity, operation=operation, exc=exc)
+    if isinstance(exc, (ValidationError, NotFound, PermissionDenied, ConflictError, APIException)):
+        raise exc
+    raise APIException(f"Unable to {operation} {entity}. Please try again.")
+
+
 def _touch_social_connection(
     *,
     user,
@@ -633,6 +673,7 @@ def _touch_social_connection(
         },
     )
     ensure_user_role(user, "user")
+    _ensure_default_business_role(user)
     return connection
 
 
@@ -960,25 +1001,38 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
         return super().retrieve(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
-        self._require_model_perm("add")
-        return super().create(request, *args, **kwargs)
+        model = self.get_queryset().model
+        try:
+            self._require_model_perm("add")
+            with transaction.atomic():
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                instance = serializer.save()
+                _log_audit(request.user, "create", instance, {})
+            headers = self.get_success_headers(serializer.data)
+            return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED, headers=headers)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity=model._meta.model_name, operation="create", exc=exc)
 
     def update(self, request, *args, **kwargs):
-        self._require_model_perm("change")
-        partial = kwargs.pop("partial", False)
         model = self.get_queryset().model
-        with transaction.atomic():
-            instance = model.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
-            _check_concurrency(request, instance)
-            serializer = self.get_serializer(instance, data=request.data, partial=partial)
-            serializer.is_valid(raise_exception=True)
-            before = {k: getattr(instance, k, None) for k in serializer.validated_data.keys()}
-            updated = serializer.save()
-            after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
-            changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
-            if changes:
-                _log_audit(request.user, "update", updated, changes)
-        return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+        try:
+            self._require_model_perm("change")
+            partial = kwargs.pop("partial", False)
+            with transaction.atomic():
+                instance = model.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
+                _check_concurrency(request, instance)
+                serializer = self.get_serializer(instance, data=request.data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                before = {k: getattr(instance, k, None) for k in serializer.validated_data.keys()}
+                updated = serializer.save()
+                after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
+                changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
+                if changes:
+                    _log_audit(request.user, "update", updated, changes)
+            return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity=model._meta.model_name, operation="update", exc=exc)
 
     def partial_update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -1848,138 +1902,144 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         return qs
 
     def create(self, request, *args, **kwargs):
-        self._require_model_perm("add")
-        payload = request.data.copy()
-        items_payload = payload.pop('items', payload.pop('invoice_items', []))
+        try:
+            self._require_model_perm("add")
+            payload = request.data.copy()
+            items_payload = payload.pop('items', payload.pop('invoice_items', []))
 
-        if not isinstance(items_payload, list) or len(items_payload) == 0:
-            return Response({'error': 'items must be a non-empty list'}, status=status.HTTP_400_BAD_REQUEST)
+            if not isinstance(items_payload, list) or len(items_payload) == 0:
+                return Response({'error': 'items must be a non-empty list'}, status=status.HTTP_400_BAD_REQUEST)
 
-        requested_status = payload.get("status") or "Draft"
+            requested_status = payload.get("status") or "Draft"
 
-        with transaction.atomic():
-            customer_id = payload.get("customer")
-            if customer_id:
-                if not Customer.objects.filter(pk=customer_id, is_deleted=False).exists():
-                    raise NotFound("Customer not found")
-            invoice_serializer = self.get_serializer(data={**payload, "status": requested_status})
-            invoice_serializer.is_valid(raise_exception=True)
-            invoice = invoice_serializer.save(
-                subtotal=Decimal("0.00"),
-                tax_rate=Decimal("0.00"),
-                tax_total=Decimal("0.00"),
-                total_amount=Decimal("0.00"),
-            )
-
-            item_ids = []
-            normalized_items = []
-            for raw in items_payload:
-                if not isinstance(raw, dict):
-                    raise ValidationError("Each item must be an object")
-                item_id = raw.get("item") or raw.get("item_id") or raw.get("itemId")
-                qty = raw.get("quantity")
-                override_tax_rate = raw.get("tax_rate")
-                try:
-                    item_id = int(item_id)
-                except (TypeError, ValueError):
-                    raise ValidationError("Each item must include a valid item id")
-                try:
-                    qty = int(qty)
-                except (TypeError, ValueError):
-                    raise ValidationError("Each item must include a valid quantity")
-                if qty < 1:
-                    raise ValidationError("quantity must be >= 1")
-                item_ids.append(item_id)
-                normalized_items.append((item_id, qty, override_tax_rate))
-
-            items_by_id = {i.id: i for i in Item.objects.select_for_update().filter(id__in=item_ids, is_deleted=False)}
-            if len(items_by_id) != len(set(item_ids)):
-                raise ValidationError("One or more items do not exist")
-
-            subtotal = Decimal("0.00")
-            tax_total = Decimal("0.00")
-            created_lines = []
-            for item_id, qty, override_tax_rate in normalized_items:
-                db_item = items_by_id[item_id]
-                unit_price = db_item.unit_price
-                line_subtotal = _q2(unit_price * qty)
-
-                if override_tax_rate is None or override_tax_rate == "":
-                    line_tax_rate = db_item.tax_rate
-                else:
-                    try:
-                        line_tax_rate = Decimal(str(override_tax_rate))
-                    except (InvalidOperation, TypeError):
-                        raise ValidationError({"tax_rate": "Invalid tax_rate"})
-                if line_tax_rate < 0 or line_tax_rate > 100:
-                    raise ValidationError({"tax_rate": "tax_rate must be between 0 and 100"})
-
-                line_tax = _q2((line_subtotal * line_tax_rate) / Decimal("100"))
-                line_total = _q2(line_subtotal + line_tax)
-
-                subtotal += line_subtotal
-                tax_total += line_tax
-                created_lines.append(
-                    InvoiceItem(
-                        invoice=invoice,
-                        item=db_item,
-                        description=db_item.description,
-                        unit_of_measure=db_item.unit_of_measure,
-                        quantity=qty,
-                        unit_price=unit_price,
-                        tax_rate=line_tax_rate,
-                        line_subtotal=line_subtotal,
-                        line_tax=line_tax,
-                        line_total=line_total,
-                    )
+            with transaction.atomic():
+                customer_id = payload.get("customer")
+                if customer_id:
+                    if not Customer.objects.filter(pk=customer_id, is_deleted=False).exists():
+                        raise NotFound("Customer not found")
+                invoice_serializer = self.get_serializer(data={**payload, "status": requested_status})
+                invoice_serializer.is_valid(raise_exception=True)
+                invoice = invoice_serializer.save(
+                    subtotal=Decimal("0.00"),
+                    tax_rate=Decimal("0.00"),
+                    tax_total=Decimal("0.00"),
+                    total_amount=Decimal("0.00"),
                 )
 
-            InvoiceItem.objects.bulk_create(created_lines)
+                item_ids = []
+                normalized_items = []
+                for raw in items_payload:
+                    if not isinstance(raw, dict):
+                        raise ValidationError("Each item must be an object")
+                    item_id = raw.get("item") or raw.get("item_id") or raw.get("itemId")
+                    qty = raw.get("quantity")
+                    override_tax_rate = raw.get("tax_rate")
+                    try:
+                        item_id = int(item_id)
+                    except (TypeError, ValueError):
+                        raise ValidationError("Each item must include a valid item id")
+                    try:
+                        qty = int(qty)
+                    except (TypeError, ValueError):
+                        raise ValidationError("Each item must include a valid quantity")
+                    if qty < 1:
+                        raise ValidationError("quantity must be >= 1")
+                    item_ids.append(item_id)
+                    normalized_items.append((item_id, qty, override_tax_rate))
 
-            subtotal = _q2(subtotal)
-            tax_total = _q2(tax_total)
-            total_amount = _q2(subtotal + tax_total)
-            computed_tax_rate = _q2((tax_total / subtotal) * Decimal("100")) if subtotal > 0 else Decimal("0.00")
-            Invoice.objects.filter(pk=invoice.pk).update(
-                subtotal=subtotal,
-                tax_rate=computed_tax_rate,
-                tax_total=tax_total,
-                total_amount=total_amount,
-            )
-            invoice.refresh_from_db()
+                items_by_id = {i.id: i for i in Item.objects.select_for_update().filter(id__in=item_ids, is_deleted=False)}
+                if len(items_by_id) != len(set(item_ids)):
+                    raise ValidationError("One or more items do not exist")
 
-            if invoice.status in ["Sent", "Paid"]:
-                self._deduct_inventory_for_invoice(invoice)
+                subtotal = Decimal("0.00")
+                tax_total = Decimal("0.00")
+                created_lines = []
+                for item_id, qty, override_tax_rate in normalized_items:
+                    db_item = items_by_id[item_id]
+                    unit_price = db_item.unit_price
+                    line_subtotal = _q2(unit_price * qty)
 
-        logger.info("invoice.create invoice_id=%s invoice_number=%s status=%s", invoice.id, invoice.invoice_number, invoice.status)
-        return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+                    if override_tax_rate is None or override_tax_rate == "":
+                        line_tax_rate = db_item.tax_rate
+                    else:
+                        try:
+                            line_tax_rate = Decimal(str(override_tax_rate))
+                        except (InvalidOperation, TypeError):
+                            raise ValidationError({"tax_rate": "Invalid tax_rate"})
+                    if line_tax_rate < 0 or line_tax_rate > 100:
+                        raise ValidationError({"tax_rate": "tax_rate must be between 0 and 100"})
+
+                    line_tax = _q2((line_subtotal * line_tax_rate) / Decimal("100"))
+                    line_total = _q2(line_subtotal + line_tax)
+
+                    subtotal += line_subtotal
+                    tax_total += line_tax
+                    created_lines.append(
+                        InvoiceItem(
+                            invoice=invoice,
+                            item=db_item,
+                            description=db_item.description,
+                            unit_of_measure=db_item.unit_of_measure,
+                            quantity=qty,
+                            unit_price=unit_price,
+                            tax_rate=line_tax_rate,
+                            line_subtotal=line_subtotal,
+                            line_tax=line_tax,
+                            line_total=line_total,
+                        )
+                    )
+
+                InvoiceItem.objects.bulk_create(created_lines)
+
+                subtotal = _q2(subtotal)
+                tax_total = _q2(tax_total)
+                total_amount = _q2(subtotal + tax_total)
+                computed_tax_rate = _q2((tax_total / subtotal) * Decimal("100")) if subtotal > 0 else Decimal("0.00")
+                Invoice.objects.filter(pk=invoice.pk).update(
+                    subtotal=subtotal,
+                    tax_rate=computed_tax_rate,
+                    tax_total=tax_total,
+                    total_amount=total_amount,
+                )
+                invoice.refresh_from_db()
+
+                if invoice.status in ["Sent", "Paid"]:
+                    self._deduct_inventory_for_invoice(invoice)
+
+            logger.info("invoice.create invoice_id=%s invoice_number=%s status=%s", invoice.id, invoice.invoice_number, invoice.status)
+            return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="invoice", operation="create", exc=exc)
 
     def update(self, request, *args, **kwargs):
-        self._require_model_perm("change")
-        partial = kwargs.pop("partial", False)
-        with transaction.atomic():
-            pk = kwargs.get("pk")
-            try:
-                invoice = Invoice.objects.select_for_update().get(pk=pk, is_deleted=False)
-            except Invoice.DoesNotExist:
-                raise NotFound("Invoice not found")
-            _check_concurrency(request, invoice)
-            old_status = invoice.status
-            serializer = self.get_serializer(invoice, data=request.data, partial=partial)
-            serializer.is_valid(raise_exception=True)
-            before = {k: getattr(invoice, k, None) for k in serializer.validated_data.keys()}
-            updated = serializer.save()
-            updated.refresh_from_db()
-            after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
-            changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
-            if changes:
-                _log_audit(request.user, "update", updated, changes)
+        try:
+            self._require_model_perm("change")
+            partial = kwargs.pop("partial", False)
+            with transaction.atomic():
+                pk = kwargs.get("pk")
+                try:
+                    invoice = Invoice.objects.select_for_update().get(pk=pk, is_deleted=False)
+                except Invoice.DoesNotExist:
+                    raise NotFound("Invoice not found")
+                _check_concurrency(request, invoice)
+                old_status = invoice.status
+                serializer = self.get_serializer(invoice, data=request.data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                before = {k: getattr(invoice, k, None) for k in serializer.validated_data.keys()}
+                updated = serializer.save()
+                updated.refresh_from_db()
+                after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
+                changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
+                if changes:
+                    _log_audit(request.user, "update", updated, changes)
 
-            if old_status not in ["Sent", "Paid"] and updated.status in ["Sent", "Paid"]:
-                self._deduct_inventory_for_invoice(updated)
+                if old_status not in ["Sent", "Paid"] and updated.status in ["Sent", "Paid"]:
+                    self._deduct_inventory_for_invoice(updated)
 
-        logger.info("invoice.update invoice_id=%s status_from=%s status_to=%s", invoice.id, old_status, updated.status)
-        return Response(InvoiceSerializer(updated).data, status=status.HTTP_200_OK)
+            logger.info("invoice.update invoice_id=%s status_from=%s status_to=%s", invoice.id, old_status, updated.status)
+            return Response(InvoiceSerializer(updated).data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="invoice", operation="update", exc=exc)
 
     def partial_update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -2145,112 +2205,115 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
 
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):
-        user = request.user
-        if not getattr(user, "is_authenticated", False):
-            raise PermissionDenied()
-
-        invoice_id = pk
-        idempotency_key = request.META.get("HTTP_IDEMPOTENCY_KEY") or request.headers.get("Idempotency-Key")
-        if not idempotency_key or not isinstance(idempotency_key, str):
-            raise ValidationError({"detail": "Idempotency-Key header is required"})
-
-        cache_key = f"invoice.pay:{user.id}:{invoice_id}:{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
-        cached_receipt_id = cache.get(cache_key)
-        if cached_receipt_id:
-            receipt = Receipt.objects.filter(pk=cached_receipt_id, is_deleted=False).select_related("invoice").first()
-            if receipt:
-                logger.info("payment.idempotent_replay user_id=%s invoice_id=%s receipt_id=%s", user.id, invoice_id, receipt.id)
-                return Response(ReceiptSerializer(receipt).data, status=status.HTTP_200_OK)
-
-        raw_amount = request.data.get("amount_paid")
-        raw_method = request.data.get("payment_method")
-        raw_reference = request.data.get("reference_number")
-        raw_payment_date = request.data.get("payment_date")
-
         try:
-            amount_paid = Decimal(str(raw_amount)).quantize(CENTS, rounding=ROUND_HALF_UP)
-        except (InvalidOperation, TypeError):
-            raise ValidationError({"amount_paid": "amount_paid must be a valid number"})
-        if amount_paid <= 0:
-            raise ValidationError({"amount_paid": "amount_paid must be > 0"})
+            user = request.user
+            if not getattr(user, "is_authenticated", False):
+                raise PermissionDenied()
 
-        if raw_method not in dict(Receipt.PAYMENT_METHOD_CHOICES):
-            raise ValidationError({"payment_method": "Invalid payment_method"})
-        payment_method = str(raw_method)
+            invoice_id = pk
+            idempotency_key = request.META.get("HTTP_IDEMPOTENCY_KEY") or request.headers.get("Idempotency-Key")
+            if not idempotency_key or not isinstance(idempotency_key, str):
+                raise ValidationError({"detail": "Idempotency-Key header is required"})
 
-        reference_number = None
-        if raw_reference is not None and str(raw_reference).strip():
-            reference_number = str(raw_reference).strip()
+            cache_key = f"invoice.pay:{user.id}:{invoice_id}:{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
+            cached_receipt_id = cache.get(cache_key)
+            if cached_receipt_id:
+                receipt = Receipt.objects.filter(pk=cached_receipt_id, is_deleted=False).select_related("invoice").first()
+                if receipt:
+                    logger.info("payment.idempotent_replay user_id=%s invoice_id=%s receipt_id=%s", user.id, invoice_id, receipt.id)
+                    return Response(ReceiptSerializer(receipt).data, status=status.HTTP_200_OK)
 
-        if payment_method in ("Card", "Bank Transfer") and not reference_number:
-            raise ValidationError({"reference_number": "reference_number is required for Card and Bank Transfer payments"})
+            raw_amount = request.data.get("amount_paid")
+            raw_method = request.data.get("payment_method")
+            raw_reference = request.data.get("reference_number")
+            raw_payment_date = request.data.get("payment_date")
 
-        if reference_number:
-            ref_upper = reference_number.upper()
-            digits_only = "".join(ch for ch in reference_number if ch.isdigit())
-            if payment_method == "Card" and len(digits_only) >= 12:
-                raise ValidationError({"reference_number": "Do not store card numbers. Use an authorization/reference code instead."})
-            if "INVALID" in ref_upper:
-                raise PaymentDeclined("Invalid card number")
-            if "EXPIRED" in ref_upper:
-                raise PaymentDeclined("Card has expired")
-            if "INSUFFICIENT" in ref_upper:
-                raise PaymentDeclined("Insufficient funds")
-            if "DECLINE" in ref_upper:
-                logger.warning("payment.declined user_id=%s invoice_id=%s", user.id, invoice_id)
-                raise PaymentDeclined("Card was declined")
-            if "NETWORK" in ref_upper:
-                logger.warning("payment.gateway_unavailable user_id=%s invoice_id=%s", user.id, invoice_id)
-                raise PaymentGatewayUnavailable("Payment gateway unavailable")
-            if "TIMEOUT" in ref_upper:
-                logger.warning("payment.gateway_timeout user_id=%s invoice_id=%s", user.id, invoice_id)
-                time.sleep(2)
-                raise PaymentGatewayTimeout("Payment gateway timeout")
-
-        payment_date = None
-        if raw_payment_date not in (None, ""):
             try:
-                payment_date = date.fromisoformat(str(raw_payment_date))
-            except ValueError:
-                raise ValidationError({"payment_date": "Invalid date. Use YYYY-MM-DD"})
+                amount_paid = Decimal(str(raw_amount)).quantize(CENTS, rounding=ROUND_HALF_UP)
+            except (InvalidOperation, TypeError):
+                raise ValidationError({"amount_paid": "amount_paid must be a valid number"})
+            if amount_paid <= 0:
+                raise ValidationError({"amount_paid": "amount_paid must be > 0"})
 
-        with transaction.atomic():
-            try:
-                invoice = Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
-            except Invoice.DoesNotExist:
-                raise NotFound("Invoice not found")
+            if raw_method not in dict(Receipt.PAYMENT_METHOD_CHOICES):
+                raise ValidationError({"payment_method": "Invalid payment_method"})
+            payment_method = str(raw_method)
 
-            total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
-            outstanding = (invoice.total_amount - total_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
-            if outstanding <= 0:
-                raise ValidationError({"detail": "Invoice is already fully paid"})
-            if amount_paid > outstanding:
-                raise ValidationError({"amount_paid": f"amount_paid cannot exceed outstanding amount ({outstanding})"})
+            reference_number = None
+            if raw_reference is not None and str(raw_reference).strip():
+                reference_number = str(raw_reference).strip()
 
-            receipt = Receipt.objects.create(
-                invoice=invoice,
-                amount_paid=amount_paid,
-                payment_date=payment_date if payment_date else timezone.localdate(),
-                payment_method=payment_method,
-                reference_number=reference_number,
+            if payment_method in ("Card", "Bank Transfer") and not reference_number:
+                raise ValidationError({"reference_number": "reference_number is required for Card and Bank Transfer payments"})
+
+            if reference_number:
+                ref_upper = reference_number.upper()
+                digits_only = "".join(ch for ch in reference_number if ch.isdigit())
+                if payment_method == "Card" and len(digits_only) >= 12:
+                    raise ValidationError({"reference_number": "Do not store card numbers. Use an authorization/reference code instead."})
+                if "INVALID" in ref_upper:
+                    raise PaymentDeclined("Invalid card number")
+                if "EXPIRED" in ref_upper:
+                    raise PaymentDeclined("Card has expired")
+                if "INSUFFICIENT" in ref_upper:
+                    raise PaymentDeclined("Insufficient funds")
+                if "DECLINE" in ref_upper:
+                    logger.warning("payment.declined user_id=%s invoice_id=%s", user.id, invoice_id)
+                    raise PaymentDeclined("Card was declined")
+                if "NETWORK" in ref_upper:
+                    logger.warning("payment.gateway_unavailable user_id=%s invoice_id=%s", user.id, invoice_id)
+                    raise PaymentGatewayUnavailable("Payment gateway unavailable")
+                if "TIMEOUT" in ref_upper:
+                    logger.warning("payment.gateway_timeout user_id=%s invoice_id=%s", user.id, invoice_id)
+                    time.sleep(2)
+                    raise PaymentGatewayTimeout("Payment gateway timeout")
+
+            payment_date = None
+            if raw_payment_date not in (None, ""):
+                try:
+                    payment_date = date.fromisoformat(str(raw_payment_date))
+                except ValueError:
+                    raise ValidationError({"payment_date": "Invalid date. Use YYYY-MM-DD"})
+
+            with transaction.atomic():
+                try:
+                    invoice = Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
+                except Invoice.DoesNotExist:
+                    raise NotFound("Invoice not found")
+
+                total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                outstanding = (invoice.total_amount - total_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
+                if outstanding <= 0:
+                    raise ValidationError({"detail": "Invoice is already fully paid"})
+                if amount_paid > outstanding:
+                    raise ValidationError({"amount_paid": f"amount_paid cannot exceed outstanding amount ({outstanding})"})
+
+                receipt = Receipt.objects.create(
+                    invoice=invoice,
+                    amount_paid=amount_paid,
+                    payment_date=payment_date if payment_date else timezone.localdate(),
+                    payment_method=payment_method,
+                    reference_number=reference_number,
+                )
+
+                total_paid_after = (total_paid + amount_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
+                if total_paid_after >= invoice.total_amount and invoice.status != "Paid":
+                    Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
+                    invoice.refresh_from_db()
+                    logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid_after)
+
+            cache.set(cache_key, receipt.id, timeout=15 * 60)
+            logger.info(
+                "payment.success user_id=%s invoice_id=%s receipt_id=%s amount_paid=%s method=%s",
+                user.id,
+                invoice_id,
+                receipt.id,
+                str(amount_paid),
+                payment_method,
             )
-
-            total_paid_after = (total_paid + amount_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
-            if total_paid_after >= invoice.total_amount and invoice.status != "Paid":
-                Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
-                invoice.refresh_from_db()
-                logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid_after)
-
-        cache.set(cache_key, receipt.id, timeout=15 * 60)
-        logger.info(
-            "payment.success user_id=%s invoice_id=%s receipt_id=%s amount_paid=%s method=%s",
-            user.id,
-            invoice_id,
-            receipt.id,
-            str(amount_paid),
-            payment_method,
-        )
-        return Response(ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED)
+            return Response(ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="receipt", operation="create", exc=exc)
 
     @action(detail=False, methods=["post"])
     def bulk_update_status(self, request):
@@ -2647,48 +2710,51 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
     pagination_class = OptionalPageNumberPagination
 
     def create(self, request, *args, **kwargs):
-        self._require_model_perm("add")
-        user = request.user
-        user_key = str(user.id) if getattr(user, "is_authenticated", False) else f"anon:{_client_ip(request)}"
-        idempotency_key = request.META.get("HTTP_IDEMPOTENCY_KEY") or request.headers.get("Idempotency-Key")
-        cache_key = None
-        with transaction.atomic():
-            invoice_id = request.data.get("invoice")
-            try:
-                invoice_id = int(invoice_id)
-            except (TypeError, ValueError):
-                return Response({'error': 'invoice is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            self._require_model_perm("add")
+            user = request.user
+            user_key = str(user.id) if getattr(user, "is_authenticated", False) else f"anon:{_client_ip(request)}"
+            idempotency_key = request.META.get("HTTP_IDEMPOTENCY_KEY") or request.headers.get("Idempotency-Key")
+            cache_key = None
+            with transaction.atomic():
+                invoice_id = request.data.get("invoice")
+                try:
+                    invoice_id = int(invoice_id)
+                except (TypeError, ValueError):
+                    return Response({'error': 'invoice is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-            if idempotency_key and isinstance(idempotency_key, str):
-                cache_key = f"receipt.create:{user_key}:{invoice_id}:{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
-                cached_receipt_id = cache.get(cache_key)
-                if cached_receipt_id:
-                    receipt = Receipt.objects.filter(pk=cached_receipt_id, is_deleted=False).select_related("invoice").first()
-                    if receipt:
-                        logger.info("receipt.idempotent_replay user_id=%s invoice_id=%s receipt_id=%s", user_key, invoice_id, receipt.id)
-                        return Response(ReceiptSerializer(receipt).data, status=status.HTTP_200_OK)
+                if idempotency_key and isinstance(idempotency_key, str):
+                    cache_key = f"receipt.create:{user_key}:{invoice_id}:{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
+                    cached_receipt_id = cache.get(cache_key)
+                    if cached_receipt_id:
+                        receipt = Receipt.objects.filter(pk=cached_receipt_id, is_deleted=False).select_related("invoice").first()
+                        if receipt:
+                            logger.info("receipt.idempotent_replay user_id=%s invoice_id=%s receipt_id=%s", user_key, invoice_id, receipt.id)
+                            return Response(ReceiptSerializer(receipt).data, status=status.HTTP_200_OK)
 
-            try:
-                invoice = Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
-            except Invoice.DoesNotExist:
-                raise NotFound("Invoice not found")
+                try:
+                    invoice = Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
+                except Invoice.DoesNotExist:
+                    raise NotFound("Invoice not found")
 
-            serializer = self.get_serializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-            receipt = serializer.save()
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                receipt = serializer.save()
 
-            total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
-            if total_paid >= invoice.total_amount and invoice.status != "Paid":
-                Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
-                invoice.refresh_from_db()
-                logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid)
+                total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                if total_paid >= invoice.total_amount and invoice.status != "Paid":
+                    Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
+                    invoice.refresh_from_db()
+                    logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid)
 
-        if cache_key:
-            cache.set(cache_key, receipt.id, timeout=15 * 60)
-        if getattr(request.user, "is_authenticated", False):
-            _log_audit(request.user, "create", receipt, {"invoice": str(invoice.id), "amount_paid": str(receipt.amount_paid), "payment_method": receipt.payment_method})
-        logger.info("receipt.create receipt_id=%s invoice_id=%s amount_paid=%s", receipt.id, invoice.id, receipt.amount_paid)
-        return Response(ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED)
+            if cache_key:
+                cache.set(cache_key, receipt.id, timeout=15 * 60)
+            if getattr(request.user, "is_authenticated", False):
+                _log_audit(request.user, "create", receipt, {"invoice": str(invoice.id), "amount_paid": str(receipt.amount_paid), "payment_method": receipt.payment_method})
+            logger.info("receipt.create receipt_id=%s invoice_id=%s amount_paid=%s", receipt.id, invoice.id, receipt.amount_paid)
+            return Response(ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="receipt", operation="create", exc=exc)
 
     @action(detail=True, methods=["post"], url_path="share_link")
     def share_link(self, request, pk=None):
@@ -2724,32 +2790,35 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
         )
 
     def update(self, request, *args, **kwargs):
-        self._require_model_perm("change")
-        partial = kwargs.pop("partial", False)
-        with transaction.atomic():
-            receipt = Receipt.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
-            _check_concurrency(request, receipt)
-            serializer = self.get_serializer(receipt, data=request.data, partial=partial)
-            serializer.is_valid(raise_exception=True)
-            before = {k: getattr(receipt, k, None) for k in serializer.validated_data.keys()}
-            updated = serializer.save()
-            after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
-            changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
-            if changes:
-                _log_audit(request.user, "update", updated, changes)
+        try:
+            self._require_model_perm("change")
+            partial = kwargs.pop("partial", False)
+            with transaction.atomic():
+                receipt = Receipt.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
+                _check_concurrency(request, receipt)
+                serializer = self.get_serializer(receipt, data=request.data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                before = {k: getattr(receipt, k, None) for k in serializer.validated_data.keys()}
+                updated = serializer.save()
+                after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
+                changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
+                if changes:
+                    _log_audit(request.user, "update", updated, changes)
 
-            try:
-                invoice = Invoice.objects.select_for_update().get(pk=updated.invoice_id, is_deleted=False)
-            except Invoice.DoesNotExist:
-                invoice = None
-            if invoice is not None:
-                total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
-                if total_paid >= invoice.total_amount and invoice.status != "Paid":
-                    Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
-                if total_paid < invoice.total_amount and invoice.status == "Paid":
-                    Invoice.objects.filter(pk=invoice.pk).update(status="Sent")
+                try:
+                    invoice = Invoice.objects.select_for_update().get(pk=updated.invoice_id, is_deleted=False)
+                except Invoice.DoesNotExist:
+                    invoice = None
+                if invoice is not None:
+                    total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                    if total_paid >= invoice.total_amount and invoice.status != "Paid":
+                        Invoice.objects.filter(pk=invoice.pk).update(status="Paid")
+                    if total_paid < invoice.total_amount and invoice.status == "Paid":
+                        Invoice.objects.filter(pk=invoice.pk).update(status="Sent")
 
-        return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+            return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="receipt", operation="update", exc=exc)
 
     def partial_update(self, request, *args, **kwargs):
         kwargs["partial"] = True
@@ -3261,6 +3330,7 @@ class RegisterApi(APIView):
             user = User(username=username, email=email, is_active=False)
             user.set_password(data["password"])
             user.save()
+            _ensure_default_business_role(user)
             profile = UserProfile.objects.create(
                 user=user,
                 phone=phone_e164,
@@ -3936,6 +4006,7 @@ def _apply_admin_user_roles(user, *, primary_role: str, custom_role_names: list[
     UserRole.objects.filter(user=user).exclude(role__name__in=SYSTEM_ROLE_NAMES).exclude(role__in=custom_roles).delete()
     for role in custom_roles:
         UserRole.objects.get_or_create(user=user, role=role)
+    _ensure_default_business_role(user)
 
 
 class AdminUsersApi(APIView):

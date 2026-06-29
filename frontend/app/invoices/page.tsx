@@ -366,7 +366,9 @@ export default function InvoicesPage() {
 
   const toUserMessage = useCallback((e: unknown, fallback: string) => {
     if (e instanceof ApiError) {
-      if (e.status === 403) return t("forbidden");
+      if (e.status === 403) {
+        return e.message || "You do not have permission to save invoice records. Please check your role or contact an administrator.";
+      }
       if (e.status === 409) return t("conflict");
     }
     return getErrorMessage(e, fallback);

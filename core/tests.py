@@ -1268,6 +1268,80 @@ class RegistrationTests(APITestCase):
         profile.refresh_from_db()
         self.assertIsNotNone(profile.email_verified_at)
 
+    def test_verified_registration_grants_business_write_access_and_can_persist_records(self):
+        secret = _test_secret()
+
+        with override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend", DEFAULT_FROM_EMAIL="no-reply@test.local"):
+            res = self.client.post(
+                "/api/auth/register/",
+                {
+                    "email": "ops@example.com",
+                    "password": secret,
+                    "password_confirm": secret,
+                    "company_name": "OpsCo Ltd",
+                    "country_code": "+234",
+                    "phone_number": "8099999999",
+                    "country": "Nigeria",
+                    "accept_terms": True,
+                    "website": "",
+                },
+                format="json",
+            )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        user = User.objects.get(username="ops@example.com")
+        verify_row = EmailVerificationToken.objects.get(user=user)
+        verify = self.client.post("/api/auth/verify-email/", {"token": verify_row.token}, format="json")
+        self.assertEqual(verify.status_code, status.HTTP_200_OK)
+
+        login = self.client.post("/api/auth/token/", {"username": "ops@example.com", "password": secret}, format="json")
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+        token = login.data["token"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+
+        me = self.client.get("/api/auth/me/")
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertIn("editor", me.data.get("roles", []))
+        self.assertIn("data.customers.write", me.data.get("permissions", []))
+        self.assertIn("data.invoices.write", me.data.get("permissions", []))
+        self.assertIn("data.receipts.write", me.data.get("permissions", []))
+
+        customer_res = self.client.post(
+            "/api/customers/",
+            {"name": "Ops Buyer", "email": "buyer@example.com", "phone": "08012345678"},
+            format="json",
+        )
+        self.assertEqual(customer_res.status_code, status.HTTP_201_CREATED)
+
+        item_res = self.client.post(
+            "/api/items/",
+            {"name": "Ops Widget", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        )
+        self.assertEqual(item_res.status_code, status.HTTP_201_CREATED)
+
+        invoice_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": customer_res.data["id"],
+                "status": "Draft",
+                "items": [{"item": item_res.data["id"], "quantity": 1}],
+            },
+            format="json",
+        )
+        self.assertEqual(invoice_res.status_code, status.HTTP_201_CREATED)
+
+        receipt_res = self.client.post(
+            f"/api/invoices/{invoice_res.data['id']}/pay/",
+            {"amount_paid": "10.00", "payment_method": "Cash"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="k-reg-editor-1",
+        )
+        self.assertEqual(receipt_res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Customer.objects.filter(pk=customer_res.data["id"], is_deleted=False).exists())
+        self.assertTrue(Invoice.objects.filter(pk=invoice_res.data["id"], is_deleted=False).exists())
+        self.assertTrue(Receipt.objects.filter(pk=receipt_res.data["id"], is_deleted=False).exists())
+
     def test_resend_verification_sends_email(self):
         email = "resend@example.com"
         u = User.objects.create_user(username=email, email=email, password=_test_secret())
@@ -1496,6 +1570,78 @@ class ApiCoverageTests(APITestCase):
         patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "primary_role": "staff"}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
         self.assertTrue(AuditLog.objects.filter(action="update", object_id=str(created.data["id"])).exists())
+
+    def test_admin_created_standard_user_gets_default_business_role_and_can_persist_records(self):
+        self.client.force_authenticate(user=self.admin)
+        secret = _test_secret()
+        create_res = self.client.post(
+            "/api/admin/users/",
+            {
+                "username": "ops_admin_created@example.com",
+                "email": "ops_admin_created@example.com",
+                "password": secret,
+                "company_name": "Ops Admin Created Co",
+                "phone": "8077777777",
+                "primary_role": "user",
+                "custom_roles": [],
+                "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+
+        self.client.force_authenticate(user=None)
+        login = self.client.post(
+            "/api/auth/token/",
+            {"username": "ops_admin_created@example.com", "password": secret},
+            format="json",
+        )
+        self.assertEqual(login.status_code, status.HTTP_200_OK)
+        token = login.data["token"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+
+        me = self.client.get("/api/auth/me/")
+        self.assertEqual(me.status_code, status.HTTP_200_OK)
+        self.assertIn("editor", me.data.get("roles", []))
+        self.assertIn("data.customers.write", me.data.get("permissions", []))
+        self.assertIn("data.invoices.write", me.data.get("permissions", []))
+        self.assertIn("data.receipts.write", me.data.get("permissions", []))
+
+        customer_res = self.client.post(
+            "/api/customers/",
+            {"name": "Admin Created Buyer", "email": "buyer-admin-created@example.com", "phone": "08012340000"},
+            format="json",
+        )
+        self.assertEqual(customer_res.status_code, status.HTTP_201_CREATED)
+
+        item_res = self.client.post(
+            "/api/items/",
+            {"name": "Admin Created Widget", "unit_price": "15.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        )
+        self.assertEqual(item_res.status_code, status.HTTP_201_CREATED)
+
+        invoice_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": customer_res.data["id"],
+                "status": "Draft",
+                "items": [{"item": item_res.data["id"], "quantity": 1}],
+            },
+            format="json",
+        )
+        self.assertEqual(invoice_res.status_code, status.HTTP_201_CREATED)
+
+        receipt_res = self.client.post(
+            f"/api/invoices/{invoice_res.data['id']}/pay/",
+            {"amount_paid": "15.00", "payment_method": "Cash"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="k-admin-created-editor-1",
+        )
+        self.assertEqual(receipt_res.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Customer.objects.filter(pk=customer_res.data["id"], is_deleted=False).exists())
+        self.assertTrue(Invoice.objects.filter(pk=invoice_res.data["id"], is_deleted=False).exists())
+        self.assertTrue(Receipt.objects.filter(pk=receipt_res.data["id"], is_deleted=False).exists())
 
     def test_currency_and_exchange_rate_crud(self):
         self.client.force_authenticate(user=self.staff)
