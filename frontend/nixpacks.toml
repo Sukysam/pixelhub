@@ -1,4 +1,4 @@
-# nixpacks.toml for PIXELHUB Frontend on Sevalla
+# nixpacks.toml for PXL-HUB INVOICE Frontend on Sevalla
 
 [phases.setup]
 nixPkgs = ["nodejs_20"]

@@ -19,7 +19,7 @@ const navItems = [
 export function Sidebar() {
   const { lang, setLang, t } = useI18n();
   const [hasToken, setHasToken] = useState(false);
-  const [brandLabel, setBrandLabel] = useState("PIXELHUB");
+  const [brandLabel, setBrandLabel] = useState("PXL-HUB INVOICE");
 
   useEffect(() => {
     const sync = () => {
@@ -29,7 +29,7 @@ export function Sidebar() {
       if (company) {
         setBrandLabel(company.length > 24 ? `${company.slice(0, 21)}…` : company);
       } else {
-        setBrandLabel("PIXELHUB");
+        setBrandLabel("PXL-HUB INVOICE");
       }
     };
     sync();

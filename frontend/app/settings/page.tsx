@@ -155,7 +155,7 @@ function SettingsPageInner() {
     const logoUrl = resolveMediaUrl(logoUrlRaw);
     const showDesc = Boolean(invoiceTemplate.show_item_description);
     const footerText = (invoiceTemplate.footer_text as string) || (globalAppearance.invoice_footer_text as string) || "Thank you for your business!";
-    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PIXELHUB";
+    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PXL-HUB INVOICE";
     const companyTagline = (globalAppearance.company_tagline as string) || "";
     const currencyCode = selectedCurrencyCode || "USD";
     const nf = new Intl.NumberFormat(locale, { style: "currency", currency: currencyCode });
@@ -179,7 +179,7 @@ function SettingsPageInner() {
     const logoUrl = resolveMediaUrl(logoUrlRaw);
     const showItems = receiptTemplate.show_items !== false;
     const showDesc = Boolean(receiptTemplate.show_item_description);
-    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PIXELHUB";
+    const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PXL-HUB INVOICE";
     const companyTagline = (globalAppearance.company_tagline as string) || "";
     const titleText = (receiptTemplate.header_text as string) || "Receipt";
     const footerText = (receiptTemplate.footer_text as string) || (globalAppearance.receipt_footer_text as string) || "Thank you!";
