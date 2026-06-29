@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
-import { uploadLogoFile, validateLogoFile, type LogoUploadScope } from "@/lib/logoUpload";
+import { uploadLogoFile, validateLogoFile, type LogoUploadScope } from "../../lib/logoUpload";
 
 type Currency = {
   id: number;

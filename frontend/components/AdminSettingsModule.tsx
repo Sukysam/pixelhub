@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { LogoUploadField } from "@/components/LogoUploadField";
 import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl } from "@/lib/api";
-import { uploadLogoFile, validateLogoFile } from "@/lib/logoUpload";
+import { uploadLogoFile, validateLogoFile } from "../lib/logoUpload";
 
 type Currency = {
   id: number;
