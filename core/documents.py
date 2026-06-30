@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
+from urllib.parse import urljoin
 
 from django.conf import settings
 from django.core.cache import cache
@@ -33,6 +34,7 @@ class RenderedDocument:
     filename: str
     content_type: str
     content: bytes
+    backend: str | None = None
 
 
 def validate_email(value: str) -> str:
@@ -71,17 +73,104 @@ def verify_download_token(token: str, token_hash: str) -> bool:
     return hmac.compare_digest(calc, token_hash)
 
 
+def _absolute_media_url(request, value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://", "data:")):
+        return raw
+    if raw.startswith("//"):
+        base = backend_public_base_url()
+        try:
+            scheme = (request.build_absolute_uri("/") if hasattr(request, "build_absolute_uri") else base).split(":", 1)[0]
+        except Exception:
+            scheme = "https"
+        return f"{scheme}:{raw}"
+    if raw.startswith("/"):
+        builder = getattr(request, "build_absolute_uri", None)
+        if callable(builder):
+            try:
+                return builder(raw)
+            except Exception:
+                pass
+        return urljoin(backend_public_base_url().rstrip("/") + "/", raw.lstrip("/"))
+    return raw
+
+
+def _resolved_document_templates(request, user) -> dict[str, dict[str, Any]]:
+    from .views import _effective_templates_for_user
+
+    templates = _effective_templates_for_user(user)
+    global_appearance = dict(templates.get("global_appearance") or {})
+    invoice_template = dict(templates.get("invoice_template") or {})
+    receipt_template = dict(templates.get("receipt_template") or {})
+
+    for bucket in (global_appearance, invoice_template, receipt_template):
+        bucket["logo_url"] = _absolute_media_url(request, bucket.get("logo_url"))
+        bucket["logo_thumbnail_url"] = _absolute_media_url(request, bucket.get("logo_thumbnail_url"))
+
+    invoice_template["layout"] = (
+        invoice_template.get("layout")
+        if invoice_template.get("layout") in {"classic", "compact"}
+        else "classic"
+    )
+    receipt_template["layout"] = (
+        receipt_template.get("layout")
+        if receipt_template.get("layout") in {"classic", "compact"}
+        else "classic"
+    )
+    return {
+        "global_appearance": global_appearance,
+        "invoice_template": invoice_template,
+        "receipt_template": receipt_template,
+    }
+
+
+def _invoice_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    invoice_template = templates.get("invoice_template") or {}
+    global_appearance = templates.get("global_appearance") or {}
+    return {
+        "layout": invoice_template.get("layout") or "classic",
+        "primary_color": invoice_template.get("primary_color") or global_appearance.get("primary_color") or "#1a4d8e",
+        "font_family": invoice_template.get("font_family") or global_appearance.get("font_family") or "Helvetica",
+        "logo_url": invoice_template.get("logo_url") or global_appearance.get("logo_url"),
+        "footer_text": invoice_template.get("footer_text")
+        or global_appearance.get("invoice_footer_text")
+        or "Thank you for your business!",
+        "show_item_description": bool(invoice_template.get("show_item_description")),
+    }
+
+
+def _receipt_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    receipt_template = templates.get("receipt_template") or {}
+    global_appearance = templates.get("global_appearance") or {}
+    return {
+        "layout": receipt_template.get("layout") or "classic",
+        "primary_color": receipt_template.get("primary_color") or global_appearance.get("primary_color") or "#1a4d8e",
+        "font_family": receipt_template.get("font_family") or global_appearance.get("font_family") or "Helvetica",
+        "logo_url": receipt_template.get("logo_url") or global_appearance.get("logo_url"),
+        "header_text": receipt_template.get("header_text") or "Receipt",
+        "footer_text": receipt_template.get("footer_text")
+        or global_appearance.get("receipt_footer_text")
+        or "Thank you!",
+        "show_items": receipt_template.get("show_items") if "show_items" in receipt_template else True,
+        "show_item_description": receipt_template.get("show_item_description")
+        if "show_item_description" in receipt_template
+        else False,
+    }
+
+
 def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDocument:
     from .views import (
         _currency_for_code,
         _effective_company_identity_for_user,
         _effective_region_settings_for_user,
-        _effective_templates_for_user,
         _format_date_for_pattern,
         _invoice_discount_context,
         _format_money,
     )
-    templates = _effective_templates_for_user(request.user)
+    templates = _resolved_document_templates(request, request.user)
+    invoice_render = _invoice_render_settings(templates)
     identity = _effective_company_identity_for_user(request.user)
     region = _effective_region_settings_for_user(request, request.user)
     currency = _currency_for_code(region["currency_code"])
@@ -93,7 +182,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
         rendered_items.append(
             {
                 "name": li.item.name,
-                "description": li.description,
+                "description": li.description or li.item.description,
                 "unit_of_measure": li.unit_of_measure,
                 "quantity": li.quantity,
                 "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
@@ -116,6 +205,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
             "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
             "currency_code": currency.code if currency else region["currency_code"],
+            "invoice_render": invoice_render,
             **templates,
         }
     )
@@ -125,6 +215,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             filename=f"invoice_{invoice.invoice_number}.html",
             content_type="text/html; charset=utf-8",
             content=html.encode("utf-8"),
+            backend="html",
         )
 
     if fmt == "text":
@@ -152,6 +243,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             filename=f"invoice_{invoice.invoice_number}.txt",
             content_type="text/plain; charset=utf-8",
             content=body.encode("utf-8"),
+            backend="text",
         )
 
     try:
@@ -161,12 +253,22 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             filename=f"invoice_{invoice.invoice_number}.html",
             content_type="text/html; charset=utf-8",
             content=html.encode("utf-8"),
+            backend="unavailable",
         )
-    pdf = HTML(string=html).write_pdf()
+    try:
+        pdf = HTML(string=html, base_url=backend_public_base_url()).write_pdf()
+    except (OSError, ValueError):
+        return RenderedDocument(
+            filename=f"invoice_{invoice.invoice_number}.html",
+            content_type="text/html; charset=utf-8",
+            content=html.encode("utf-8"),
+            backend="failed",
+        )
     return RenderedDocument(
         filename=f"invoice_{invoice.invoice_number}.pdf",
         content_type="application/pdf",
         content=cast(bytes, pdf),
+        backend="weasyprint",
     )
 
 
@@ -175,25 +277,17 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
         _currency_for_code,
         _effective_company_identity_for_user,
         _effective_region_settings_for_user,
-        _effective_templates_for_user,
         _format_date_for_pattern,
         _format_money,
     )
-    templates = _effective_templates_for_user(request.user)
+    templates = _resolved_document_templates(request, request.user)
+    receipt_render = _receipt_render_settings(templates)
     identity = _effective_company_identity_for_user(request.user)
     region = _effective_region_settings_for_user(request, request.user)
     currency = _currency_for_code(region["currency_code"])
     symbol_position = (templates.get("receipt_template") or {}).get("currency_symbol_position") or "prefix"
 
     rt = templates.get("receipt_template") or {}
-    ga = templates.get("global_appearance") or {}
-    primary = rt.get("primary_color") or ga.get("primary_color") or "#1a4d8e"
-    font = rt.get("font_family") or ga.get("font_family") or "Helvetica"
-    logo_url = rt.get("logo_url") or ga.get("logo_url")
-    header_text = rt.get("header_text") or "Receipt"
-    footer_text = rt.get("footer_text") or ga.get("receipt_footer_text") or "Thank you!"
-    show_items = rt.get("show_items") if "show_items" in rt else True
-    show_item_description = rt.get("show_item_description") if "show_item_description" in rt else False
     numbering_format = rt.get("numbering_format") or "RCPT-{id}"
     try:
         receipt_number = numbering_format.format(id=receipt.id, invoice_number=receipt.invoice.invoice_number)
@@ -207,7 +301,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
         rendered_items.append(
             {
                 "name": li.item.name,
-                "description": li.description,
+                "description": li.description or li.item.description,
                 "quantity": li.quantity,
                 "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
                 "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
@@ -223,13 +317,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             "amount_paid_fmt": _format_money(Decimal(receipt.amount_paid), currency, region["number_format"], symbol_position),
             "invoice_total_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
             "invoice_items": rendered_items,
-            "primary": primary,
-            "font": font,
-            "logo_url": logo_url,
-            "header_text": header_text,
-            "footer_text": footer_text,
-            "show_items": bool(show_items),
-            "show_item_description": bool(show_item_description),
+            "receipt_render": receipt_render,
             **templates,
         }
     )
@@ -239,6 +327,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             filename=f"receipt_{receipt.id}.html",
             content_type="text/html; charset=utf-8",
             content=html.encode("utf-8"),
+            backend="html",
         )
 
     if fmt == "text":
@@ -257,6 +346,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             filename=f"receipt_{receipt.id}.txt",
             content_type="text/plain; charset=utf-8",
             content=body.encode("utf-8"),
+            backend="text",
         )
 
     try:
@@ -266,12 +356,22 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             filename=f"receipt_{receipt.id}.html",
             content_type="text/html; charset=utf-8",
             content=html.encode("utf-8"),
+            backend="unavailable",
         )
-    pdf = HTML(string=html).write_pdf()
+    try:
+        pdf = HTML(string=html, base_url=backend_public_base_url()).write_pdf()
+    except (OSError, ValueError):
+        return RenderedDocument(
+            filename=f"receipt_{receipt.id}.html",
+            content_type="text/html; charset=utf-8",
+            content=html.encode("utf-8"),
+            backend="failed",
+        )
     return RenderedDocument(
         filename=f"receipt_{receipt.id}.pdf",
         content_type="application/pdf",
         content=cast(bytes, pdf),
+        backend="weasyprint",
     )
 
 

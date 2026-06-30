@@ -1206,7 +1206,7 @@ class SettingsLogoUploadTests(APITestCase):
 
     def test_uploaded_logos_render_in_invoice_and_receipt_documents(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/", BACKEND_PUBLIC_BASE_URL="https://backend.example"):
                 self.client.force_authenticate(user=self.user)
                 invoice_logo = self.client.post(
                     "/api/settings/logo/upload/",
@@ -1220,9 +1220,28 @@ class SettingsLogoUploadTests(APITestCase):
                 )
                 self.assertEqual(invoice_logo.status_code, status.HTTP_201_CREATED)
                 self.assertEqual(receipt_logo.status_code, status.HTTP_201_CREATED)
+                patch_res = self.client.patch(
+                    "/api/settings/me/",
+                    {
+                        "invoice_template": {
+                            "layout": "compact",
+                            "show_item_description": True,
+                            "footer_text": "Compact invoice footer",
+                        },
+                        "receipt_template": {
+                            "layout": "compact",
+                            "show_items": False,
+                            "show_item_description": True,
+                            "header_text": "Compact Receipt",
+                            "footer_text": "Compact receipt footer",
+                        },
+                    },
+                    format="json",
+                )
+                self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
 
                 customer = Customer.objects.create(name="Logo Buyer", email="logo@example.com")
-                item = Item.objects.create(name="Logo Widget", unit_price=Decimal("10.00"), stock_quantity=10)
+                item = Item.objects.create(name="Logo Widget", description="Visible description", unit_price=Decimal("10.00"), stock_quantity=10)
                 invoice = Invoice.objects.create(
                     invoice_number="INV-2026-LOGO",
                     customer=customer,
@@ -1251,11 +1270,22 @@ class SettingsLogoUploadTests(APITestCase):
                 request_stub = type("Req", (), {"user": self.user, "query_params": {}, "headers": {}})()
                 rendered_invoice = render_invoice(request_stub, invoice, "html").content.decode("utf-8")
                 rendered_receipt = render_receipt(request_stub, receipt, "html").content.decode("utf-8")
+                self.assertIn('class="invoice-layout-compact"', rendered_invoice)
+                self.assertIn('class="receipt-layout-compact"', rendered_receipt)
+                self.assertIn("https://backend.example", rendered_invoice)
+                self.assertIn("https://backend.example", rendered_receipt)
                 self.assertIn(str(invoice_logo.data["logo_url"]), rendered_invoice)
                 self.assertIn(str(receipt_logo.data["logo_url"]), rendered_receipt)
+                self.assertIn("Visible description", rendered_invoice)
+                self.assertIn("Compact invoice footer", rendered_invoice)
+                self.assertIn("Compact Receipt", rendered_receipt)
+                self.assertIn("Compact receipt footer", rendered_receipt)
+                self.assertNotIn("<table>", rendered_receipt)
 
                 receipt_html = self.client.get(f"/api/receipts/{receipt.id}/print_html/")
                 self.assertEqual(receipt_html.status_code, status.HTTP_200_OK)
+                self.assertContains(receipt_html, 'class="receipt-layout-compact"')
+                self.assertContains(receipt_html, "http://testserver/media/uploads/logos/")
                 self.assertContains(receipt_html, str(receipt_logo.data["logo_url"]))
 
     def test_user_settings_patch_ignores_manual_logo_url(self):

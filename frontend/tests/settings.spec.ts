@@ -491,11 +491,16 @@ test("standard user can upload invoice and receipt logos with preview and persis
   await waitForUploadedLogoSrc(page.getByAltText("Receipt logo preview"));
   await expect(page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]')).toBeVisible({ timeout: 30_000 });
 
+  await page.locator("#inv_layout").selectOption("compact");
+  await page.locator("#rcpt_layout").selectOption("compact");
+  await expect(page.getByLabel("Invoice preview")).toHaveAttribute("data-layout", "compact");
+  await expect(page.getByLabel("Receipt preview")).toHaveAttribute("data-layout", "compact");
+
   const effective = (await getJson(request, session.token, "/settings/effective/")) as {
     effective: {
       templates: {
-        invoice_template: { logo_url?: string | null };
-        receipt_template: { logo_url?: string | null };
+        invoice_template: { logo_url?: string | null; layout?: string | null };
+        receipt_template: { logo_url?: string | null; layout?: string | null };
       };
     };
   };
@@ -503,6 +508,8 @@ test("standard user can upload invoice and receipt logos with preview and persis
   const receiptLogoUrl = String(effective.effective.templates.receipt_template.logo_url ?? "");
   expect(invoiceLogoUrl).toContain("/media/uploads/logos/");
   expect(receiptLogoUrl).toContain("/media/uploads/logos/");
+  expect(String(effective.effective.templates.invoice_template.layout ?? "")).toBe("compact");
+  expect(String(effective.effective.templates.receipt_template.layout ?? "")).toBe("compact");
 
   const invoiceLogoResponse = await request.get(`${BACKEND_ORIGIN}${invoiceLogoUrl}`);
   expect(invoiceLogoResponse.ok()).toBeTruthy();

@@ -34,8 +34,10 @@ Country defaults are currently backed by a deterministic in-code mapping in the 
 - Invoice PDF rendering uses WeasyPrint with `core/templates/core/invoice_pdf.html`.
 - Receipt print rendering uses `core/templates/core/receipt_print.html`.
 - The API injects effective template settings plus currency/date formatted fields to keep templates simple and stable.
+- Document rendering normalizes template logo URLs to absolute backend URLs before HTML/PDF generation so uploaded media renders reliably in browser views, downloaded HTML, and WeasyPrint output.
+- Invoice and receipt renderers share the same resolved template context used by settings previews, including `layout`, `font_family`, `primary_color`, `show_items`, and `show_item_description`, to keep preview and rendered output visually aligned.
+- Supported layout variants currently include `classic` and `compact`; both are responsive for narrow/mobile widths through template-level CSS fallbacks.
 
 ## Audit Logging + Rollback
 - All global and user settings changes are persisted as `AuditLog` rows.
 - Rollback uses the `before` snapshot stored in the audit log to restore the prior state for `GlobalSettings` or `UserSettings`.
-

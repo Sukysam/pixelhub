@@ -490,7 +490,7 @@ def _effective_templates_for_user(user) -> dict:
         "logo_url": None,
         "logo_thumbnail_url": None,
         "footer_text": None,
-        "layout": None,
+        "layout": "classic",
         "show_item_description": False,
         "currency_symbol_position": None,
         **(invoice_template if isinstance(invoice_template, dict) else {}),
@@ -503,6 +503,7 @@ def _effective_templates_for_user(user) -> dict:
         "header_text": None,
         "footer_text": None,
         "numbering_format": None,
+        "layout": "classic",
         "show_items": True,
         "show_item_description": False,
         "currency_symbol_position": None,
@@ -2595,103 +2596,13 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
 
     @action(detail=True, methods=['get'])
     def download_pdf(self, request, pk=None):
-        try:
-            from weasyprint import HTML
-        except (ImportError, OSError) as e:
-            logger.warning("pdf.weasyprint_unavailable error=%s", e)
-            invoice = self.get_object()
-            template = get_template('core/invoice_pdf.html')
-            templates = _effective_templates_for_user(request.user)
-            region = _effective_region_settings_for_user(request, request.user)
-            currency = _currency_for_code(region["currency_code"])
-            symbol_position = (templates.get("invoice_template") or {}).get("currency_symbol_position") or "prefix"
-
-            invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
-            rendered_items = []
-            for li in invoice_items:
-                rendered_items.append(
-                    {
-                        "name": li.item.name,
-                        "description": li.description,
-                        "unit_of_measure": li.unit_of_measure,
-                        "quantity": li.quantity,
-                        "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
-                        "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
-                        "line_tax": _format_money(Decimal(li.line_tax), currency, region["number_format"], symbol_position),
-                        "line_subtotal": _format_money(Decimal(li.line_subtotal), currency, region["number_format"], symbol_position),
-                    }
-                )
-
-            discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
-            html = template.render(
-                {
-                    "invoice": invoice,
-                    "invoice_items": rendered_items,
-                    "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
-                    "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
-                    "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
-                    **discount_context,
-                    "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
-                    "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
-                    "currency_code": currency.code if currency else region["currency_code"],
-                    **templates,
-                }
-            )
-            response = HttpResponse(html, content_type="text/html; charset=utf-8")
-            response["Content-Disposition"] = f'attachment; filename="invoice_{invoice.invoice_number}.html"'
-            response["X-PDF-Backend"] = "unavailable"
-            return response
-        
         invoice = self.get_object()
-        template = get_template('core/invoice_pdf.html')
-        templates = _effective_templates_for_user(request.user)
-        region = _effective_region_settings_for_user(request, request.user)
-        currency = _currency_for_code(region["currency_code"])
-        symbol_position = (templates.get("invoice_template") or {}).get("currency_symbol_position") or "prefix"
+        from .documents import render_invoice
 
-        invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
-        rendered_items = []
-        for li in invoice_items:
-            rendered_items.append(
-                {
-                    "name": li.item.name,
-                    "description": li.description,
-                    "unit_of_measure": li.unit_of_measure,
-                    "quantity": li.quantity,
-                    "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
-                    "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
-                    "line_tax": _format_money(Decimal(li.line_tax), currency, region["number_format"], symbol_position),
-                    "line_subtotal": _format_money(Decimal(li.line_subtotal), currency, region["number_format"], symbol_position),
-                }
-            )
-
-        discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
-        html = template.render(
-            {
-                "invoice": invoice,
-                "invoice_items": rendered_items,
-                "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
-                "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
-                "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
-                **discount_context,
-                "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
-                "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
-                "currency_code": currency.code if currency else region["currency_code"],
-                **templates,
-            }
-        )
-        try:
-            pdf_file = HTML(string=html).write_pdf()
-        except (OSError, ValueError) as e:
-            logger.warning("pdf.weasyprint_render_failed error=%s invoice_id=%s", e, invoice.id)
-            response = HttpResponse(html, content_type="text/html; charset=utf-8")
-            response["Content-Disposition"] = f'attachment; filename="invoice_{invoice.invoice_number}.html"'
-            response["X-PDF-Backend"] = "failed"
-            return response
-        
-        response = HttpResponse(pdf_file, content_type='application/pdf')
-        response['Content-Disposition'] = f'attachment; filename="invoice_{invoice.invoice_number}.pdf"'
-        response["X-PDF-Backend"] = "weasyprint"
+        rendered = render_invoice(request, invoice, "pdf")
+        response = HttpResponse(rendered.content, content_type=rendered.content_type)
+        response["Content-Disposition"] = f'attachment; filename="{rendered.filename}"'
+        response["X-PDF-Backend"] = rendered.backend or ("weasyprint" if "application/pdf" in rendered.content_type else "failed")
         return response
 
     @action(detail=True, methods=["post"])
@@ -3452,60 +3363,10 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
     @action(detail=True, methods=["get"])
     def print_html(self, request, pk=None):
         receipt = self.get_object()
-        template = get_template("core/receipt_print.html")
-        templates = _effective_templates_for_user(request.user)
-        region = _effective_region_settings_for_user(request, request.user)
-        currency = _currency_for_code(region["currency_code"])
-        symbol_position = (templates.get("receipt_template") or {}).get("currency_symbol_position") or "prefix"
+        from .documents import render_receipt
 
-        rt = templates.get("receipt_template") or {}
-        ga = templates.get("global_appearance") or {}
-        primary = rt.get("primary_color") or ga.get("primary_color") or "#1a4d8e"
-        font = rt.get("font_family") or ga.get("font_family") or "Helvetica"
-        logo_url = rt.get("logo_url") or ga.get("logo_url")
-        header_text = rt.get("header_text") or "Receipt"
-        footer_text = rt.get("footer_text") or ga.get("receipt_footer_text") or "Thank you!"
-        show_items = rt.get("show_items") if "show_items" in rt else True
-        show_item_description = rt.get("show_item_description") if "show_item_description" in rt else False
-        numbering_format = rt.get("numbering_format") or "RCPT-{id}"
-        try:
-            receipt_number = numbering_format.format(id=receipt.id, invoice_number=receipt.invoice.invoice_number)
-        except Exception:
-            receipt_number = f"RCPT-{receipt.id}"
-
-        invoice = receipt.invoice
-        line_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
-        rendered_items = []
-        for li in line_items:
-            rendered_items.append(
-                {
-                    "name": li.item.name,
-                    "description": li.description,
-                    "quantity": li.quantity,
-                    "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
-                    "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
-                }
-            )
-
-        html = template.render(
-            {
-                "receipt": receipt,
-                "receipt_number": receipt_number,
-                "payment_date_fmt": _format_date_for_pattern(receipt.payment_date, region["date_format"]),
-                "amount_paid_fmt": _format_money(Decimal(receipt.amount_paid), currency, region["number_format"], symbol_position),
-                "invoice_total_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
-                "invoice_items": rendered_items,
-                "primary": primary,
-                "font": font,
-                "logo_url": logo_url,
-                "header_text": header_text,
-                "footer_text": footer_text,
-                "show_items": bool(show_items),
-                "show_item_description": bool(show_item_description),
-                **templates,
-            }
-        )
-        return HttpResponse(html, content_type="text/html")
+        rendered = render_receipt(request, receipt, "html")
+        return HttpResponse(rendered.content, content_type=rendered.content_type)
 
 
 class ExpenseViewSet(SoftDeleteModelViewSet):

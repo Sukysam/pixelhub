@@ -195,6 +195,7 @@ function SettingsPageInner() {
 
   const previewInvoice = useMemo(() => {
     const invoiceTemplate = ((allowUserOverrides ? form?.invoice_template : effectiveInvoiceTemplate) ?? {}) as Record<string, unknown>;
+    const layout = invoiceTemplate.layout === "compact" ? "compact" : "classic";
     const primary = (invoiceTemplate.primary_color as string) || (globalAppearance.primary_color as string) || "#1a4d8e";
     const font = (invoiceTemplate.font_family as string) || (globalAppearance.font_family as string) || "Helvetica";
     const logoUrlRaw = (invoiceTemplate.logo_url as string) || (globalAppearance.logo_url as string) || "";
@@ -214,11 +215,12 @@ function SettingsPageInner() {
     const subtotal = 400;
     const tax = 0;
     const total = 400;
-    return { primary, font, logoUrl, showDesc, footerText, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
+    return { layout, primary, font, logoUrl, showDesc, footerText, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
   }, [activeCurrencyCode, allowUserOverrides, authUser?.company_name, effectiveInvoiceTemplate, form?.invoice_template, globalAppearance, locale]);
 
   const previewReceipt = useMemo(() => {
     const receiptTemplate = ((allowUserOverrides ? form?.receipt_template : effectiveReceiptTemplate) ?? {}) as Record<string, unknown>;
+    const layout = receiptTemplate.layout === "compact" ? "compact" : "classic";
     const primary = (receiptTemplate.primary_color as string) || (globalAppearance.primary_color as string) || "#1a4d8e";
     const font = (receiptTemplate.font_family as string) || (globalAppearance.font_family as string) || "Helvetica";
     const logoUrlRaw = (receiptTemplate.logo_url as string) || (globalAppearance.logo_url as string) || "";
@@ -238,7 +240,7 @@ function SettingsPageInner() {
       { name: "Product B", description: "Hardware", qty: 2, unit: 75, total: 150 },
     ];
     const paid = 400;
-    return { primary, font, logoUrl, showItems, showDesc, companyName, companyTagline, titleText, footerText, nf, df, today, items, paid };
+    return { layout, primary, font, logoUrl, showItems, showDesc, companyName, companyTagline, titleText, footerText, nf, df, today, items, paid };
   }, [activeCurrencyCode, allowUserOverrides, authUser?.company_name, effectiveReceiptTemplate, form?.receipt_template, globalAppearance, locale]);
 
   const setScopedPreview = useCallback((scope: UserLogoScope, nextUrl: string) => {
@@ -758,6 +760,23 @@ function SettingsPageInner() {
                         <option value="Courier New">Courier New</option>
                       </Select>
                     </div>
+                    <div>
+                      <Label htmlFor="rcpt_layout">Layout</Label>
+                      <Select
+                        id="rcpt_layout"
+                        disabled={!allowUserOverrides}
+                        value={String((form.receipt_template as Record<string, unknown>).layout ?? "classic")}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            receipt_template: { ...(form.receipt_template || {}), layout: e.target.value },
+                          })
+                        }
+                      >
+                        <option value="classic">Classic</option>
+                        <option value="compact">Compact</option>
+                      </Select>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <label className="flex items-center gap-2 text-sm">
@@ -803,29 +822,30 @@ function SettingsPageInner() {
                 </CardHeader>
                 <CardContent>
                   <div
-                    className="border rounded-lg p-4 bg-white"
+                    className={`border rounded-lg bg-white ${previewInvoice.layout === "compact" ? "p-3 text-xs" : "p-4 text-sm"}`}
                     style={{ fontFamily: previewInvoice.font, borderColor: "#e5e7eb" }}
                     aria-label="Invoice preview"
+                    data-layout={previewInvoice.layout}
                   >
-                    <div className="flex items-start justify-between gap-4 border-b pb-3">
+                    <div className={`flex items-start justify-between border-b ${previewInvoice.layout === "compact" ? "gap-3 pb-2" : "gap-4 pb-3"}`}>
                       <div>
                         {previewInvoice.logoUrl ? (
-                          <img src={previewInvoice.logoUrl} alt="Invoice logo" className="h-10 w-auto mb-2" />
+                          <img src={previewInvoice.logoUrl} alt="Invoice logo" className={previewInvoice.layout === "compact" ? "h-8 w-auto mb-2" : "h-10 w-auto mb-2"} />
                         ) : null}
-                        <div className="text-xl font-bold" style={{ color: previewInvoice.primary }}>
+                        <div className={previewInvoice.layout === "compact" ? "text-lg font-bold" : "text-xl font-bold"} style={{ color: previewInvoice.primary }}>
                           {previewInvoice.companyName}
                         </div>
                         <div className="text-xs text-gray-600">{previewInvoice.companyTagline}</div>
                       </div>
                       <div className="text-right">
-                        <div className="text-lg font-bold" style={{ color: previewInvoice.primary }}>
+                        <div className={previewInvoice.layout === "compact" ? "text-base font-bold" : "text-lg font-bold"} style={{ color: previewInvoice.primary }}>
                           INVOICE
                         </div>
                         <div className="text-sm text-gray-700">#INV-0001</div>
                       </div>
                     </div>
 
-                    <div className="mt-3 grid grid-cols-2 gap-4 text-sm">
+                    <div className={`mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 ${previewInvoice.layout === "compact" ? "text-xs" : "text-sm"}`}>
                       <div>
                         <div className="font-semibold" style={{ color: previewInvoice.primary }}>
                           Bill To
@@ -844,7 +864,7 @@ function SettingsPageInner() {
                     </div>
 
                     <div className="mt-4 overflow-x-auto">
-                      <table className="w-full text-sm">
+                      <table className={`w-full ${previewInvoice.layout === "compact" ? "text-xs" : "text-sm"}`}>
                         <thead>
                           <tr className="text-left bg-gray-50">
                             <th className="p-2">Item</th>
@@ -857,7 +877,7 @@ function SettingsPageInner() {
                           {previewInvoice.items.map((it) => (
                             <tr key={it.name} className="border-b">
                               <td className="p-2">
-                                <div>{it.name}</div>
+                                <div className="font-semibold text-gray-900">{it.name}</div>
                                 {previewInvoice.showDesc ? <div className="text-xs text-gray-600">{it.description}</div> : null}
                               </td>
                               <td className="p-2 text-center">{it.qty}</td>
@@ -869,7 +889,7 @@ function SettingsPageInner() {
                       </table>
                     </div>
 
-                    <div className="mt-4 ml-auto w-64 text-sm">
+                    <div className={`mt-4 ml-auto max-w-full ${previewInvoice.layout === "compact" ? "w-56 text-xs" : "w-64 text-sm"}`}>
                       <div className="flex justify-between py-1">
                         <span>Subtotal</span>
                         <span>{previewInvoice.nf.format(previewInvoice.subtotal)}</span>
@@ -886,7 +906,7 @@ function SettingsPageInner() {
                       </div>
                     </div>
 
-                    <div className="mt-4 pt-3 border-t text-xs text-gray-600 text-center">{previewInvoice.footerText}</div>
+                    <div className={`mt-4 border-t text-center text-gray-600 ${previewInvoice.layout === "compact" ? "pt-2 text-[11px]" : "pt-3 text-xs"}`}>{previewInvoice.footerText}</div>
                   </div>
                 </CardContent>
               </Card>
@@ -898,16 +918,17 @@ function SettingsPageInner() {
                 </CardHeader>
                 <CardContent>
                   <div
-                    className="border rounded-lg p-4 bg-white"
+                    className={`border rounded-lg bg-white ${previewReceipt.layout === "compact" ? "p-3 text-xs" : "p-4 text-sm"}`}
                     style={{ fontFamily: previewReceipt.font, borderColor: "#e5e7eb" }}
                     aria-label="Receipt preview"
+                    data-layout={previewReceipt.layout}
                   >
-                    <div className="flex items-start justify-between gap-4 border-b pb-3">
+                    <div className={`flex items-start justify-between border-b ${previewReceipt.layout === "compact" ? "gap-3 pb-2" : "gap-4 pb-3"}`}>
                       <div>
                         {previewReceipt.logoUrl ? (
-                          <img src={previewReceipt.logoUrl} alt="Receipt logo" className="h-10 w-auto mb-2" />
+                          <img src={previewReceipt.logoUrl} alt="Receipt logo" className={previewReceipt.layout === "compact" ? "h-8 w-auto mb-2" : "h-10 w-auto mb-2"} />
                         ) : null}
-                        <div className="text-xl font-bold" style={{ color: previewReceipt.primary }}>
+                        <div className={previewReceipt.layout === "compact" ? "text-lg font-bold" : "text-xl font-bold"} style={{ color: previewReceipt.primary }}>
                           {previewReceipt.companyName}
                         </div>
                         <div className="text-xs text-gray-600">{previewReceipt.companyTagline}</div>
@@ -928,7 +949,7 @@ function SettingsPageInner() {
 
                     {previewReceipt.showItems ? (
                       <div className="mt-3 overflow-x-auto">
-                        <table className="w-full text-sm">
+                        <table className={`w-full ${previewReceipt.layout === "compact" ? "text-xs" : "text-sm"}`}>
                           <thead>
                             <tr className="text-left bg-gray-50">
                               <th className="p-2">Item</th>
@@ -941,7 +962,7 @@ function SettingsPageInner() {
                             {previewReceipt.items.map((it) => (
                               <tr key={it.name} className="border-b">
                                 <td className="p-2">
-                                  <div>{it.name}</div>
+                                  <div className="font-semibold text-gray-900">{it.name}</div>
                                   {previewReceipt.showDesc ? <div className="text-xs text-gray-600">{it.description}</div> : null}
                                 </td>
                                 <td className="p-2 text-center">{it.qty}</td>
@@ -954,14 +975,14 @@ function SettingsPageInner() {
                       </div>
                     ) : null}
 
-                    <div className="mt-4 ml-auto w-64 text-sm">
+                    <div className={`mt-4 ml-auto max-w-full ${previewReceipt.layout === "compact" ? "w-56 text-xs" : "w-64 text-sm"}`}>
                       <div className="flex justify-between py-2 border-t font-bold" style={{ color: previewReceipt.primary }}>
                         <span>Amount Paid</span>
                         <span>{previewReceipt.nf.format(previewReceipt.paid)}</span>
                       </div>
                     </div>
 
-                    <div className="mt-4 pt-3 border-t text-xs text-gray-600 text-center">{previewReceipt.footerText}</div>
+                    <div className={`mt-4 border-t text-center text-gray-600 ${previewReceipt.layout === "compact" ? "pt-2 text-[11px]" : "pt-3 text-xs"}`}>{previewReceipt.footerText}</div>
                   </div>
                 </CardContent>
               </Card>
