@@ -737,6 +737,7 @@ test("inventory export and import flows work end-to-end", async ({ page, request
 test("invoice import flow works end-to-end", async ({ page, request }) => {
   const token = await adminToken(request);
   await setSession(page, request, token);
+  const suffix = `${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
 
   await page.addInitScript(() => {
     (window as any).__downloadObjectUrlCalls = 0;
@@ -749,16 +750,18 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
 
   const cRes = await request.post(`${API_BASE_URL}/customers/`, {
     headers: { Authorization: `Token ${token}` },
-    data: { name: `E2E Buyer ${Date.now()}`, email: `e2e_buyer_${Date.now()}@example.com` },
+    data: { name: `E2E Buyer ${suffix}`, email: `e2e_buyer_${suffix}@example.com` },
   });
   expect(cRes.ok()).toBeTruthy();
   const cust = await cRes.json();
 
-  const sku = `E2E-INV-SKU-${Date.now()}`;
-  await request.post(`${API_BASE_URL}/items/`, {
+  const sku = `E2E-INV-SKU-${suffix}`;
+  const invoiceNumber = `INV-E2E-${suffix}`.slice(0, 50);
+  const itemRes = await request.post(`${API_BASE_URL}/items/`, {
     headers: { Authorization: `Token ${token}` },
-    data: { type: "product", name: `E2E Item ${Date.now()}`, sku, unit_price: "10.00", tax_rate: "0.00", stock_quantity: 10 },
+    data: { type: "product", name: `E2E Item ${suffix}`, sku, unit_price: "10.00", tax_rate: "0.00", stock_quantity: 10 },
   });
+  expect(itemRes.ok()).toBeTruthy();
 
   await page.goto("/invoices");
   await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
@@ -767,8 +770,8 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
   const invCsv = Buffer.from(
     [
       "invoice_key,invoice_number,customer_email,customer_name,status,issue_date,due_date,item_sku,quantity,unit_price,tax_rate,description,unit_of_measure",
-      `B1,,${cust.email},,Sent,2026-05-01,2026-05-10,${sku},2,,,Line 1,pcs`,
-      `B1,,${cust.email},,Sent,2026-05-01,2026-05-10,${sku},1,,,Line 2,pcs`,
+      `B1,${invoiceNumber},${cust.email},,Sent,2026-05-01,2026-05-10,${sku},2,,,Line 1,pcs`,
+      `B1,${invoiceNumber},${cust.email},,Sent,2026-05-01,2026-05-10,${sku},1,,,Line 2,pcs`,
       "",
     ].join("\n"),
     "utf-8"
@@ -778,7 +781,13 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
   await dialog.getByLabel("File (.csv or .xlsx)").setInputFiles({ name: "invoices.csv", mimeType: "text/csv", buffer: invCsv });
   await dialog.getByRole("button", { name: "Import" }).click();
-  await expect(page.getByText(/Import complete|Validation complete/i)).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByText("Imported invoices: 1")).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByText("Imported line items: 2")).toBeVisible({ timeout: 30_000 });
+
+  const importedInvoices = (await getJson(request, token, `/invoices/?invoice_number=${encodeURIComponent(invoiceNumber)}`)) as {
+    results: Array<{ invoice_number: string }>;
+  };
+  expect(importedInvoices.results.some((row) => row.invoice_number === invoiceNumber)).toBeTruthy();
 });
 
 test("import template endpoints return downloadable files", async ({ request }) => {
