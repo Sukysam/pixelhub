@@ -32,7 +32,7 @@ from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import transaction
 from django.db import models
-from django.db.models import F, Sum, Q
+from django.db.models import F, Sum, Q, Max
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth
 from django.db.models import Count
 from django.contrib.contenttypes.models import ContentType
@@ -87,10 +87,13 @@ from .logo_uploads import (
 )
 from .serializers import (
     CustomerSerializer,
+    CustomerDetailSerializer,
     ItemSerializer,
+    ItemDetailSerializer,
     InvoiceSerializer,
     InvoiceItemSerializer,
     ReceiptSerializer,
+    ReceiptDetailSerializer,
     ExpenseSerializer,
     CurrencySerializer,
     ExchangeRateSerializer,
@@ -1155,6 +1158,27 @@ def _format_date_for_pattern(value: date, date_format: str) -> str:
     return value.strftime("%Y-%m-%d")
 
 
+def _apply_ordering_query(queryset, *, params, allowed_fields: dict[str, str], default: tuple[str, ...]):
+    raw = params.get("ordering") or params.get("sort") or ""
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not parts:
+        return queryset.order_by(*default)
+
+    order_by: list[str] = []
+    invalid: list[str] = []
+    for part in parts:
+        descending = part.startswith("-")
+        key = part[1:] if descending else part
+        target = allowed_fields.get(key)
+        if not target:
+            invalid.append(key)
+            continue
+        order_by.append(f"-{target}" if descending else target)
+    if invalid:
+        raise ValidationError({"ordering": f"Invalid ordering field(s): {', '.join(invalid)}"})
+    return queryset.order_by(*order_by)
+
+
 
 def _serialize_settings_for_audit(instance) -> dict:
     data = {}
@@ -1736,6 +1760,73 @@ class CustomerViewSet(SoftDeleteModelViewSet):
     serializer_class = CustomerSerializer
     pagination_class = OptionalPageNumberPagination
 
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "retrieve":
+            return CustomerDetailSerializer
+        return CustomerSerializer
+
+    def get_queryset(self):
+        qs = (
+            super()
+            .get_queryset()
+            .annotate(
+                invoice_count=Count("invoices", filter=Q(invoices__is_deleted=False), distinct=True),
+                lifetime_value=Coalesce(Sum("invoices__total_amount", filter=Q(invoices__is_deleted=False)), Decimal("0.00")),
+                last_invoice_date=Max("invoices__issue_date", filter=Q(invoices__is_deleted=False)),
+            )
+        )
+        p = self.request.query_params
+
+        q = str(p.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q)
+                | Q(email__icontains=q)
+                | Q(phone__icontains=q)
+                | Q(billing_address__icontains=q)
+            )
+
+        email = str(p.get("email") or "").strip()
+        if email:
+            qs = qs.filter(email__icontains=email)
+
+        phone = str(p.get("phone") or "").strip()
+        if phone:
+            qs = qs.filter(phone__icontains=phone)
+
+        def _date_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return date.fromisoformat(str(raw))
+            except ValueError:
+                raise ValidationError({key: "Invalid date. Use YYYY-MM-DD"})
+
+        created_from = _date_param("created_from")
+        created_to = _date_param("created_to")
+        if created_from:
+            qs = qs.filter(created_at__date__gte=created_from)
+        if created_to:
+            qs = qs.filter(created_at__date__lte=created_to)
+
+        return _apply_ordering_query(
+            qs,
+            params=p,
+            allowed_fields={
+                "id": "id",
+                "name": "name",
+                "email": "email",
+                "phone": "phone",
+                "created_at": "created_at",
+                "updated_at": "updated_at",
+                "invoice_count": "invoice_count",
+                "lifetime_value": "lifetime_value",
+                "last_invoice_date": "last_invoice_date",
+            },
+            default=("-id",),
+        )
+
     def destroy(self, request, *args, **kwargs):
         self._require_model_perm("delete")
         with transaction.atomic():
@@ -1787,6 +1878,11 @@ class ItemViewSet(SoftDeleteModelViewSet):
     pagination_class = OptionalPageNumberPagination
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "retrieve":
+            return ItemDetailSerializer
+        return ItemSerializer
+
     def get_queryset(self):
         qs = super().get_queryset()
         p = self.request.query_params
@@ -1801,6 +1897,10 @@ class ItemViewSet(SoftDeleteModelViewSet):
             if type_val not in allowed:
                 raise ValidationError({"type": "Invalid type"})
             qs = qs.filter(type=type_val)
+
+        warehouse_location = str(p.get("warehouse_location") or "").strip()
+        if warehouse_location:
+            qs = qs.filter(warehouse_location__icontains=warehouse_location)
 
         def _date_param(key: str):
             raw = p.get(key)
@@ -1818,7 +1918,47 @@ class ItemViewSet(SoftDeleteModelViewSet):
         if created_to:
             qs = qs.filter(created_at__date__lte=created_to)
 
-        return qs
+        restock_from = _date_param("last_restock_from")
+        restock_to = _date_param("last_restock_to")
+        if restock_from:
+            qs = qs.filter(last_restock_date__gte=restock_from)
+        if restock_to:
+            qs = qs.filter(last_restock_date__lte=restock_to)
+
+        def _int_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return int(str(raw))
+            except (TypeError, ValueError):
+                raise ValidationError({key: "Invalid integer"})
+
+        stock_min = _int_param("stock_min")
+        stock_max = _int_param("stock_max")
+        if stock_min is not None:
+            qs = qs.filter(stock_quantity__gte=stock_min)
+        if stock_max is not None:
+            qs = qs.filter(stock_quantity__lte=stock_max)
+
+        return _apply_ordering_query(
+            qs,
+            params=p,
+            allowed_fields={
+                "id": "id",
+                "type": "type",
+                "sku": "sku",
+                "name": "name",
+                "unit_price": "unit_price",
+                "tax_rate": "tax_rate",
+                "stock_quantity": "stock_quantity",
+                "warehouse_location": "warehouse_location",
+                "last_restock_date": "last_restock_date",
+                "created_at": "created_at",
+                "updated_at": "updated_at",
+            },
+            default=("-id",),
+        )
 
     def destroy(self, request, *args, **kwargs):
         self._require_model_perm("delete")
@@ -2110,7 +2250,11 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().annotate(
+            amount_paid=Coalesce(Sum("receipts__amount_paid", filter=Q(receipts__is_deleted=False)), Decimal("0.00")),
+            line_item_count=Count("invoice_items", filter=Q(invoice_items__is_deleted=False), distinct=True),
+            last_payment_date=Max("receipts__payment_date", filter=Q(receipts__is_deleted=False)),
+        )
         p = self.request.query_params
 
         q = str(p.get("q") or "").strip()
@@ -2139,6 +2283,17 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
             if status_val not in allowed:
                 raise ValidationError({"status": "Invalid status"})
             qs = qs.filter(status=status_val)
+
+        payment_status = str(p.get("payment_status") or "").strip().lower()
+        if payment_status:
+            if payment_status == "paid":
+                qs = qs.filter(amount_paid__gte=F("total_amount"))
+            elif payment_status == "partial":
+                qs = qs.filter(amount_paid__gt=Decimal("0.00"), amount_paid__lt=F("total_amount"))
+            elif payment_status == "unpaid":
+                qs = qs.filter(amount_paid__lte=Decimal("0.00"))
+            else:
+                raise ValidationError({"payment_status": "Invalid payment_status. Use paid, partial, or unpaid"})
 
         def _date_param(key: str):
             raw = p.get(key)
@@ -2182,7 +2337,26 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         if total_max is not None:
             qs = qs.filter(total_amount__lte=total_max)
 
-        return qs
+        return _apply_ordering_query(
+            qs,
+            params=p,
+            allowed_fields={
+                "id": "id",
+                "invoice_number": "invoice_number",
+                "customer_name": "customer__name",
+                "issue_date": "issue_date",
+                "due_date": "due_date",
+                "status": "status",
+                "subtotal": "subtotal",
+                "tax_total": "tax_total",
+                "total_amount": "total_amount",
+                "amount_paid": "amount_paid",
+                "balance_due": "total_amount",
+                "payment_date": "last_payment_date",
+                "updated_at": "updated_at",
+            },
+            default=("-id",),
+        )
 
     def create(self, request, *args, **kwargs):
         try:
@@ -3025,6 +3199,97 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
     queryset = Receipt.objects.all().select_related("invoice").order_by("-id")
     serializer_class = ReceiptSerializer
     pagination_class = OptionalPageNumberPagination
+
+    def get_serializer_class(self):
+        if getattr(self, "action", None) == "retrieve":
+            return ReceiptDetailSerializer
+        return ReceiptSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("invoice", "invoice__customer")
+        p = self.request.query_params
+
+        q = str(p.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(reference_number__icontains=q)
+                | Q(invoice__invoice_number__icontains=q)
+                | Q(invoice__customer__name__icontains=q)
+            )
+
+        invoice_number = str(p.get("invoice_number") or "").strip()
+        if invoice_number:
+            qs = qs.filter(invoice__invoice_number__icontains=invoice_number)
+
+        customer_name = str(p.get("customer_name") or "").strip()
+        if customer_name:
+            qs = qs.filter(invoice__customer__name__icontains=customer_name)
+
+        payment_method = str(p.get("payment_method") or "").strip()
+        if payment_method:
+            allowed = {method for method, _ in Receipt.PAYMENT_METHOD_CHOICES}
+            if payment_method not in allowed:
+                raise ValidationError({"payment_method": "Invalid payment_method"})
+            qs = qs.filter(payment_method=payment_method)
+
+        def _date_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return date.fromisoformat(str(raw))
+            except ValueError:
+                raise ValidationError({key: "Invalid date. Use YYYY-MM-DD"})
+
+        payment_from = _date_param("payment_date_from")
+        payment_to = _date_param("payment_date_to")
+        if payment_from:
+            qs = qs.filter(payment_date__gte=payment_from)
+        if payment_to:
+            qs = qs.filter(payment_date__lte=payment_to)
+
+        updated_from = _date_param("updated_from")
+        updated_to = _date_param("updated_to")
+        if updated_from:
+            qs = qs.filter(updated_at__date__gte=updated_from)
+        if updated_to:
+            qs = qs.filter(updated_at__date__lte=updated_to)
+
+        def _dec_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                value = Decimal(str(raw))
+            except (InvalidOperation, TypeError):
+                raise ValidationError({key: "Invalid amount"})
+            if value < 0:
+                raise ValidationError({key: "Amount must be >= 0"})
+            return value
+
+        amount_min = _dec_param("amount_min")
+        amount_max = _dec_param("amount_max")
+        if amount_min is not None:
+            qs = qs.filter(amount_paid__gte=amount_min)
+        if amount_max is not None:
+            qs = qs.filter(amount_paid__lte=amount_max)
+
+        return _apply_ordering_query(
+            qs,
+            params=p,
+            allowed_fields={
+                "id": "id",
+                "invoice_number": "invoice__invoice_number",
+                "customer_name": "invoice__customer__name",
+                "amount_paid": "amount_paid",
+                "payment_date": "payment_date",
+                "payment_method": "payment_method",
+                "reference_number": "reference_number",
+                "transaction_timestamp": "updated_at",
+                "updated_at": "updated_at",
+            },
+            default=("-id",),
+        )
 
     def create(self, request, *args, **kwargs):
         try:

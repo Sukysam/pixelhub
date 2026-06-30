@@ -96,6 +96,51 @@ Request:
 ```
 Rolls back to the `before` snapshot recorded on that audit entry (supported for `GlobalSettings` and `UserSettings`).
 
+## Entity Read APIs
+All entity list endpoints are token-protected, paginated, return JSON, and support single-record retrieval by ID.
+
+### GET /customers/
+Lists customers with contact details and order summary metadata.
+
+Query params:
+- `page`: page number
+- `q`: search across `name`, `email`, `phone`, `billing_address`
+- `email`, `phone`: field-specific filters
+- `created_from`, `created_to`: `YYYY-MM-DD`
+- `ordering` or `sort`: `id`, `name`, `email`, `phone`, `created_at`, `updated_at`, `invoice_count`, `lifetime_value`, `last_invoice_date`
+
+List response fields include:
+- core customer fields
+- `invoice_count`
+- `lifetime_value`
+- `last_invoice_date`
+
+### GET /customers/<id>/
+Returns a single customer plus `order_history` entries containing invoice number, issue date, due date, status, and total amount.
+
+### GET /items/
+Lists inventory items with stock/specification metadata.
+
+Query params:
+- `page`: page number
+- `q`: search across `name` and `sku`
+- `type`: `product` | `service`
+- `warehouse_location`
+- `created_from`, `created_to`: `YYYY-MM-DD`
+- `last_restock_from`, `last_restock_to`: `YYYY-MM-DD`
+- `stock_min`, `stock_max`: integer stock bounds
+- `ordering` or `sort`: `id`, `type`, `sku`, `name`, `unit_price`, `tax_rate`, `stock_quantity`, `warehouse_location`, `last_restock_date`, `created_at`, `updated_at`
+
+List/detail response fields include:
+- core inventory fields
+- `warehouse_location`
+- `last_restock_date`
+- `specifications`
+- `stock_status`
+
+### GET /items/<id>/
+Returns one inventory item plus `recent_invoice_usage` showing recent invoice references and quantities.
+
 ## Inventory Export/Import
 ### GET /items/export/
 Exports inventory items.
@@ -137,6 +182,31 @@ Response (400 when `rollback_on_error=true` and any validation error):
 { "imported": 0, "rows": 10, "errors": [{"row":2,"field":"sku","message":"sku already exists"}], "error_log_token":"...", "rolled_back": true }
 ```
 
+## Invoice Read APIs
+### GET /invoices/
+Lists invoices with customer, totals, payment progress, and line-item count metadata.
+
+Query params:
+- `page`
+- `q`, `invoice_number`, `customer_name`, `customer`
+- `status`
+- `payment_status`: `paid` | `partial` | `unpaid`
+- `issue_date_from`, `issue_date_to`, `due_date_from`, `due_date_to`
+- `total_min`, `total_max`
+- `ordering` or `sort`: `id`, `invoice_number`, `customer_name`, `issue_date`, `due_date`, `status`, `subtotal`, `tax_total`, `total_amount`, `amount_paid`, `payment_date`, `updated_at`
+
+List/detail response fields include:
+- core invoice fields
+- nested `invoice_items`
+- `customer_name`, `customer_email`
+- `amount_paid`
+- `balance_due`
+- `payment_status`
+- `line_item_count`
+
+### GET /invoices/<id>/
+Returns one invoice with line items, customer context, totals, payment progress, and due date metadata.
+
 ## Invoice Export/Import
 ### GET /invoices/export/
 Exports invoices using existing invoice filters.
@@ -170,6 +240,33 @@ Response (200):
 ```json
 { "imported_invoices": 3, "imported_invoice_items": 12, "rows": 12, "errors": [] }
 ```
+
+## Receipt Read APIs
+### GET /receipts/
+Lists receipts with linked invoice and customer metadata.
+
+Query params:
+- `page`
+- `q`: search across `reference_number`, `invoice_number`, `customer_name`
+- `invoice_number`
+- `customer_name`
+- `payment_method`
+- `payment_date_from`, `payment_date_to`
+- `updated_from`, `updated_to`
+- `amount_min`, `amount_max`
+- `ordering` or `sort`: `id`, `invoice_number`, `customer_name`, `amount_paid`, `payment_date`, `payment_method`, `reference_number`, `transaction_timestamp`, `updated_at`
+
+List/detail response fields include:
+- core receipt fields
+- `invoice_number`
+- `invoice_status`
+- `invoice_total`
+- `customer_id`
+- `customer_name`
+- `transaction_timestamp`
+
+### GET /receipts/<id>/
+Returns one receipt plus `linked_invoice` with invoice number, status, total amount, customer association, and due date.
 
 ## Import Error Logs
 ### GET /imports/error-log/<token>/

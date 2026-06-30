@@ -101,6 +101,13 @@ class Customer(SoftDeleteModel):
     billing_address = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted", "name"]),
+            models.Index(fields=["is_deleted", "email"]),
+            models.Index(fields=["is_deleted", "created_at"]),
+        ]
+
     def __str__(self):
         return self.name
 
@@ -120,7 +127,18 @@ class Item(SoftDeleteModel):
     tax_category = models.CharField(max_length=50, default="standard")
     unit_of_measure = models.CharField(max_length=50, default="pcs")
     stock_quantity = models.IntegerField(default=0)
+    warehouse_location = models.CharField(max_length=120, blank=True, null=True)
+    last_restock_date = models.DateField(blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted", "sku"]),
+            models.Index(fields=["is_deleted", "name"]),
+            models.Index(fields=["is_deleted", "type"]),
+            models.Index(fields=["is_deleted", "stock_quantity"]),
+            models.Index(fields=["is_deleted", "last_restock_date"]),
+        ]
 
     def __str__(self):
         return self.name
@@ -153,6 +171,15 @@ class Invoice(SoftDeleteModel):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     inventory_deducted_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted", "invoice_number"]),
+            models.Index(fields=["is_deleted", "status"]),
+            models.Index(fields=["customer", "issue_date"]),
+            models.Index(fields=["customer", "due_date"]),
+            models.Index(fields=["is_deleted", "total_amount"]),
+        ]
 
     @property
     def tax_amount(self):
@@ -241,6 +268,14 @@ class Receipt(SoftDeleteModel):
     payment_date = models.DateField(default=timezone.localdate)
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
     reference_number = models.CharField(max_length=100, blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted", "payment_date"]),
+            models.Index(fields=["invoice", "payment_date"]),
+            models.Index(fields=["payment_method", "payment_date"]),
+            models.Index(fields=["reference_number"]),
+        ]
 
     def __str__(self):
         return f"Receipt for Invoice {self.invoice.invoice_number}"

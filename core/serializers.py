@@ -1,5 +1,6 @@
 import re
 from decimal import Decimal
+from django.db.models import Sum
 from rest_framework import serializers
 from .models import (
     Customer,
@@ -92,16 +93,86 @@ def normalize_signup_phone(country_code: str, phone_number: str) -> str:
 
 
 class CustomerSerializer(serializers.ModelSerializer):
+    invoice_count = serializers.SerializerMethodField()
+    lifetime_value = serializers.SerializerMethodField()
+    last_invoice_date = serializers.SerializerMethodField()
+
     class Meta:
         model = Customer
-        fields = '__all__'
+        fields = (
+            "id",
+            "name",
+            "email",
+            "phone",
+            "billing_address",
+            "created_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+            "invoice_count",
+            "lifetime_value",
+            "last_invoice_date",
+        )
         read_only_fields = ("id", "created_at", "is_deleted", "deleted_at", "updated_at")
+
+    def get_invoice_count(self, obj):
+        return int(getattr(obj, "invoice_count", 0) or 0)
+
+    def get_lifetime_value(self, obj):
+        value = getattr(obj, "lifetime_value", Decimal("0.00")) or Decimal("0.00")
+        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+
+    def get_last_invoice_date(self, obj):
+        return getattr(obj, "last_invoice_date", None)
+
+
+class CustomerOrderHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Invoice
+        fields = ("id", "invoice_number", "issue_date", "due_date", "status", "total_amount")
+
+
+class CustomerDetailSerializer(CustomerSerializer):
+    order_history = serializers.SerializerMethodField()
+
+    class Meta(CustomerSerializer.Meta):
+        fields = CustomerSerializer.Meta.fields + ("order_history",)
+
+    def get_order_history(self, obj):
+        invoices = (
+            obj.invoices.filter(is_deleted=False)
+            .only("id", "invoice_number", "issue_date", "due_date", "status", "total_amount")
+            .order_by("-issue_date", "-id")
+        )
+        return CustomerOrderHistorySerializer(invoices, many=True).data
 
 
 class ItemSerializer(serializers.ModelSerializer):
+    specifications = serializers.SerializerMethodField()
+    stock_status = serializers.SerializerMethodField()
+
     class Meta:
         model = Item
-        fields = '__all__'
+        fields = (
+            "id",
+            "type",
+            "sku",
+            "name",
+            "description",
+            "unit_price",
+            "tax_rate",
+            "tax_category",
+            "unit_of_measure",
+            "stock_quantity",
+            "warehouse_location",
+            "last_restock_date",
+            "created_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+            "specifications",
+            "stock_status",
+        )
         read_only_fields = ("id", "created_at", "is_deleted", "deleted_at", "updated_at")
 
     def validate_unit_price(self, value):
@@ -135,11 +206,93 @@ class ItemSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"stock_quantity": "Services must have stock_quantity = 0"})
         return attrs
 
+    def get_specifications(self, obj):
+        return {
+            "type": obj.type,
+            "description": obj.description,
+            "tax_category": obj.tax_category,
+            "tax_rate": str(obj.tax_rate),
+            "unit_of_measure": obj.unit_of_measure,
+        }
 
-class InvoiceItemSerializer(serializers.ModelSerializer):
+    def get_stock_status(self, obj):
+        if obj.type == "service":
+            return "not_applicable"
+        if obj.stock_quantity <= 0:
+            return "out_of_stock"
+        if obj.stock_quantity < 5:
+            return "low_stock"
+        return "in_stock"
+
+
+class ItemInvoiceUsageSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
+    invoice_status = serializers.CharField(source="invoice.status", read_only=True)
+    invoice_issue_date = serializers.DateField(source="invoice.issue_date", read_only=True)
+
     class Meta:
         model = InvoiceItem
-        fields = '__all__'
+        fields = (
+            "id",
+            "invoice",
+            "invoice_number",
+            "invoice_status",
+            "invoice_issue_date",
+            "quantity",
+            "unit_price",
+            "line_total",
+        )
+
+
+class ItemDetailSerializer(ItemSerializer):
+    recent_invoice_usage = serializers.SerializerMethodField()
+
+    class Meta(ItemSerializer.Meta):
+        fields = ItemSerializer.Meta.fields + ("recent_invoice_usage",)
+
+    def get_recent_invoice_usage(self, obj):
+        rows = (
+            InvoiceItem.objects.filter(item=obj, is_deleted=False, invoice__is_deleted=False)
+            .select_related("invoice")
+            .only(
+                "id",
+                "invoice_id",
+                "quantity",
+                "unit_price",
+                "line_total",
+                "invoice__invoice_number",
+                "invoice__status",
+                "invoice__issue_date",
+            )
+            .order_by("-invoice__issue_date", "-id")[:10]
+        )
+        return ItemInvoiceUsageSerializer(rows, many=True).data
+
+
+class InvoiceItemSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source="item.name", read_only=True)
+    item_sku = serializers.CharField(source="item.sku", read_only=True)
+
+    class Meta:
+        model = InvoiceItem
+        fields = (
+            "id",
+            "invoice",
+            "item",
+            "item_name",
+            "item_sku",
+            "description",
+            "unit_of_measure",
+            "quantity",
+            "unit_price",
+            "tax_rate",
+            "line_subtotal",
+            "line_tax",
+            "line_total",
+            "is_deleted",
+            "deleted_at",
+            "updated_at",
+        )
         read_only_fields = ("id", "is_deleted", "deleted_at", "updated_at")
 
     def validate_quantity(self, value):
@@ -178,10 +331,45 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
 class InvoiceSerializer(serializers.ModelSerializer):
     invoice_number = serializers.CharField(read_only=True)
     invoice_items = serializers.SerializerMethodField()
+    customer_name = serializers.CharField(source="customer.name", read_only=True)
+    customer_email = serializers.EmailField(source="customer.email", read_only=True)
+    amount_paid = serializers.SerializerMethodField()
+    balance_due = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
+    line_item_count = serializers.SerializerMethodField()
 
     def get_invoice_items(self, obj):
         qs = obj.invoice_items.filter(is_deleted=False)
         return InvoiceItemSerializer(qs, many=True).data
+
+    def get_amount_paid(self, obj):
+        value = getattr(obj, "amount_paid", None)
+        if value is None:
+            value = obj.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+        return str(value)
+
+    def get_balance_due(self, obj):
+        total = Decimal(str(obj.total_amount or 0))
+        amount_paid = Decimal(self.get_amount_paid(obj))
+        balance = total - amount_paid
+        if balance < 0:
+            balance = Decimal("0.00")
+        return str(balance.quantize(Decimal("0.01")))
+
+    def get_payment_status(self, obj):
+        total = Decimal(str(obj.total_amount or 0))
+        amount_paid = Decimal(self.get_amount_paid(obj))
+        if amount_paid >= total:
+            return "paid"
+        if amount_paid > 0:
+            return "partial"
+        return "unpaid"
+
+    def get_line_item_count(self, obj):
+        value = getattr(obj, "line_item_count", None)
+        if value is not None:
+            return int(value)
+        return int(obj.invoice_items.filter(is_deleted=False).count())
 
     def validate_discount_type(self, value):
         allowed = {choice for choice, _ in Invoice.DISCOUNT_TYPE_CHOICES}
@@ -206,7 +394,32 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Invoice
-        fields = '__all__'
+        fields = (
+            "id",
+            "invoice_number",
+            "customer",
+            "customer_name",
+            "customer_email",
+            "issue_date",
+            "due_date",
+            "subtotal",
+            "discount_type",
+            "discount_value",
+            "discount_amount",
+            "tax_rate",
+            "tax_total",
+            "total_amount",
+            "status",
+            "inventory_deducted_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+            "invoice_items",
+            "amount_paid",
+            "balance_due",
+            "payment_status",
+            "line_item_count",
+        )
         read_only_fields = (
             "id",
             "invoice_number",
@@ -222,9 +435,32 @@ class InvoiceSerializer(serializers.ModelSerializer):
 
 
 class ReceiptSerializer(serializers.ModelSerializer):
+    invoice_number = serializers.CharField(source="invoice.invoice_number", read_only=True)
+    invoice_status = serializers.CharField(source="invoice.status", read_only=True)
+    invoice_total = serializers.DecimalField(source="invoice.total_amount", max_digits=10, decimal_places=2, read_only=True)
+    customer_id = serializers.IntegerField(source="invoice.customer_id", read_only=True)
+    customer_name = serializers.CharField(source="invoice.customer.name", read_only=True)
+    transaction_timestamp = serializers.DateTimeField(source="updated_at", read_only=True)
+
     class Meta:
         model = Receipt
-        fields = '__all__'
+        fields = (
+            "id",
+            "invoice",
+            "invoice_number",
+            "invoice_status",
+            "invoice_total",
+            "customer_id",
+            "customer_name",
+            "amount_paid",
+            "payment_date",
+            "payment_method",
+            "reference_number",
+            "updated_at",
+            "transaction_timestamp",
+            "is_deleted",
+            "deleted_at",
+        )
         read_only_fields = ("id", "is_deleted", "deleted_at", "updated_at")
 
     def validate_amount_paid(self, value):
@@ -247,6 +483,28 @@ class ReceiptSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"reference_number": "Do not store card numbers. Use an authorization/reference code instead."})
 
         return attrs
+
+
+class ReceiptDetailSerializer(ReceiptSerializer):
+    linked_invoice = serializers.SerializerMethodField()
+
+    class Meta(ReceiptSerializer.Meta):
+        fields = ReceiptSerializer.Meta.fields + ("linked_invoice",)
+
+    def get_linked_invoice(self, obj):
+        invoice = getattr(obj, "invoice", None)
+        if invoice is None:
+            return None
+        return {
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "status": invoice.status,
+            "issue_date": invoice.issue_date,
+            "due_date": invoice.due_date,
+            "total_amount": str(invoice.total_amount),
+            "customer_id": invoice.customer_id,
+            "customer_name": getattr(getattr(invoice, "customer", None), "name", None),
+        }
 
 
 class ExpenseSerializer(serializers.ModelSerializer):

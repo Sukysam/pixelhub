@@ -209,6 +209,185 @@ class PersistenceTests(APITestCase):
         ids = [row.get("id") for row in (results or []) if isinstance(row, dict)]
         self.assertIn(created_id, ids)
 
+    def test_customer_detail_and_list_support_metrics_filtering_and_sorting(self):
+        customer = self.client.post(
+            reverse("customer-list"),
+            {
+                "name": "Alpha Buyer",
+                "email": "alpha@example.com",
+                "phone": "5551234",
+                "billing_address": "123 Main St",
+            },
+            format="json",
+        ).data
+        item = self.client.post(
+            reverse("item-list"),
+            {
+                "name": "Customer Metrics Item",
+                "sku": "CM-001",
+                "unit_price": "15.00",
+                "tax_rate": "0",
+                "stock_quantity": 10,
+                "warehouse_location": "A-01",
+                "last_restock_date": "2026-06-01",
+            },
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 2}]},
+            format="json",
+        ).data
+
+        list_res = self.client.get(f"{reverse('customer-list')}?q=Alpha&ordering=name")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_res.data["results"][0]["name"], "Alpha Buyer")
+        self.assertEqual(list_res.data["results"][0]["invoice_count"], 1)
+        self.assertEqual(Decimal(list_res.data["results"][0]["lifetime_value"]), Decimal("30.00"))
+
+        detail_res = self.client.get(reverse("customer-detail", args=[customer["id"]]))
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["email"], "alpha@example.com")
+        self.assertEqual(detail_res.data["order_history"][0]["invoice_number"], invoice["invoice_number"])
+
+    def test_item_detail_and_list_support_filters_sorting_and_usage_history(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Inventory Buyer"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {
+                "name": "Warehouse Widget",
+                "sku": "WH-001",
+                "description": "Detailed spec",
+                "unit_price": "8.00",
+                "tax_rate": "5",
+                "tax_category": "standard",
+                "unit_of_measure": "box",
+                "stock_quantity": 9,
+                "warehouse_location": "Rack-22",
+                "last_restock_date": "2026-05-15",
+            },
+            format="json",
+        ).data
+        self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 1}]},
+            format="json",
+        )
+
+        list_res = self.client.get(f"{reverse('item-list')}?warehouse_location=Rack&stock_min=5&ordering=-last_restock_date")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_res.data["results"][0]["warehouse_location"], "Rack-22")
+        self.assertEqual(list_res.data["results"][0]["stock_status"], "in_stock")
+
+        detail_res = self.client.get(reverse("item-detail", args=[item["id"]]))
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["specifications"]["unit_of_measure"], "box")
+        self.assertEqual(detail_res.data["recent_invoice_usage"][0]["invoice_status"], "Draft")
+
+    def test_invoice_detail_and_list_support_payment_filters_sorting_and_customer_context(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Invoice Buyer", "email": "invoice@example.com"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Invoice Widget", "sku": "INV-001", "unit_price": "20.00", "tax_rate": "0", "stock_quantity": 4},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Sent", "items": [{"item": item["id"], "quantity": 2}]},
+            format="json",
+        ).data
+        self.client.post(
+            reverse("receipt-list"),
+            {
+                "invoice": invoice["id"],
+                "amount_paid": "10.00",
+                "payment_method": "Cash",
+                "reference_number": "",
+            },
+            format="json",
+        )
+
+        list_res = self.client.get(f"{reverse('invoice-list')}?payment_status=partial&ordering=-amount_paid")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_res.data["results"][0]["customer_name"], "Invoice Buyer")
+        self.assertEqual(list_res.data["results"][0]["payment_status"], "partial")
+        self.assertEqual(Decimal(list_res.data["results"][0]["balance_due"]), Decimal("30.00"))
+
+        detail_res = self.client.get(reverse("invoice-detail", args=[invoice["id"]]))
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["customer_email"], "invoice@example.com")
+        self.assertEqual(detail_res.data["line_item_count"], 1)
+        self.assertEqual(detail_res.data["invoice_items"][0]["item_name"], "Invoice Widget")
+
+    def test_receipt_detail_and_list_support_filters_sorting_and_linked_invoice_context(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Receipt Buyer"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Receipt Widget", "sku": "RCT-001", "unit_price": "12.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Sent", "items": [{"item": item["id"], "quantity": 1}]},
+            format="json",
+        ).data
+        receipt = self.client.post(
+            reverse("receipt-list"),
+            {
+                "invoice": invoice["id"],
+                "amount_paid": "12.00",
+                "payment_date": "2026-06-30",
+                "payment_method": "Bank Transfer",
+                "reference_number": "BANK-123",
+            },
+            format="json",
+        ).data
+
+        list_res = self.client.get(f"{reverse('receipt-list')}?invoice_number={invoice['invoice_number']}&ordering=-payment_date")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_res.data["results"][0]["customer_name"], "Receipt Buyer")
+        self.assertEqual(list_res.data["results"][0]["invoice_number"], invoice["invoice_number"])
+
+        detail_res = self.client.get(reverse("receipt-detail", args=[receipt["id"]]))
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["linked_invoice"]["invoice_number"], invoice["invoice_number"])
+        self.assertEqual(detail_res.data["transaction_timestamp"], detail_res.data["updated_at"])
+
+    def test_entity_read_views_reject_invalid_ordering_and_handle_missing_or_unauthorized_requests(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Missing Target"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Missing Widget", "unit_price": "1.00", "stock_quantity": 1},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 1}]},
+            format="json",
+        ).data
+        receipt = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "1.00", "payment_method": "Cash"},
+            format="json",
+        ).data
+
+        bad_customer_sort = self.client.get(f"{reverse('customer-list')}?ordering=unknown")
+        self.assertEqual(bad_customer_sort.status_code, status.HTTP_400_BAD_REQUEST)
+
+        bad_receipt_sort = self.client.get(f"{reverse('receipt-list')}?ordering=unknown")
+        self.assertEqual(bad_receipt_sort.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.assertEqual(self.client.get(reverse("customer-detail", args=[999999])).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(reverse("item-detail", args=[999999])).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(reverse("invoice-detail", args=[999999])).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(reverse("receipt-detail", args=[999999])).status_code, status.HTTP_404_NOT_FOUND)
+
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get(reverse("customer-list")).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get(reverse("item-list")).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get(reverse("invoice-list")).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get(reverse("receipt-list")).status_code, status.HTTP_403_FORBIDDEN)
+
     def test_prevent_negative_stock_deduction(self):
         customer = self.client.post(
             reverse("customer-list"),
