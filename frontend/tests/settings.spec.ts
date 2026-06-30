@@ -482,11 +482,13 @@ test("standard user can upload invoice and receipt logos with preview and persis
   const invoiceFileInput = page.locator("#inv_logo_upload");
   await invoiceFileInput.setInputFiles({ name: "invoice-logo.png", mimeType: "image/png", buffer: png1x1() });
   await expect(page.getByAltText("Invoice logo preview")).toBeVisible({ timeout: 30_000 });
+  await waitForUploadedLogoSrc(page.getByAltText("Invoice logo preview"));
   await expect(page.getByLabel("Invoice preview").locator('img[alt="Invoice logo"]')).toBeVisible({ timeout: 30_000 });
 
   const receiptFileInput = page.locator("#rcpt_logo_upload");
   await receiptFileInput.setInputFiles({ name: "receipt-logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from(safeSvg(), "utf-8") });
   await expect(page.getByAltText("Receipt logo preview")).toBeVisible({ timeout: 30_000 });
+  await waitForUploadedLogoSrc(page.getByAltText("Receipt logo preview"));
   await expect(page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]')).toBeVisible({ timeout: 30_000 });
 
   const effective = (await getJson(request, session.token, "/settings/effective/")) as {
