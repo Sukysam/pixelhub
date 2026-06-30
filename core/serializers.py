@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal
 from rest_framework import serializers
 from .models import (
     Customer,
@@ -181,6 +182,27 @@ class InvoiceSerializer(serializers.ModelSerializer):
     def get_invoice_items(self, obj):
         qs = obj.invoice_items.filter(is_deleted=False)
         return InvoiceItemSerializer(qs, many=True).data
+
+    def validate_discount_type(self, value):
+        allowed = {choice for choice, _ in Invoice.DISCOUNT_TYPE_CHOICES}
+        if value not in allowed:
+            raise serializers.ValidationError("Invalid discount_type")
+        return value
+
+    def validate_discount_value(self, value):
+        if value is None:
+            return Decimal("0.00")
+        if value < 0:
+            raise serializers.ValidationError("discount_value must be >= 0")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        discount_type = attrs.get("discount_type", getattr(self.instance, "discount_type", Invoice.DISCOUNT_TYPE_PERCENTAGE))
+        discount_value = attrs.get("discount_value", getattr(self.instance, "discount_value", Decimal("0.00")))
+        if discount_type == Invoice.DISCOUNT_TYPE_PERCENTAGE and discount_value > Decimal("100"):
+            raise serializers.ValidationError({"discount_value": "Percentage discount must be between 0 and 100"})
+        return attrs
 
     class Meta:
         model = Invoice

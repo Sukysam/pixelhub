@@ -45,6 +45,9 @@ type InvoiceListItem = {
   issue_date: string;
   due_date: string | null;
   status: "Draft" | "Sent" | "Paid" | "Overdue";
+  discount_type: "percentage" | "fixed";
+  discount_value: string;
+  discount_amount: string;
   subtotal: string;
   tax_total: string;
   total_amount: string;
@@ -71,12 +74,17 @@ type InvoiceResponse = {
   invoice_number: string;
   customer: number;
   status: InvoiceListItem["status"];
+  discount_type: InvoiceListItem["discount_type"];
+  discount_value: string;
+  discount_amount: string;
   subtotal: string;
   tax_total: string;
   total_amount: string;
   updated_at: string;
   invoice_items: InvoiceItemResponse[];
 };
+
+type DiscountType = InvoiceListItem["discount_type"];
 
 type PaymentTx = {
   id: number;
@@ -173,6 +181,59 @@ function calcLineTotals(unitPrice: number, qty: number, taxRate: number) {
   return { lineSubtotal, lineTax, lineTotal };
 }
 
+function roundMoney(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function parseDiscountValue(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function computeDiscount(subtotal: number, discountType: DiscountType, discountValueRaw: string) {
+  const parsed = parseDiscountValue(discountValueRaw);
+  if (parsed === null) {
+    return {
+      parsedValue: null,
+      discountAmount: 0,
+      error: discountType === "percentage"
+        ? "Percentage discount must be a number between 0 and 100."
+        : "Fixed discount must be a non-negative amount.",
+    };
+  }
+  if (discountType === "percentage") {
+    if (parsed > 100) {
+      return { parsedValue: parsed, discountAmount: 0, error: "Percentage discount must be between 0 and 100." };
+    }
+    return {
+      parsedValue: parsed,
+      discountAmount: roundMoney((subtotal * parsed) / 100),
+      error: null,
+    };
+  }
+  if (parsed > subtotal) {
+    return { parsedValue: parsed, discountAmount: 0, error: "Fixed discount cannot exceed the invoice subtotal." };
+  }
+  return {
+    parsedValue: parsed,
+    discountAmount: roundMoney(parsed),
+    error: null,
+  };
+}
+
+function discountTypeLabel(discountType: DiscountType) {
+  return discountType === "fixed" ? "Fixed amount" : "Percentage";
+}
+
+function formatDiscountValueLabel(discountType: DiscountType, discountValue: string | number, formatMoney: (value: number) => string) {
+  const numeric = typeof discountValue === "number" ? discountValue : Number(discountValue || 0);
+  if (discountType === "fixed") return formatMoney(Number.isFinite(numeric) ? numeric : 0);
+  return `${Number.isFinite(numeric) ? numeric : 0}%`;
+}
+
 export default function InvoicesPage() {
   const { t } = useI18n();
   const router = useRouter();
@@ -209,9 +270,11 @@ export default function InvoicesPage() {
   const [saveViewOpen, setSaveViewOpen] = useState(false);
   const [saveViewName, setSaveViewName] = useState("");
   const [saveViewDefault, setSaveViewDefault] = useState(false);
-  const [invoiceEditDraft, setInvoiceEditDraft] = useState<{ status: InvoiceListItem["status"]; due_date: string }>({
+  const [invoiceEditDraft, setInvoiceEditDraft] = useState<{ status: InvoiceListItem["status"]; due_date: string; discount_type: DiscountType; discount_value: string }>({
     status: "Draft",
     due_date: "",
+    discount_type: "percentage",
+    discount_value: "0",
   });
   const [confirmInvoiceSaveOpen, setConfirmInvoiceSaveOpen] = useState(false);
   const [confirmInvoiceDeleteOpen, setConfirmInvoiceDeleteOpen] = useState(false);
@@ -293,6 +356,8 @@ export default function InvoicesPage() {
 
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
+  const [discountType, setDiscountType] = useState<DiscountType>("percentage");
+  const [discountValue, setDiscountValue] = useState("0");
 
   const [invoiceSummaryOpen, setInvoiceSummaryOpen] = useState(false);
   const [invoiceSummaryLoading, setInvoiceSummaryLoading] = useState(false);
@@ -664,6 +729,8 @@ export default function InvoicesPage() {
     setInvoiceEditDraft({
       status: inv.status,
       due_date: inv.due_date ?? "",
+      discount_type: inv.discount_type,
+      discount_value: inv.discount_value,
     });
   };
 
@@ -676,6 +743,12 @@ export default function InvoicesPage() {
     if (invoiceEditingId === null) return;
     const current = invoices.find((i) => i.id === invoiceEditingId);
     if (!current) return;
+    const editDiscount = computeDiscount(Number(current.subtotal), invoiceEditDraft.discount_type, invoiceEditDraft.discount_value);
+    if (editDiscount.error || editDiscount.parsedValue === null) {
+      setError(editDiscount.error || "Enter a valid discount before saving.");
+      setConfirmInvoiceSaveOpen(false);
+      return;
+    }
     try {
       setError(null);
       setSuccess(null);
@@ -684,6 +757,8 @@ export default function InvoicesPage() {
         body: JSON.stringify({
           status: invoiceEditDraft.status,
           due_date: invoiceEditDraft.due_date || null,
+          discount_type: invoiceEditDraft.discount_type,
+          discount_value: editDiscount.parsedValue,
           updated_at: current.updated_at,
         }),
       });
@@ -785,6 +860,12 @@ export default function InvoicesPage() {
 
     return { subtotal, taxTotal, grandTotal };
   }, [itemsById, lineItems]);
+
+  const computedDiscount = useMemo(() => computeDiscount(computed.subtotal, discountType, discountValue), [computed.subtotal, discountType, discountValue]);
+  const invoicePreviewTotal = useMemo(
+    () => roundMoney(computed.subtotal - computedDiscount.discountAmount + computed.taxTotal),
+    [computed.subtotal, computed.taxTotal, computedDiscount.discountAmount]
+  );
 
   const addLineItem = () => {
     const li: LineItem = { id: Date.now(), itemId: null, quantity: "1", taxRateOverride: "" };
@@ -923,6 +1004,10 @@ export default function InvoicesPage() {
       if (override !== null) payloadLine.tax_rate = override;
       normalizedLines.push(payloadLine);
     }
+    if (computedDiscount.error || computedDiscount.parsedValue === null) {
+      setError(computedDiscount.error || "Enter a valid discount before saving.");
+      return;
+    }
 
     try {
       setInvoiceSummaryError(null);
@@ -936,6 +1021,8 @@ export default function InvoicesPage() {
         body: JSON.stringify({
           customer: selectedCustomer,
           status: "Draft",
+          discount_type: discountType,
+          discount_value: computedDiscount.parsedValue,
           items: normalizedLines,
         }),
       });
@@ -961,6 +1048,8 @@ export default function InvoicesPage() {
       setInvoicesNext(inv.next);
       setSelectedInvoiceIds({});
       setLineItems([]);
+      setDiscountType("percentage");
+      setDiscountValue("0");
       setSuccess(`Invoice ${invoiceSummaryInvoice.invoice_number} saved.`);
       setInvoiceSummaryOpen(false);
       if (alsoNavigateToPayment) {
@@ -1477,10 +1566,50 @@ export default function InvoicesPage() {
             </div>
           </div>
 
-          <div className="border-t pt-4 space-y-2">
+          <div className="grid gap-6 border-t pt-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Discount</h3>
+                <p className="text-sm text-gray-600">Choose a percentage or fixed amount discount for this invoice.</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="discount_type">Discount Type</Label>
+                  <Select id="discount_type" value={discountType} onChange={(e) => setDiscountType((e.target.value as DiscountType) || "percentage")} disabled={loading || savingInvoice}>
+                    <option value="percentage">Percentage</option>
+                    <option value="fixed">Fixed amount</option>
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor="discount_value">{discountType === "percentage" ? "Discount (%)" : "Discount Amount"}</Label>
+                  <Input
+                    id="discount_value"
+                    type="number"
+                    value={discountValue}
+                    onChange={(e) => setDiscountValue(e.target.value)}
+                    min="0"
+                    max={discountType === "percentage" ? "100" : computed.subtotal.toFixed(2)}
+                    step="0.01"
+                    disabled={loading || savingInvoice}
+                  />
+                  <div className="mt-1 text-xs text-gray-500">
+                    {discountType === "percentage"
+                      ? "Enter a value from 0 to 100."
+                      : `Enter an amount from ${formatMoney(0)} to ${formatMoney(computed.subtotal)}.`}
+                  </div>
+                  {computedDiscount.error ? <div className="mt-1 text-xs text-red-700">{computedDiscount.error}</div> : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
             <div className="flex justify-between text-sm">
               <span className="text-gray-600">Subtotal</span>
               <span className="font-medium">{formatMoney(computed.subtotal)}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-600">Discount {computedDiscount.parsedValue ? `(${discountTypeLabel(discountType)} ${formatDiscountValueLabel(discountType, computedDiscount.parsedValue, formatMoney)})` : ""}</span>
+              <span className="font-medium">-{formatMoney(computedDiscount.discountAmount)}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-gray-600">Tax</span>
@@ -1488,7 +1617,8 @@ export default function InvoicesPage() {
             </div>
             <div className="flex justify-between text-lg font-bold border-t pt-2">
               <span>Total</span>
-              <span>{formatMoney(computed.grandTotal)}</span>
+              <span>{formatMoney(invoicePreviewTotal)}</span>
+            </div>
             </div>
           </div>
 
@@ -1775,6 +1905,7 @@ export default function InvoicesPage() {
                   <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Customer</th>
                   <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Due</th>
+                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Discount</th>
                   <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Total</th>
                   <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
@@ -1782,7 +1913,7 @@ export default function InvoicesPage() {
               <tbody className="divide-y divide-gray-200">
                 {invoices.length === 0 ? (
                   <tr>
-                    <td className="px-6 py-6 text-sm text-gray-500" colSpan={7}>
+                    <td className="px-6 py-6 text-sm text-gray-500" colSpan={8}>
                       No invoices yet.
                     </td>
                   </tr>
@@ -1833,6 +1964,45 @@ export default function InvoicesPage() {
                             />
                           ) : (
                             inv.due_date ?? "-"
+                          )}
+                        </td>
+                        <td className="px-4 py-4 text-sm text-gray-700">
+                          {invoiceEditingId === inv.id ? (
+                            <div className="space-y-2">
+                              <Select
+                                value={invoiceEditDraft.discount_type}
+                                onChange={(e) =>
+                                  setInvoiceEditDraft((p) => ({
+                                    ...p,
+                                    discount_type: (e.target.value as DiscountType) || "percentage",
+                                  }))
+                                }
+                              >
+                                <option value="percentage">Percentage</option>
+                                <option value="fixed">Fixed amount</option>
+                              </Select>
+                              <Input
+                                type="number"
+                                value={invoiceEditDraft.discount_value}
+                                onChange={(e) => setInvoiceEditDraft((p) => ({ ...p, discount_value: e.target.value }))}
+                                min="0"
+                                max={invoiceEditDraft.discount_type === "percentage" ? "100" : Number(inv.subtotal).toFixed(2)}
+                                step="0.01"
+                              />
+                              {(() => {
+                                const discountState = computeDiscount(Number(inv.subtotal), invoiceEditDraft.discount_type, invoiceEditDraft.discount_value);
+                                return discountState.error ? <div className="text-xs text-red-700">{discountState.error}</div> : null;
+                              })()}
+                            </div>
+                          ) : Number(inv.discount_amount) > 0 ? (
+                            <div>
+                              <div>{discountTypeLabel(inv.discount_type)}</div>
+                              <div className="text-xs text-gray-500">
+                                {formatDiscountValueLabel(inv.discount_type, inv.discount_value, formatMoney)} (-{formatMoney(Number(inv.discount_amount))})
+                              </div>
+                            </div>
+                          ) : (
+                            "-"
                           )}
                         </td>
                         <td className="px-4 py-4 text-sm font-semibold text-gray-900">
@@ -2208,6 +2378,14 @@ export default function InvoicesPage() {
                     <span className="text-gray-600">Subtotal</span>
                     <span className="font-medium">{formatMoney(Number(invoiceSummaryInvoice.subtotal))}</span>
                   </div>
+                  {Number(invoiceSummaryInvoice.discount_amount) > 0 ? (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">
+                        Discount ({discountTypeLabel(invoiceSummaryInvoice.discount_type)} {formatDiscountValueLabel(invoiceSummaryInvoice.discount_type, invoiceSummaryInvoice.discount_value, formatMoney)})
+                      </span>
+                      <span className="font-medium">-{formatMoney(Number(invoiceSummaryInvoice.discount_amount))}</span>
+                    </div>
+                  ) : null}
                   <div className="flex justify-between">
                     <span className="text-gray-600">Tax</span>
                     <span className="font-medium">{formatMoney(Number(invoiceSummaryInvoice.tax_total))}</span>

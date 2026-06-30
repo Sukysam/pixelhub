@@ -133,12 +133,21 @@ class Invoice(SoftDeleteModel):
         ('Paid', 'Paid'),
         ('Overdue', 'Overdue'),
     ]
+    DISCOUNT_TYPE_PERCENTAGE = "percentage"
+    DISCOUNT_TYPE_FIXED = "fixed"
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_TYPE_PERCENTAGE, "Percentage"),
+        (DISCOUNT_TYPE_FIXED, "Fixed amount"),
+    ]
 
     invoice_number = models.CharField(max_length=50, unique=True)
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='invoices')
     issue_date = models.DateField(default=timezone.localdate)
     due_date = models.DateField(blank=True, null=True)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount_type = models.CharField(max_length=20, choices=DISCOUNT_TYPE_CHOICES, default=DISCOUNT_TYPE_PERCENTAGE)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     tax_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)

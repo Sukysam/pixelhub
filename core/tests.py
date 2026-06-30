@@ -1122,6 +1122,152 @@ class SettingsLogoUploadTests(APITestCase):
                 self.assertIn("disabled", str(res.data).lower())
 
 
+class InvoiceDiscountTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user(username="discount_user", password=_test_secret(), email="discount@example.com")
+        self.client.force_authenticate(user=self.user)
+        self.customer = Customer.objects.create(name="Discount Buyer", email="discount-buyer@example.com")
+        self.item = Item.objects.create(
+            type="product",
+            name="Discount Widget",
+            sku="DISC-001",
+            unit_price=Decimal("10.00"),
+            tax_rate=Decimal("10.00"),
+            stock_quantity=20,
+        )
+
+    def test_percentage_discount_calculates_total_and_persists(self):
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "discount_type": "percentage",
+                "discount_value": "10",
+                "items": [{"item": self.item.id, "quantity": 2}],
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(res.data["subtotal"]), Decimal("20.00"))
+        self.assertEqual(Decimal(res.data["discount_amount"]), Decimal("2.00"))
+        self.assertEqual(Decimal(res.data["tax_total"]), Decimal("2.00"))
+        self.assertEqual(Decimal(res.data["total_amount"]), Decimal("20.00"))
+
+        invoice = Invoice.objects.get(pk=res.data["id"])
+        self.assertEqual(invoice.discount_type, Invoice.DISCOUNT_TYPE_PERCENTAGE)
+        self.assertEqual(invoice.discount_value, Decimal("10.00"))
+        self.assertEqual(invoice.discount_amount, Decimal("2.00"))
+
+    def test_fixed_discount_equal_to_subtotal_results_in_zero_total_when_tax_is_zero(self):
+        zero_tax_item = Item.objects.create(
+            type="service",
+            name="Zero Tax Service",
+            sku="DISC-002",
+            unit_price=Decimal("25.00"),
+            tax_rate=Decimal("0.00"),
+            stock_quantity=0,
+        )
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "discount_type": "fixed",
+                "discount_value": "25.00",
+                "items": [{"item": zero_tax_item.id, "quantity": 1}],
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(res.data["subtotal"]), Decimal("25.00"))
+        self.assertEqual(Decimal(res.data["discount_amount"]), Decimal("25.00"))
+        self.assertEqual(Decimal(res.data["total_amount"]), Decimal("0.00"))
+
+    def test_discount_validation_rejects_out_of_range_values(self):
+        percentage_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "discount_type": "percentage",
+                "discount_value": "150",
+                "items": [{"item": self.item.id, "quantity": 1}],
+            },
+            format="json",
+        )
+        self.assertEqual(percentage_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("discount", str(percentage_res.data).lower())
+
+        fixed_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "discount_type": "fixed",
+                "discount_value": "25.00",
+                "items": [{"item": self.item.id, "quantity": 2}],
+            },
+            format="json",
+        )
+        self.assertEqual(fixed_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("subtotal", str(fixed_res.data).lower())
+
+    def test_invoice_discount_patch_updates_total_amount(self):
+        create_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 2}],
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        invoice_id = create_res.data["id"]
+
+        patch_res = self.client.patch(
+            f"/api/invoices/{invoice_id}/",
+            {
+                "discount_type": "fixed",
+                "discount_value": "5.00",
+                "updated_at": create_res.data["updated_at"],
+            },
+            format="json",
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(patch_res.data["discount_amount"]), Decimal("5.00"))
+        self.assertEqual(Decimal(patch_res.data["total_amount"]), Decimal("17.00"))
+
+    def test_invoice_render_includes_discount_details(self):
+        invoice = Invoice.objects.create(
+            invoice_number="INV-DISC-1",
+            customer=self.customer,
+            status="Draft",
+            subtotal=Decimal("20.00"),
+            discount_type=Invoice.DISCOUNT_TYPE_PERCENTAGE,
+            discount_value=Decimal("10.00"),
+            discount_amount=Decimal("2.00"),
+            tax_total=Decimal("2.00"),
+            total_amount=Decimal("20.00"),
+        )
+        InvoiceItem.objects.create(
+            invoice=invoice,
+            item=self.item,
+            quantity=2,
+            unit_price=Decimal("10.00"),
+            tax_rate=Decimal("10.00"),
+            line_subtotal=Decimal("20.00"),
+            line_tax=Decimal("2.00"),
+            line_total=Decimal("22.00"),
+        )
+        request_stub = type("Req", (), {"user": self.user, "query_params": {}, "headers": {}})()
+        rendered = render_invoice(request_stub, invoice, "html").content.decode("utf-8")
+        self.assertIn("Discount Percentage (10%):", rendered)
+        self.assertIn("Total:", rendered)
+
+
 class InvoiceFiltersAndSavedViewsTests(APITestCase):
     def setUp(self):
         super().setUp()

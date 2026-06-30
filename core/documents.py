@@ -78,6 +78,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
         _effective_region_settings_for_user,
         _effective_templates_for_user,
         _format_date_for_pattern,
+        _invoice_discount_context,
         _format_money,
     )
     templates = _effective_templates_for_user(request.user)
@@ -103,6 +104,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
         )
 
     template = get_template("core/invoice_pdf.html")
+    discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
     html = template.render(
         {
             "invoice": invoice,
@@ -110,6 +112,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
             "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
             "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
+            **discount_context,
             "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
             "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
             "currency_code": currency.code if currency else region["currency_code"],
@@ -132,10 +135,16 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             f"Issue date: {invoice.issue_date}",
             f"Due date: {invoice.due_date or ''}",
             f"Subtotal: {invoice.subtotal}",
+        ]
+        if discount_context["has_discount"]:
+            lines.append(f"Discount {discount_context['discount_summary_label']}: -{invoice.discount_amount}")
+        lines.extend(
+            [
             f"Tax total: {invoice.tax_total}",
             f"Total: {invoice.total_amount}",
             "",
-        ]
+            ]
+        )
         for li in invoice_items:
             lines.append(f"- {li.item.name} x{li.quantity}: {li.line_total}")
         body = "\n".join(lines).strip() + "\n"

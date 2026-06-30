@@ -189,6 +189,76 @@ def _q2(value: Decimal) -> Decimal:
     return value.quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
+def _format_decimal_display(value: Decimal) -> str:
+    value = _q2(Decimal(value))
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _resolve_invoice_discount(subtotal: Decimal, discount_type: Optional[str], discount_value: Any) -> tuple[str, Decimal, Decimal]:
+    subtotal = _q2(Decimal(subtotal or 0))
+    normalized_type = str(discount_type or Invoice.DISCOUNT_TYPE_PERCENTAGE).strip().lower()
+    allowed_types = {choice for choice, _ in Invoice.DISCOUNT_TYPE_CHOICES}
+    if normalized_type not in allowed_types:
+        raise ValidationError({"discount_type": "Invalid discount_type"})
+
+    if discount_value in (None, ""):
+        normalized_value = Decimal("0.00")
+    else:
+        try:
+            normalized_value = _q2(Decimal(str(discount_value)))
+        except (InvalidOperation, TypeError):
+            raise ValidationError({"discount_value": "discount_value must be a valid number"})
+
+    if normalized_value < 0:
+        raise ValidationError({"discount_value": "discount_value must be >= 0"})
+
+    if normalized_type == Invoice.DISCOUNT_TYPE_PERCENTAGE:
+        if normalized_value > Decimal("100.00"):
+            raise ValidationError({"discount_value": "Percentage discount must be between 0 and 100"})
+        discount_amount = _q2((subtotal * normalized_value) / Decimal("100"))
+    else:
+        if normalized_value > subtotal:
+            raise ValidationError({"discount_value": "Fixed discount cannot exceed the invoice subtotal"})
+        discount_amount = normalized_value
+
+    if discount_amount > subtotal:
+        raise ValidationError({"discount_value": "Discount cannot exceed the invoice subtotal"})
+
+    return normalized_type, normalized_value, discount_amount
+
+
+def _invoice_discount_context(invoice: Invoice, currency, number_format: str, symbol_position: str) -> dict[str, Any]:
+    discount_amount = _q2(Decimal(getattr(invoice, "discount_amount", 0) or 0))
+    discount_value = _q2(Decimal(getattr(invoice, "discount_value", 0) or 0))
+    discount_type = str(getattr(invoice, "discount_type", Invoice.DISCOUNT_TYPE_PERCENTAGE) or Invoice.DISCOUNT_TYPE_PERCENTAGE)
+    if discount_amount <= 0:
+        return {
+            "has_discount": False,
+            "discount_type_label": "",
+            "discount_value_label": "",
+            "discount_amount_fmt": "",
+            "discount_summary_label": "",
+        }
+
+    if discount_type == Invoice.DISCOUNT_TYPE_FIXED:
+        discount_type_label = "Fixed amount"
+        discount_value_label = _format_money(discount_value, currency, number_format, symbol_position)
+    else:
+        discount_type_label = "Percentage"
+        discount_value_label = f"{_format_decimal_display(discount_value)}%"
+
+    return {
+        "has_discount": True,
+        "discount_type_label": discount_type_label,
+        "discount_value_label": discount_value_label,
+        "discount_amount_fmt": _format_money(discount_amount, currency, number_format, symbol_position),
+        "discount_summary_label": f"{discount_type_label} ({discount_value_label})",
+    }
+
+
 def _parse_iso_datetime(value: str):
     try:
         dt = timezone.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -2200,10 +2270,16 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
 
                 subtotal = _q2(subtotal)
                 tax_total = _q2(tax_total)
-                total_amount = _q2(subtotal + tax_total)
+                discount_type, discount_value, discount_amount = _resolve_invoice_discount(
+                    subtotal, invoice.discount_type, invoice.discount_value
+                )
+                total_amount = _q2(subtotal - discount_amount + tax_total)
                 computed_tax_rate = _q2((tax_total / subtotal) * Decimal("100")) if subtotal > 0 else Decimal("0.00")
                 Invoice.objects.filter(pk=invoice.pk).update(
                     subtotal=subtotal,
+                    discount_type=discount_type,
+                    discount_value=discount_value,
+                    discount_amount=discount_amount,
                     tax_rate=computed_tax_rate,
                     tax_total=tax_total,
                     total_amount=total_amount,
@@ -2234,8 +2310,32 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 serializer.is_valid(raise_exception=True)
                 before = {k: getattr(invoice, k, None) for k in serializer.validated_data.keys()}
                 updated = serializer.save()
+                discount_type, discount_value, discount_amount = _resolve_invoice_discount(
+                    Decimal(updated.subtotal), updated.discount_type, updated.discount_value
+                )
+                recomputed_total = _q2(Decimal(updated.subtotal) - discount_amount + Decimal(updated.tax_total))
+                updated_fields: list[str] = []
+                if updated.discount_type != discount_type:
+                    updated.discount_type = discount_type
+                    updated_fields.append("discount_type")
+                if updated.discount_value != discount_value:
+                    updated.discount_value = discount_value
+                    updated_fields.append("discount_value")
+                if updated.discount_amount != discount_amount:
+                    updated.discount_amount = discount_amount
+                    updated_fields.append("discount_amount")
+                if updated.total_amount != recomputed_total:
+                    updated.total_amount = recomputed_total
+                    updated_fields.append("total_amount")
+                if updated_fields:
+                    updated.save(update_fields=updated_fields + ["updated_at"])
                 updated.refresh_from_db()
-                after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
+                after_keys = set(serializer.validated_data.keys())
+                if {"discount_type", "discount_value"} & set(serializer.validated_data.keys()):
+                    after_keys.update({"discount_amount", "total_amount"})
+                    before.setdefault("discount_amount", getattr(invoice, "discount_amount", None))
+                    before.setdefault("total_amount", getattr(invoice, "total_amount", None))
+                after = {k: getattr(updated, k, None) for k in after_keys}
                 changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
                 if changes:
                     _log_audit(request.user, "update", updated, changes)
@@ -2342,6 +2442,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     }
                 )
 
+            discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
             html = template.render(
                 {
                     "invoice": invoice,
@@ -2349,6 +2450,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
                     "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
                     "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
+                    **discount_context,
                     "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
                     "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
                     "currency_code": currency.code if currency else region["currency_code"],
@@ -2383,6 +2485,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 }
             )
 
+        discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
         html = template.render(
             {
                 "invoice": invoice,
@@ -2390,6 +2493,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
                 "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
                 "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
+                **discount_context,
                 "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
                 "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
                 "currency_code": currency.code if currency else region["currency_code"],

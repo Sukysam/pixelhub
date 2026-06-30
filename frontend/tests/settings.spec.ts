@@ -240,9 +240,13 @@ test("standard business user can persist customer invoice and receipt records", 
   const invoiceLineItemRow = page.locator("tr").filter({ has: page.getByRole("button", { name: new RegExp(item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }) }).first();
   await expect(invoiceLineItemRow).toBeVisible();
   await invoiceLineItemRow.locator('input[type="number"]').nth(1).fill("1");
+  await page.getByLabel("Discount Type").selectOption("percentage");
+  await page.getByLabel("Discount (%)").fill("10");
+  await expect(page.getByText(/Discount \(Percentage 10%\)/)).toBeVisible();
   await page.getByRole("button", { name: "Save Invoice" }).click();
   const summaryDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Invoice Summary" }) });
   await expect(summaryDialog).toBeVisible({ timeout: 30_000 });
+  await expect(summaryDialog).toContainText("Discount (Percentage 10%)");
   await summaryDialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText(/Invoice .* saved\./)).toBeVisible({ timeout: 30_000 });
   const newestInvoiceRow = page.locator("tr").filter({ hasText: /INV-\d{4}-\d+/ }).first();
@@ -276,9 +280,34 @@ test("standard business user can persist customer invoice and receipt records", 
     headers: authHeaders,
   });
   expect(invoiceDetailRes.ok()).toBeTruthy();
-  const updatedInvoice = (await invoiceDetailRes.json()) as { status: string; due_date?: string | null };
+  const updatedInvoice = (await invoiceDetailRes.json()) as {
+    status: string;
+    due_date?: string | null;
+    discount_type: "percentage" | "fixed";
+    discount_value: string;
+    discount_amount: string;
+    total_amount: string;
+  };
   expect(updatedInvoice.status).toBe("Sent");
   expect(updatedInvoice.due_date).toBe("2026-07-31");
+  expect(updatedInvoice.discount_type).toBe("percentage");
+  expect(updatedInvoice.discount_value).toBe("10.00");
+  expect(updatedInvoice.discount_amount).toBe("3.00");
+  expect(updatedInvoice.total_amount).toBe("27.00");
+
+  await invoiceRow.getByRole("button", { name: "Edit" }).click();
+  await invoiceRow.locator("select").nth(1).selectOption("fixed");
+  await invoiceRow.locator('input[type="number"]').last().fill("5");
+  const invoiceDiscountUpdateResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${API_BASE_URL}/invoices/${createdInvoice?.id}/` &&
+      response.request().method() === "PATCH" &&
+      response.status() === 200
+  );
+  await invoiceRow.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await invoiceDiscountUpdateResponse;
+  await expect(invoiceRow).toContainText("Fixed amount", { timeout: 30_000 });
 
   await page.goto("/receipts");
   await expect(page.getByRole("heading", { name: "Receipts" })).toBeVisible();
