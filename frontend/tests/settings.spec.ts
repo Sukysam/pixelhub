@@ -591,11 +591,16 @@ test("send invoice and receipt inputs allow continuous typing", async ({ page, r
   });
   expect(invRes.ok()).toBeTruthy();
   const invoice = await invRes.json();
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string };
 
   const ref = `E2E-SEND-REF-${Date.now()}`;
   const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
     headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-send-${Date.now()}` },
-    data: { amount_paid: "10.00", payment_method: "Bank Transfer", reference_number: ref },
+    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Bank Transfer", reference_number: ref },
   });
   expect(payRes.ok()).toBeTruthy();
 
@@ -653,11 +658,16 @@ test("send invoice and receipt auto-fills customer email and phone when availabl
   });
   expect(invRes.ok()).toBeTruthy();
   const invoice = await invRes.json();
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string };
 
   const ref = `E2E-AUTOFILL-REF-${Date.now()}`;
   const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
     headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-autofill-${Date.now()}` },
-    data: { amount_paid: "10.00", payment_method: "Bank Transfer", reference_number: ref },
+    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Bank Transfer", reference_number: ref },
   });
   expect(payRes.ok()).toBeTruthy();
 
@@ -715,11 +725,17 @@ test("sending an invoice via WhatsApp opens a wa.me share link with prefilled te
   });
   expect(invRes.ok()).toBeTruthy();
   const invoice = await invRes.json();
-
-  await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
-    headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-wa-share-${Date.now()}` },
-    data: { amount_paid: "10.00", payment_method: "Cash", reference_number: `E2E-WA-SHARE-${Date.now()}` },
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
+    headers: { Authorization: `Token ${token}` },
   });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string };
+
+  const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
+    headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-wa-share-${Date.now()}` },
+    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Cash", reference_number: `E2E-WA-SHARE-${Date.now()}` },
+  });
+  expect(payRes.ok()).toBeTruthy();
 
   await page.goto("/invoices");
   await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
