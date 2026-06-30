@@ -495,6 +495,9 @@ test("standard user can upload invoice and receipt logos with preview and persis
   await page.locator("#rcpt_layout").selectOption("compact");
   await expect(page.getByLabel("Invoice preview")).toHaveAttribute("data-layout", "compact");
   await expect(page.getByLabel("Receipt preview")).toHaveAttribute("data-layout", "compact");
+  await page.getByRole("button", { name: "Save Changes" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Settings updated.")).toBeVisible();
 
   const effective = (await getJson(request, session.token, "/settings/effective/")) as {
     effective: {
