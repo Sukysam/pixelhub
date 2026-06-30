@@ -191,6 +191,24 @@ class PersistenceTests(APITestCase):
         invoice = Invoice.objects.get(pk=invoice_id)
         self.assertEqual(invoice.status, "Paid")
 
+    def test_items_read_after_write_includes_new_item(self):
+        create_res = self.client.post(
+            reverse("item-list"),
+            {"name": "Widget A", "sku": "W-A", "unit_price": "12.00", "tax_rate": "0", "stock_quantity": 7},
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        created_id = create_res.data["id"]
+
+        list_res = self.client.get(reverse("item-list"))
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_res.get("Cache-Control"), "no-store")
+
+        payload = list_res.data
+        results = payload.get("results") if isinstance(payload, dict) else payload
+        ids = [row.get("id") for row in (results or []) if isinstance(row, dict)]
+        self.assertIn(created_id, ids)
+
     def test_prevent_negative_stock_deduction(self):
         customer = self.client.post(
             reverse("customer-list"),
@@ -2060,6 +2078,22 @@ class ApiCoverageTests(APITestCase):
         patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "primary_role": "staff"}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
         self.assertTrue(AuditLog.objects.filter(action="update", object_id=str(created.data["id"])).exists())
+
+    def test_admin_runtime_diagnostics_is_admin_only_and_reports_db_and_cache(self):
+        anon = self.client.get("/api/admin/runtime/diagnostics/")
+        self.assertIn(anon.status_code, {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN})
+
+        self.client.force_authenticate(user=self.user)
+        denied = self.client.get("/api/admin/runtime/diagnostics/")
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.admin)
+        ok = self.client.get("/api/admin/runtime/diagnostics/")
+        self.assertEqual(ok.status_code, status.HTTP_200_OK)
+        self.assertIn("db", ok.data)
+        self.assertIn("cache", ok.data)
+        self.assertTrue(ok.data["db"].get("engine"))
+        self.assertTrue(ok.data["cache"].get("class"))
 
     def test_admin_created_standard_user_gets_default_business_role_and_can_persist_records(self):
         self.client.force_authenticate(user=self.admin)

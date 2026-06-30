@@ -1195,6 +1195,12 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
     permission_classes = [EditDeletePermission]
     pagination_class = None
 
+    def _disable_response_cache(self, resp: Response) -> Response:
+        resp["Cache-Control"] = "no-store"
+        resp["Pragma"] = "no-cache"
+        resp["Expires"] = "0"
+        return resp
+
     def get_queryset(self):
         return super().get_queryset().filter(is_deleted=False)
 
@@ -1271,11 +1277,11 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         self._require_model_perm("view")
-        return super().list(request, *args, **kwargs)
+        return self._disable_response_cache(super().list(request, *args, **kwargs))
 
     def retrieve(self, request, *args, **kwargs):
         self._require_model_perm("view")
-        return super().retrieve(request, *args, **kwargs)
+        return self._disable_response_cache(super().retrieve(request, *args, **kwargs))
 
     def create(self, request, *args, **kwargs):
         model = self.get_queryset().model
@@ -1287,7 +1293,7 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
                 instance = serializer.save()
                 _log_audit(request.user, "create", instance, {})
             headers = self.get_success_headers(serializer.data)
-            return Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED, headers=headers)
+            return self._disable_response_cache(Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED, headers=headers))
         except Exception as exc:
             _raise_record_save_failure(request=request, entity=model._meta.model_name, operation="create", exc=exc)
 
@@ -1307,7 +1313,7 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
                 changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
                 if changes:
                     _log_audit(request.user, "update", updated, changes)
-            return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+            return self._disable_response_cache(Response(self.get_serializer(updated).data, status=status.HTTP_200_OK))
         except Exception as exc:
             _raise_record_save_failure(request=request, entity=model._meta.model_name, operation="update", exc=exc)
 
@@ -1325,7 +1331,7 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
             instance.deleted_at = timezone.now()
             instance.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
             _log_audit(request.user, "delete", instance, {})
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return self._disable_response_cache(Response(status=status.HTTP_204_NO_CONTENT))
 
     @action(detail=False, methods=["post"])
     def bulk_delete(self, request):
@@ -1345,7 +1351,7 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
                 obj.deleted_at = now
                 obj.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
                 _log_audit(request.user, "bulk_delete", obj, {"bulk": True})
-        return Response({"deleted": len(ids)}, status=status.HTTP_200_OK)
+        return self._disable_response_cache(Response({"deleted": len(ids)}, status=status.HTTP_200_OK))
 
 
 class OptionalPageNumberPagination(PageNumberPagination):
@@ -4763,6 +4769,78 @@ class AdminOAuthStatusApi(APIView):
             },
         }
         logger.info("admin_oauth_status ip=%s google=%s facebook=%s", ip or "unknown", payload["google"]["configured"], payload["facebook"]["configured"])
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class AdminRuntimeDiagnosticsApi(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        allowed = bool(getattr(user, "is_superuser", False) or getattr(user, "is_staff", False))
+        if not allowed:
+            allowed = bool(
+                user_has_permission(user, "settings.global.read")
+                or user_has_permission(user, "admin.users.read")
+                or user_has_permission(user, "admin.audit.read")
+            )
+        if not allowed:
+            raise PermissionDenied("You do not have permission to view runtime diagnostics.")
+
+        def _sanitize_url(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+            raw = value.strip()
+            if "://" not in raw:
+                return value
+            parsed = urllib.parse.urlparse(raw)
+            if not parsed.scheme or not parsed.netloc:
+                return value
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            path = parsed.path or ""
+            query = f"?{parsed.query}" if parsed.query else ""
+            frag = f"#{parsed.fragment}" if parsed.fragment else ""
+            return f"{parsed.scheme}://{host}{port}{path}{query}{frag}"
+
+        from django.db import connection
+
+        db_settings = connection.settings_dict or {}
+        db_payload = {
+            "engine": db_settings.get("ENGINE"),
+            "name": str(db_settings.get("NAME") or ""),
+            "host": db_settings.get("HOST"),
+            "port": db_settings.get("PORT"),
+            "conn_max_age": db_settings.get("CONN_MAX_AGE"),
+            "conn_health_checks": db_settings.get("CONN_HEALTH_CHECKS"),
+            "atomic_requests": db_settings.get("ATOMIC_REQUESTS"),
+            "vendor": getattr(connection, "vendor", None),
+            "in_atomic_block": bool(getattr(connection, "in_atomic_block", False)),
+            "autocommit": bool(connection.get_autocommit()),
+        }
+        try:
+            db_payload["is_usable"] = bool(connection.is_usable())
+        except Exception as exc:
+            db_payload["is_usable"] = False
+            db_payload["usable_error"] = str(exc)
+
+        cache_settings = (getattr(settings, "CACHES", {}) or {}).get("default", {}) or {}
+        cache_payload = {
+            "backend": cache_settings.get("BACKEND"),
+            "timeout": cache_settings.get("TIMEOUT"),
+            "key_prefix": cache_settings.get("KEY_PREFIX"),
+            "location": _sanitize_url(cache_settings.get("LOCATION")),
+            "class": f"{cache.__class__.__module__}.{cache.__class__.__name__}",
+        }
+
+        payload = {
+            "service": "pixelhub",
+            "server_time": timezone.now().isoformat(),
+            "instance": {"hostname": os.environ.get("HOSTNAME") or os.uname().nodename, "pid": os.getpid()},
+            "debug": bool(getattr(settings, "DEBUG", False)),
+            "db": db_payload,
+            "cache": cache_payload,
+        }
         return Response(payload, status=status.HTTP_200_OK)
 
 

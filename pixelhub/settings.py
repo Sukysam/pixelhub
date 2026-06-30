@@ -13,7 +13,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 import os
 import secrets
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -152,6 +152,12 @@ if _DATABASE_URL:
     if _parsed_database_url.scheme not in {"postgres", "postgresql"}:
         raise RuntimeError("DATABASE_URL/DB_URL must use a postgres:// or postgresql:// scheme")
 
+    _db_query = parse_qs(_parsed_database_url.query or "")
+    _db_options = {}
+    _sslmode = (_db_query.get("sslmode") or [""])[0]
+    if _sslmode:
+        _db_options["sslmode"] = _sslmode
+
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -161,6 +167,8 @@ if _DATABASE_URL:
             "HOST": _parsed_database_url.hostname or "localhost",
             "PORT": str(_parsed_database_url.port or "5432"),
             "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+            "CONN_HEALTH_CHECKS": os.environ.get("POSTGRES_CONN_HEALTH_CHECKS", "1") == "1",
+            **({"OPTIONS": _db_options} if _db_options else {}),
         }
     }
 elif any([_DATABASE_NAME, _DATABASE_USER, _DATABASE_PASSWORD, _DATABASE_HOST, _DATABASE_PORT]):
@@ -173,6 +181,7 @@ elif any([_DATABASE_NAME, _DATABASE_USER, _DATABASE_PASSWORD, _DATABASE_HOST, _D
             "HOST": _DATABASE_HOST or "localhost",
             "PORT": _DATABASE_PORT or "5432",
             "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+            "CONN_HEALTH_CHECKS": os.environ.get("POSTGRES_CONN_HEALTH_CHECKS", "1") == "1",
         }
     }
 else:
@@ -182,6 +191,12 @@ else:
             "NAME": BASE_DIR / "db.sqlite3",
         }
     }
+
+if not DEBUG and DATABASES.get("default", {}).get("ENGINE") == "django.db.backends.sqlite3":
+    raise RuntimeError(
+        "Production database is not configured. Set DATABASE_URL (recommended) or POSTGRES_* environment variables. "
+        "Refusing to start with SQLite to avoid data loss and inconsistent reads across instances."
+    )
 
 
 # Password validation
