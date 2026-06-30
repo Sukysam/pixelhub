@@ -192,7 +192,22 @@ else:
         }
     }
 
-if not DEBUG and DATABASES.get("default", {}).get("ENGINE") == "django.db.backends.sqlite3":
+_HOSTED_PRODUCTION_MARKERS = (
+    "PORT",
+    "SEVALLA",
+    "SEVALLA_APP_ID",
+    "SEVALLA_ENVIRONMENT",
+    "RAILWAY_ENVIRONMENT",
+    "RENDER",
+    "K_SERVICE",
+)
+_RUNNING_ON_HOSTED_RUNTIME = any(os.environ.get(key) for key in _HOSTED_PRODUCTION_MARKERS)
+
+if (
+    not DEBUG
+    and _RUNNING_ON_HOSTED_RUNTIME
+    and DATABASES.get("default", {}).get("ENGINE") == "django.db.backends.sqlite3"
+):
     raise RuntimeError(
         "Production database is not configured. Set DATABASE_URL (recommended) or POSTGRES_* environment variables. "
         "Refusing to start with SQLite to avoid data loss and inconsistent reads across instances."

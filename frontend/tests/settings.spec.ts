@@ -133,6 +133,7 @@ test("user can update invoice footer in settings", async ({ page }) => {
   await page.getByRole("button", { name: "Save Changes" }).click();
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
+  await expect(page.getByText("Settings updated.")).toBeVisible();
   await expect(footer).toHaveValue(newValue);
   await expect(page.getByText(newValue)).toBeVisible();
 
