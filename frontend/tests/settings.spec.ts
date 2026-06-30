@@ -309,12 +309,19 @@ test("standard business user can persist customer invoice and receipt records", 
   await invoiceDiscountUpdateResponse;
   await expect(invoiceRow).toContainText("Fixed amount", { timeout: 30_000 });
 
+  const invoiceAfterDiscountRes = await request.get(`${API_BASE_URL}/invoices/${createdInvoice?.id}/`, {
+    headers: authHeaders,
+  });
+  expect(invoiceAfterDiscountRes.ok()).toBeTruthy();
+  const invoiceAfterDiscount = (await invoiceAfterDiscountRes.json()) as { total_amount: string };
+  const amountToPay = invoiceAfterDiscount.total_amount;
+
   await page.goto("/receipts");
   await expect(page.getByRole("heading", { name: "Receipts" })).toBeVisible();
   await page.getByRole("button", { name: "Record Payment" }).click();
   const paymentDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Make Payment" }) });
   await paymentDialog.getByLabel("Invoice").selectOption(String(createdInvoice?.id));
-  await paymentDialog.getByLabel("Amount Paid").fill("30.00");
+  await paymentDialog.getByLabel("Amount Paid").fill(amountToPay);
   await paymentDialog.getByLabel("Transaction Date").fill("2026-07-01");
   await paymentDialog.getByLabel("Payment Method").selectOption("Cash");
   await paymentDialog.getByRole("button", { name: "Process Payment" }).click();
@@ -327,7 +334,7 @@ test("standard business user can persist customer invoice and receipt records", 
   };
   const createdReceipt = receiptsAfterCreate.results.find((row) => row.invoice === createdInvoice?.id);
   expect(createdReceipt).toBeTruthy();
-  expect(createdReceipt?.amount_paid).toBe("30.00");
+  expect(createdReceipt?.amount_paid).toBe(amountToPay);
 
   const receiptRow = page.locator("tbody tr", { hasText: `#${createdInvoice?.id}` }).first();
   await receiptRow.getByRole("button", { name: "Edit" }).click();
