@@ -7,18 +7,18 @@ const viewports = [
 ] as const;
 
 for (const viewport of viewports) {
-  test(`landing page shows PXL-HUB INVOICE cleanly on ${viewport.name}`, async ({ page }) => {
+  test(`landing page shows PXL INVOICE cleanly on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/", { waitUntil: "networkidle" });
 
-    const welcome = page.getByText("Welcome to PXL-HUB INVOICE");
-    const signupPrompt = page.getByText("New to PXL-HUB INVOICE?");
+    const welcome = page.getByText("Welcome to PXL INVOICE");
+    const signupPrompt = page.getByText("New to PXL INVOICE?");
 
     await expect(welcome).toBeVisible();
     await expect(signupPrompt).toBeVisible();
 
     const title = await page.title();
-    expect(title).toBe("PXL-HUB INVOICE - Business Management");
+    expect(title).toBe("PXL INVOICE - Business Management");
 
     const meta = await page.evaluate(() => ({
       ogTitle: document.querySelector('meta[property="og:title"]')?.getAttribute("content") || null,
@@ -36,10 +36,10 @@ for (const viewport of viewports) {
       ),
     }));
 
-    expect(meta.ogTitle).toBe("PXL-HUB INVOICE - Business Management");
-    expect(meta.ogSiteName).toBe("PXL-HUB INVOICE");
-    expect(meta.twitterTitle).toBe("PXL-HUB INVOICE - Business Management");
-    expect(meta.appName).toBe("PXL-HUB INVOICE");
+    expect(meta.ogTitle).toBe("PXL INVOICE - Business Management");
+    expect(meta.ogSiteName).toBe("PXL INVOICE");
+    expect(meta.twitterTitle).toBe("PXL INVOICE - Business Management");
+    expect(meta.appName).toBe("PXL INVOICE");
     expect(meta.htmlHasOldBrand).toBe(false);
     expect(meta.bodyHasOldBrand).toBe(false);
     expect(meta.oldBrandAttrHits).toEqual([]);
@@ -70,7 +70,7 @@ for (const route of ["/terms", "/privacy"]) {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 
     expect(html.includes("PIXELHUB")).toBe(false);
-    expect(html.includes("PXL-HUB INVOICE")).toBe(true);
+    expect(html.includes("PXL INVOICE")).toBe(true);
     expect(overflow).toBeLessThanOrEqual(1);
   });
 }

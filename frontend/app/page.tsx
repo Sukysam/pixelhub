@@ -116,7 +116,7 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
       <div className="w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader>
-            <CardTitle>Welcome to PXL-HUB INVOICE</CardTitle>
+            <CardTitle>Welcome to PXL INVOICE</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm text-gray-700">
             <div>Manage invoices, receipts, inventory, and reports in one place.</div>
@@ -188,7 +188,7 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
             </form>
 
             <div className="rounded-md border border-gray-200 bg-gray-50 p-4 space-y-3">
-              <div className="text-sm font-medium text-gray-900">New to PXL-HUB INVOICE?</div>
+              <div className="text-sm font-medium text-gray-900">New to PXL INVOICE?</div>
               <div className="text-sm text-gray-600">Create a business account with Nigeria-focused onboarding and email verification.</div>
               <Link
                 href="/register"

@@ -12,7 +12,7 @@ export default function PrivacyPage() {
             <CardTitle>Privacy Policy</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm text-gray-700">
-            <p>PXL-HUB INVOICE processes account, billing, and operational data to provide core platform services such as invoicing, receipts, inventory, and reporting.</p>
+            <p>PXL INVOICE processes account, billing, and operational data to provide core platform services such as invoicing, receipts, inventory, and reporting.</p>
             <p>We retain audit and security logs to protect the platform, investigate misuse, and support administrative accountability.</p>
             <p>Authentication data is secured using industry-standard password hashing and role-based access controls.</p>
             <p>

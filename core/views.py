@@ -729,12 +729,12 @@ def _send_admin_invitation_email(invitation: AdminUserInvitation, *, ip: Optiona
     link = f"{_frontend_base_url()}/verify-email?token={urllib.parse.quote(_sign_admin_invitation(invitation))}&token_type={ADMIN_INVITATION_TOKEN_TYPE}"
     subject = "Accept your account invitation"
     text_body = (
-        "An administrator created an account for you on PXL-HUB INVOICE.\n\n"
+        "An administrator created an account for you on PXL INVOICE.\n\n"
         f"Accept your invitation: {link}\n\n"
         "This invitation expires in 72 hours."
     )
     html_body = (
-        "<p>An administrator created an account for you on <strong>PXL-HUB INVOICE</strong>.</p>"
+        "<p>An administrator created an account for you on <strong>PXL INVOICE</strong>.</p>"
         "<p>Accept the invitation to confirm your account and continue to your initial password setup.</p>"
         f'<p><a href="{link}" style="display:inline-block;padding:12px 18px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;">Accept account invitation</a></p>'
         "<p>This invitation expires in 72 hours.</p>"
@@ -771,11 +771,11 @@ def _send_account_activation_email(user, *, ip: Optional[str] = None, invitation
         return False
     subject = "Your account is now active"
     text_body = (
-        "Welcome to PXL-HUB INVOICE.\n\n"
+        "Welcome to PXL INVOICE.\n\n"
         "Your account has been activated successfully and your assigned access is now available."
     )
     html_body = (
-        "<p>Welcome to <strong>PXL-HUB INVOICE</strong>.</p>"
+        "<p>Welcome to <strong>PXL INVOICE</strong>.</p>"
         "<p>Your account has been activated successfully and your assigned access is now available.</p>"
     )
     email_backend = getattr(settings, "EMAIL_BACKEND", "")

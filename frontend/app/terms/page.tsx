@@ -12,7 +12,7 @@ export default function TermsPage() {
             <CardTitle>Terms of Use</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm text-gray-700">
-            <p>PXL-HUB INVOICE is provided for lawful business record keeping, invoicing, inventory tracking, and reporting activities.</p>
+            <p>PXL INVOICE is provided for lawful business record keeping, invoicing, inventory tracking, and reporting activities.</p>
             <p>You are responsible for the accuracy of the information you enter and for maintaining the confidentiality of your account credentials.</p>
             <p>Administrative tools are restricted to authorized users only. Attempts to access or misuse protected features may result in account suspension.</p>
             <p>

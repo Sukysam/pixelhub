@@ -2,18 +2,18 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PXL-HUB INVOICE - Business Management",
+  title: "PXL INVOICE - Business Management",
   description: "Inventory and Invoice Management System",
-  applicationName: "PXL-HUB INVOICE",
+  applicationName: "PXL INVOICE",
   openGraph: {
-    title: "PXL-HUB INVOICE - Business Management",
+    title: "PXL INVOICE - Business Management",
     description: "Inventory and Invoice Management System",
-    siteName: "PXL-HUB INVOICE",
+    siteName: "PXL INVOICE",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "PXL-HUB INVOICE - Business Management",
+    title: "PXL INVOICE - Business Management",
     description: "Inventory and Invoice Management System",
   },
 };
