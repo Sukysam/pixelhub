@@ -118,7 +118,7 @@ test("admin can manage roles and users from settings", async ({ page, request })
 });
 
 test("user can update invoice footer in settings", async ({ page }) => {
-  await registerAndReachDashboard(page);
+  const session = await registerAndReachDashboard(page);
 
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
@@ -135,10 +135,19 @@ test("user can update invoice footer in settings", async ({ page }) => {
 
   await expect(footer).toHaveValue(newValue);
   await expect(page.getByText(newValue)).toBeVisible();
+
+  const savedSettings = (await getJson(page.request, session.token, "/settings/me/")) as {
+    invoice_template: { footer_text?: string | null };
+  };
+  expect(savedSettings.invoice_template.footer_text).toBe(newValue);
+
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(page.getByLabel("Invoice Footer Text")).toHaveValue(newValue);
+  await expect(page.getByLabel("Invoice preview")).toContainText(newValue);
 });
 
-test("user can select NGN currency in settings", async ({ page }) => {
-  await registerAndReachDashboard(page);
+test("user can select NGN currency in settings", async ({ page, request }) => {
+  const session = await registerAndReachDashboard(page);
 
   await page.getByRole("link", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
@@ -151,6 +160,15 @@ test("user can select NGN currency in settings", async ({ page }) => {
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(currency).toHaveValue(/^\d+$/);
+  await expect(page.getByLabel("Invoice preview")).toContainText(/NGN|₦/);
+
+  const effective = (await getJson(request, session.token, "/settings/effective/")) as {
+    effective: { currency_code: string };
+  };
+  expect(effective.effective.currency_code).toBe("NGN");
+
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(page.getByLabel("Currency")).toHaveValue(await currency.inputValue());
   await expect(page.getByLabel("Invoice preview")).toContainText(/NGN|₦/);
 });
 

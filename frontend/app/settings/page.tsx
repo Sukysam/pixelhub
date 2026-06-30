@@ -49,7 +49,9 @@ type EffectiveSettingsResponse = {
       receipt_template: Record<string, unknown>;
     };
   };
-  global: Record<string, unknown>;
+  global: {
+    allow_user_overrides?: boolean;
+  } & Record<string, unknown>;
   user: UserSettings | null;
 };
 
@@ -116,9 +118,13 @@ function SettingsPageInner() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
+  const [allowUserOverrides, setAllowUserOverrides] = useState(true);
 
   const [form, setForm] = useState<UserSettings | null>(null);
   const [globalAppearance, setGlobalAppearance] = useState<Record<string, unknown>>({});
+  const [effectiveInvoiceTemplate, setEffectiveInvoiceTemplate] = useState<Record<string, unknown>>({});
+  const [effectiveReceiptTemplate, setEffectiveReceiptTemplate] = useState<Record<string, unknown>>({});
+  const [effectiveCurrencyCode, setEffectiveCurrencyCode] = useState("");
   const [logoUploading, setLogoUploading] = useState<Record<UserLogoScope, boolean>>(EMPTY_UPLOAD_FLAGS);
   const [logoProgress, setLogoProgress] = useState<Record<UserLogoScope, number>>(EMPTY_UPLOAD_PROGRESS);
   const [logoErrors, setLogoErrors] = useState<Record<UserLogoScope, string | null>>(EMPTY_UPLOAD_ERRORS);
@@ -136,7 +142,11 @@ function SettingsPageInner() {
       ]);
       setCurrencies(currencyList);
       setSocialConnections(social.results);
+      setAllowUserOverrides(Boolean(effective.global?.allow_user_overrides ?? true));
       setGlobalAppearance(effective.effective.templates.global_appearance || {});
+      setEffectiveInvoiceTemplate(effective.effective.templates.invoice_template || {});
+      setEffectiveReceiptTemplate(effective.effective.templates.receipt_template || {});
+      setEffectiveCurrencyCode(String(effective.effective.currency_code || ""));
       if (!effective.user) {
         setForm(null);
         return;
@@ -176,10 +186,15 @@ function SettingsPageInner() {
     return match?.code ?? "";
   }, [currencies, form]);
 
+  const activeCurrencyCode = useMemo(() => {
+    if (allowUserOverrides) return selectedCurrencyCode || effectiveCurrencyCode || "USD";
+    return effectiveCurrencyCode || selectedCurrencyCode || "USD";
+  }, [allowUserOverrides, effectiveCurrencyCode, selectedCurrencyCode]);
+
   const locale = useMemo(() => localeFor(form?.language ?? "en", form?.country ?? null), [form?.country, form?.language]);
 
   const previewInvoice = useMemo(() => {
-    const invoiceTemplate = (form?.invoice_template ?? {}) as Record<string, unknown>;
+    const invoiceTemplate = ((allowUserOverrides ? form?.invoice_template : effectiveInvoiceTemplate) ?? {}) as Record<string, unknown>;
     const primary = (invoiceTemplate.primary_color as string) || (globalAppearance.primary_color as string) || "#1a4d8e";
     const font = (invoiceTemplate.font_family as string) || (globalAppearance.font_family as string) || "Helvetica";
     const logoUrlRaw = (invoiceTemplate.logo_url as string) || (globalAppearance.logo_url as string) || "";
@@ -188,7 +203,7 @@ function SettingsPageInner() {
     const footerText = (invoiceTemplate.footer_text as string) || (globalAppearance.invoice_footer_text as string) || "Thank you for your business!";
     const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PXL-HUB INVOICE";
     const companyTagline = (globalAppearance.company_tagline as string) || "";
-    const currencyCode = selectedCurrencyCode || "USD";
+    const currencyCode = activeCurrencyCode || "USD";
     const nf = new Intl.NumberFormat(locale, { style: "currency", currency: currencyCode });
     const df = new Intl.DateTimeFormat(locale);
     const today = new Date();
@@ -200,10 +215,10 @@ function SettingsPageInner() {
     const tax = 0;
     const total = 400;
     return { primary, font, logoUrl, showDesc, footerText, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
-  }, [authUser?.company_name, form?.invoice_template, globalAppearance, locale, selectedCurrencyCode]);
+  }, [activeCurrencyCode, allowUserOverrides, authUser?.company_name, effectiveInvoiceTemplate, form?.invoice_template, globalAppearance, locale]);
 
   const previewReceipt = useMemo(() => {
-    const receiptTemplate = (form?.receipt_template ?? {}) as Record<string, unknown>;
+    const receiptTemplate = ((allowUserOverrides ? form?.receipt_template : effectiveReceiptTemplate) ?? {}) as Record<string, unknown>;
     const primary = (receiptTemplate.primary_color as string) || (globalAppearance.primary_color as string) || "#1a4d8e";
     const font = (receiptTemplate.font_family as string) || (globalAppearance.font_family as string) || "Helvetica";
     const logoUrlRaw = (receiptTemplate.logo_url as string) || (globalAppearance.logo_url as string) || "";
@@ -214,7 +229,7 @@ function SettingsPageInner() {
     const companyTagline = (globalAppearance.company_tagline as string) || "";
     const titleText = (receiptTemplate.header_text as string) || "Receipt";
     const footerText = (receiptTemplate.footer_text as string) || (globalAppearance.receipt_footer_text as string) || "Thank you!";
-    const currencyCode = selectedCurrencyCode || "USD";
+    const currencyCode = activeCurrencyCode || "USD";
     const nf = new Intl.NumberFormat(locale, { style: "currency", currency: currencyCode });
     const df = new Intl.DateTimeFormat(locale);
     const today = new Date();
@@ -224,7 +239,7 @@ function SettingsPageInner() {
     ];
     const paid = 400;
     return { primary, font, logoUrl, showItems, showDesc, companyName, companyTagline, titleText, footerText, nf, df, today, items, paid };
-  }, [authUser?.company_name, form?.receipt_template, globalAppearance, locale, selectedCurrencyCode]);
+  }, [activeCurrencyCode, allowUserOverrides, authUser?.company_name, effectiveReceiptTemplate, form?.receipt_template, globalAppearance, locale]);
 
   const setScopedPreview = useCallback((scope: UserLogoScope, nextUrl: string) => {
     setLogoPreviews((prev) => {
@@ -236,6 +251,10 @@ function SettingsPageInner() {
 
   const onPickTemplateLogo = useCallback(
     async (scope: UserLogoScope, files: FileList | null) => {
+      if (!allowUserOverrides) {
+        setError("Template overrides are currently disabled by an administrator.");
+        return;
+      }
       if (!files || files.length === 0) return;
       const file = files[0];
       const validationError = validateLogoFile(file);
@@ -275,7 +294,7 @@ function SettingsPageInner() {
         setLogoUploading((prev) => ({ ...prev, [scope]: false }));
       }
     },
-    [setScopedPreview]
+    [allowUserOverrides, setScopedPreview]
   );
 
   const onSave = async () => {
@@ -288,13 +307,17 @@ function SettingsPageInner() {
         method: "PATCH",
         body: JSON.stringify({
           country: form.country,
-          currency: form.currency,
           language: form.language,
           date_format: form.date_format,
           number_format: form.number_format,
           notifications: form.notifications,
-          invoice_template: form.invoice_template,
-          receipt_template: form.receipt_template,
+          ...(allowUserOverrides
+            ? {
+                currency: form.currency,
+                invoice_template: form.invoice_template,
+                receipt_template: form.receipt_template,
+              }
+            : {}),
         }),
       });
       setConfirmOpen(false);
@@ -318,16 +341,16 @@ function SettingsPageInner() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
             <p className="text-sm text-gray-600 mt-1">Personal preferences and invoice/receipt customization.</p>
           </div>
-          <div className="flex gap-2">
-            <Button type="button" disabled={!form || loading} onClick={() => load()}>
+          <div className="flex flex-wrap gap-2 sm:justify-end">
+            <Button type="button" className="flex-1 sm:flex-none" disabled={!form || loading} onClick={() => load()}>
               Refresh
             </Button>
-            <Button type="button" disabled={!form || loading} onClick={() => setConfirmOpen(true)}>
+            <Button type="button" className="flex-1 sm:flex-none" disabled={!form || loading} onClick={() => setConfirmOpen(true)}>
               Save Changes
             </Button>
           </div>
@@ -335,6 +358,11 @@ function SettingsPageInner() {
 
         {success ? <div className="text-sm text-green-800 bg-green-50 border border-green-200 rounded-md px-3 py-2">{success}</div> : null}
         {error ? <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div> : null}
+        {!allowUserOverrides && form ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            Template and currency overrides are currently controlled by an administrator. Personal preferences still save normally.
+          </div>
+        ) : null}
 
         {loading ? (
           <div className="text-sm text-gray-600">Loading…</div>
@@ -342,7 +370,7 @@ function SettingsPageInner() {
           <div className="text-sm text-gray-600">Unable to load user settings.</div>
         ) : (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
               <div className="space-y-6">
                 <Card>
                 <CardHeader>
@@ -401,6 +429,7 @@ function SettingsPageInner() {
                       <Select
                         id="currency"
                         value={form.currency ?? ""}
+                        disabled={!allowUserOverrides}
                         onChange={(e) => setForm({ ...form, currency: e.target.value ? Number(e.target.value) : null })}
                       >
                         <option value="">Default</option>
@@ -497,6 +526,7 @@ function SettingsPageInner() {
                       id="inv_logo_upload"
                       label="Invoice Logo"
                       helpText="Upload a JPG, PNG, SVG, or WebP logo up to 5MB for invoice documents."
+                      disabled={!allowUserOverrides}
                       previewUrl={
                         logoPreviews.invoice_template ||
                         resolveMediaUrl(
@@ -519,6 +549,7 @@ function SettingsPageInner() {
                         <Input
                           id="inv_primary"
                           type="color"
+                          disabled={!allowUserOverrides}
                           value={String((form.invoice_template as Record<string, unknown>).primary_color ?? "#1a4d8e")}
                           onChange={(e) =>
                             setForm({
@@ -529,6 +560,7 @@ function SettingsPageInner() {
                           aria-label="Primary color"
                         />
                         <Input
+                          disabled={!allowUserOverrides}
                           value={String((form.invoice_template as Record<string, unknown>).primary_color ?? "#1a4d8e")}
                           onChange={(e) =>
                             setForm({
@@ -543,6 +575,7 @@ function SettingsPageInner() {
                       <Label htmlFor="inv_font">Font</Label>
                       <Select
                         id="inv_font"
+                        disabled={!allowUserOverrides}
                         value={String((form.invoice_template as Record<string, unknown>).font_family ?? "Helvetica")}
                         onChange={(e) =>
                           setForm({
@@ -561,6 +594,7 @@ function SettingsPageInner() {
                       <Label htmlFor="inv_layout">Layout</Label>
                       <Select
                         id="inv_layout"
+                        disabled={!allowUserOverrides}
                         value={String((form.invoice_template as Record<string, unknown>).layout ?? "classic")}
                         onChange={(e) =>
                           setForm({
@@ -579,6 +613,7 @@ function SettingsPageInner() {
                       <input
                         type="checkbox"
                         className="h-4 w-4"
+                        disabled={!allowUserOverrides}
                         checked={Boolean((form.invoice_template as Record<string, unknown>).show_item_description)}
                         onChange={(e) =>
                           setForm({
@@ -592,6 +627,7 @@ function SettingsPageInner() {
                     <Label htmlFor="inv_footer">Invoice Footer Text</Label>
                     <Input
                       id="inv_footer"
+                      disabled={!allowUserOverrides}
                       value={String((form.invoice_template as Record<string, unknown>).footer_text ?? "")}
                       onChange={(e) =>
                         setForm({
@@ -615,6 +651,7 @@ function SettingsPageInner() {
                       <Label htmlFor="rcpt_header">Header Text</Label>
                       <Input
                         id="rcpt_header"
+                        disabled={!allowUserOverrides}
                         value={String((form.receipt_template as Record<string, unknown>).header_text ?? "")}
                         onChange={(e) =>
                           setForm({
@@ -628,6 +665,7 @@ function SettingsPageInner() {
                       <Label htmlFor="rcpt_footer">Receipt Footer Text</Label>
                       <Input
                         id="rcpt_footer"
+                        disabled={!allowUserOverrides}
                         value={String((form.receipt_template as Record<string, unknown>).footer_text ?? "")}
                         onChange={(e) =>
                           setForm({
@@ -641,6 +679,7 @@ function SettingsPageInner() {
                       <Label htmlFor="rcpt_numbering">Numbering Format</Label>
                       <Input
                         id="rcpt_numbering"
+                        disabled={!allowUserOverrides}
                         value={String((form.receipt_template as Record<string, unknown>).numbering_format ?? "RCPT-{id}")}
                         onChange={(e) =>
                           setForm({
@@ -655,6 +694,7 @@ function SettingsPageInner() {
                       id="rcpt_logo_upload"
                       label="Receipt Logo"
                       helpText="Upload a JPG, PNG, SVG, or WebP logo up to 5MB for receipt documents."
+                      disabled={!allowUserOverrides}
                       previewUrl={
                         logoPreviews.receipt_template ||
                         resolveMediaUrl(
@@ -677,6 +717,7 @@ function SettingsPageInner() {
                         <Input
                           id="rcpt_primary"
                           type="color"
+                          disabled={!allowUserOverrides}
                           value={String((form.receipt_template as Record<string, unknown>).primary_color ?? "#1a4d8e")}
                           onChange={(e) =>
                             setForm({
@@ -687,6 +728,7 @@ function SettingsPageInner() {
                           aria-label="Primary color"
                         />
                         <Input
+                          disabled={!allowUserOverrides}
                           value={String((form.receipt_template as Record<string, unknown>).primary_color ?? "#1a4d8e")}
                           onChange={(e) =>
                             setForm({
@@ -701,6 +743,7 @@ function SettingsPageInner() {
                       <Label htmlFor="rcpt_font">Font</Label>
                       <Select
                         id="rcpt_font"
+                        disabled={!allowUserOverrides}
                         value={String((form.receipt_template as Record<string, unknown>).font_family ?? "Helvetica")}
                         onChange={(e) =>
                           setForm({
@@ -721,6 +764,7 @@ function SettingsPageInner() {
                       <input
                         type="checkbox"
                         className="h-4 w-4"
+                        disabled={!allowUserOverrides}
                         checked={(form.receipt_template as Record<string, unknown>).show_items !== false}
                         onChange={(e) =>
                           setForm({
@@ -735,6 +779,7 @@ function SettingsPageInner() {
                       <input
                         type="checkbox"
                         className="h-4 w-4"
+                        disabled={!allowUserOverrides}
                         checked={Boolean((form.receipt_template as Record<string, unknown>).show_item_description)}
                         onChange={(e) =>
                           setForm({

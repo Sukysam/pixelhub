@@ -48,13 +48,14 @@ export function Sidebar() {
   }, []);
 
   return (
-    <div className="w-64 bg-gray-900 text-white min-h-screen">
-      <div className="p-6">
-        <h1 className="text-2xl font-bold" title={brandLabel}>
-          {brandLabel}
-        </h1>
-      </div>
-      <nav className="space-y-1 px-3">
+    <aside className="w-full border-b border-gray-800 bg-gray-900 text-white lg:min-h-screen lg:w-64 lg:shrink-0 lg:border-b-0 lg:border-r">
+      <div className="flex flex-col gap-4 p-4 lg:min-h-screen lg:p-6">
+        <div className="flex items-center justify-between gap-3 lg:block">
+          <h1 className="truncate text-xl font-bold lg:text-2xl" title={brandLabel}>
+            {brandLabel}
+          </h1>
+        </div>
+        <nav className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1 lg:mx-0 lg:flex-col lg:overflow-visible lg:px-0 lg:pb-0">
         {navItems.map((item) => {
           const Icon = item.icon;
           return (
@@ -62,52 +63,53 @@ export function Sidebar() {
               key={item.name}
               href={item.href}
               prefetch={false}
-              className="flex items-center px-3 py-2 rounded-md text-sm font-medium hover:bg-gray-800 transition-colors"
+              className="flex flex-none items-center rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-gray-800 lg:flex-auto"
             >
-              <Icon className="mr-3 h-5 w-5" />
-              {item.name}
+              <Icon className="mr-2 h-5 w-5 lg:mr-3" />
+              <span className="whitespace-nowrap">{item.name}</span>
             </Link>
           );
         })}
-      </nav>
+        </nav>
 
-      <div className="mt-auto p-4 space-y-3">
-        <div>
-          <div className="text-xs text-gray-300 mb-1">Language</div>
-          <select
-            className="w-full rounded-md bg-gray-800 border border-gray-700 px-3 py-2 text-sm"
-            value={lang}
-            onChange={(e) => setLang(e.target.value as Lang)}
-          >
-            <option value="en">English</option>
-            <option value="es">Español</option>
-            <option value="fr">Français</option>
-          </select>
+        <div className="space-y-3 lg:mt-auto">
+          <div>
+            <div className="mb-1 text-xs text-gray-300">Language</div>
+            <select
+              className="w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm"
+              value={lang}
+              onChange={(e) => setLang(e.target.value as Lang)}
+            >
+              <option value="en">English</option>
+              <option value="es">Español</option>
+              <option value="fr">Français</option>
+            </select>
+          </div>
+
+          {hasToken ? (
+            <button
+              type="button"
+              className="w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm hover:bg-gray-700"
+              onClick={async () => {
+                await apiRequest("/auth/logout/", { method: "POST" }).catch(() => undefined);
+                clearAuthToken();
+                clearAuthUser();
+                setHasToken(false);
+              }}
+            >
+              {t("logout")}
+            </button>
+          ) : (
+            <Link
+              href="/login"
+              prefetch={false}
+              className="block w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-center text-sm hover:bg-gray-700"
+            >
+              {t("login")}
+            </Link>
+          )}
         </div>
-
-        {hasToken ? (
-          <button
-            type="button"
-            className="w-full rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-2 text-sm"
-            onClick={async () => {
-              await apiRequest("/auth/logout/", { method: "POST" }).catch(() => undefined);
-              clearAuthToken();
-              clearAuthUser();
-              setHasToken(false);
-            }}
-          >
-            {t("logout")}
-          </button>
-        ) : (
-          <Link
-            href="/login"
-            prefetch={false}
-            className="block w-full text-center rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 py-2 text-sm"
-          >
-            {t("login")}
-          </Link>
-        )}
       </div>
-    </div>
+    </aside>
   );
 }

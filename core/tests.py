@@ -1073,6 +1073,54 @@ class SettingsLogoUploadTests(APITestCase):
         self.assertEqual(us.invoice_template.get("footer_text"), "hello")
         self.assertNotIn("logo_url", us.invoice_template)
 
+    def test_user_settings_patch_blocks_currency_and_template_overrides_when_disabled(self):
+        self.client.force_authenticate(user=self.user)
+        gs = GlobalSettings.objects.get_or_create(singleton_key="global")[0]
+        gs.allow_user_overrides = False
+        gs.save(update_fields=["allow_user_overrides", "updated_at"])
+
+        res = self.client.patch(
+            "/api/settings/me/",
+            {"currency": None, "invoice_template": {"footer_text": "blocked"}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("disabled", str(res.data).lower())
+        self.assertIn("invoice_template", str(res.data.get("fields", [])))
+
+    def test_user_settings_patch_allows_personal_preferences_when_overrides_disabled(self):
+        self.client.force_authenticate(user=self.user)
+        gs = GlobalSettings.objects.get_or_create(singleton_key="global")[0]
+        gs.allow_user_overrides = False
+        gs.save(update_fields=["allow_user_overrides", "updated_at"])
+
+        res = self.client.patch(
+            "/api/settings/me/",
+            {"language": "fr", "date_format": "DD/MM/YYYY", "notifications": {"email": True}},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        us = UserSettings.objects.get(user=self.user)
+        self.assertEqual(us.language, "fr")
+        self.assertEqual(us.date_format, "DD/MM/YYYY")
+        self.assertEqual(us.notifications.get("email"), True)
+
+    def test_user_logo_upload_blocked_when_admin_disables_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                self.client.force_authenticate(user=self.user)
+                gs = GlobalSettings.objects.get_or_create(singleton_key="global")[0]
+                gs.allow_user_overrides = False
+                gs.save(update_fields=["allow_user_overrides", "updated_at"])
+
+                res = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _png_logo_upload_file(), "scope": "invoice_template"},
+                    format="multipart",
+                )
+                self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("disabled", str(res.data).lower())
+
 
 class InvoiceFiltersAndSavedViewsTests(APITestCase):
     def setUp(self):

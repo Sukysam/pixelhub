@@ -3213,6 +3213,19 @@ class MySettingsApi(APIView):
         return Response(UserSettingsSerializer(us).data, status=status.HTTP_200_OK)
 
     def patch(self, request):
+        gs = _get_global_settings()
+        if not gs.allow_user_overrides:
+            blocked_fields = [field for field in ("currency", "invoice_template", "receipt_template") if field in request.data]
+            if blocked_fields:
+                raise ValidationError(
+                    {
+                        "detail": (
+                            "User template and currency overrides are disabled by an administrator. "
+                            "Only personal preferences can be updated."
+                        ),
+                        "fields": blocked_fields,
+                    }
+                )
         with transaction.atomic():
             us = UserSettings.objects.select_for_update().get(pk=_get_user_settings(request.user).pk)
             before = _serialize_settings_for_audit(us)
@@ -4721,6 +4734,15 @@ class SettingsLogoUploadApi(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def post(self, request):
+        if not _get_global_settings().allow_user_overrides:
+            raise ValidationError(
+                {
+                    "detail": (
+                        "User template overrides are currently disabled by an administrator. "
+                        "Logo uploads for invoice and receipt templates are unavailable."
+                    )
+                }
+            )
         upload = request.FILES.get("file")
         if upload is None:
             raise ValidationError({"file": "file is required"})
