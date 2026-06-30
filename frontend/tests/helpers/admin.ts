@@ -28,6 +28,17 @@ type CreateInvitedUserOptions = {
   customRoles?: string[];
 };
 
+type InvitedUserSessionSeed = {
+  email: string;
+  username: string;
+  password: string;
+  phone: string;
+  primaryRole: string;
+  customRoles: string[];
+  adminAccessToken: string;
+  clientIp: string;
+};
+
 async function delay(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -211,6 +222,11 @@ export function uniqueNgPhone(): string {
   return `8${digits}`;
 }
 
+function uniqueTestIp(): string {
+  const bytes = crypto.randomBytes(3);
+  return `203.${bytes[0]}.${bytes[1]}.${bytes[2]}`;
+}
+
 export async function createAdminInvitedUser(request: APIRequestContext, options: CreateInvitedUserOptions = {}) {
   const token = await adminToken(request);
   const email = options.email ?? `e2e_invited_${Date.now()}_${crypto.randomBytes(3).toString("hex")}@example.com`;
@@ -219,9 +235,10 @@ export async function createAdminInvitedUser(request: APIRequestContext, options
   const phone = options.phone ?? uniqueNgPhone();
   const primaryRole = options.primaryRole ?? "user";
   const customRoles = options.customRoles ?? [];
+  const clientIp = uniqueTestIp();
 
   const createRes = await request.post(`${API_BASE_URL}/admin/users/`, {
-    headers: { Authorization: `Token ${token}` },
+    headers: { Authorization: `Token ${token}`, "x-forwarded-for": clientIp },
     data: {
       username,
       email,
@@ -238,7 +255,7 @@ export async function createAdminInvitedUser(request: APIRequestContext, options
   const payload = (await createRes.json()) as { invitation_sent?: boolean };
   expect(payload.invitation_sent).toBeTruthy();
 
-  return { email, username, password, phone, primaryRole, customRoles, adminAccessToken: token };
+  return { email, username, password, phone, primaryRole, customRoles, adminAccessToken: token, clientIp };
 }
 
 export function adminInvitationTokenForEmail(email: string): string {
@@ -280,17 +297,19 @@ export function expireAdminInvitationForEmail(email: string): string {
 
 export async function completeAdminInvitationOnboarding(
   request: APIRequestContext,
-  email: string,
+  invited: Pick<InvitedUserSessionSeed, "email" | "clientIp">,
   newPassword: string
 ) {
-  const invitationToken = adminInvitationTokenForEmail(email);
+  const invitationToken = adminInvitationTokenForEmail(invited.email);
   const acceptRes = await request.post(`${API_BASE_URL}/auth/verify-email/`, {
+    headers: { "x-forwarded-for": invited.clientIp },
     data: { token: invitationToken, token_type: "admin_invitation" },
   });
   expect(acceptRes.ok()).toBeTruthy();
   const accepted = (await acceptRes.json()) as { reset_uid: string; reset_token: string };
 
   const confirmRes = await request.post(`${API_BASE_URL}/auth/password-reset-confirm/`, {
+    headers: { "x-forwarded-for": invited.clientIp },
     data: {
       uid: accepted.reset_uid,
       token: accepted.reset_token,
@@ -306,7 +325,7 @@ export async function completeAdminInvitationOnboarding(
 export async function createStandardBusinessUserSession(request: APIRequestContext) {
   const invited = await createAdminInvitedUser(request);
   const password = `pw_${crypto.randomBytes(8).toString("hex")}A!`;
-  const onboarding = await completeAdminInvitationOnboarding(request, invited.email, password);
+  const onboarding = await completeAdminInvitationOnboarding(request, invited, password);
 
   const meRes = await request.get(`${API_BASE_URL}/auth/me/`, {
     headers: { Authorization: `Token ${onboarding.token}` },
