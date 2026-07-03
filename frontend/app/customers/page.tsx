@@ -303,6 +303,7 @@ export default function CustomersPage() {
     try {
       setImporting(true);
       setError(null);
+      setImportResult(null);
       const body = new FormData();
       body.append("file", importFile, importFile.name);
       if (importDryRun) body.append("dry_run", "true");

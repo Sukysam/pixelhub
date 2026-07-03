@@ -90,6 +90,21 @@ def _csv_upload_file(name: str, body: str) -> SimpleUploadedFile:
     return SimpleUploadedFile(name, body.encode("utf-8"), content_type="text/csv")
 
 
+def _xlsx_upload_file(name: str, header: list[str], rows: list[list[object]]) -> SimpleUploadedFile:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(header)
+    for row in rows:
+        ws.append(row)
+    out = io.BytesIO()
+    wb.save(out)
+    return SimpleUploadedFile(
+        name,
+        out.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 class _MockJsonResponse:
     def __init__(self, payload):
         self.payload = payload
@@ -1862,6 +1877,28 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertEqual(good_res.status_code, status.HTTP_200_OK)
         self.assertEqual(good_res.data["imported"], 1)
         self.assertTrue(Customer.objects.filter(email="imported@example.com", is_deleted=False).exists())
+
+    def test_customer_import_xlsx_rejects_overlong_contact_fields_without_500(self):
+        upload = _xlsx_upload_file(
+            "customers.xlsx",
+            ["name", "email", "phone", "billing_address"],
+            [["Valid Name", "valid@example.com", "1" * 21, "12 Palm Ave"]],
+        )
+        response = self.client.post(
+            "/api/customers/import/",
+            {"file": upload, "rollback_on_error": "true"},
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["imported"], 0)
+        self.assertTrue(
+            any(
+                err["field"] == "phone" and "at most 20 characters" in err["message"]
+                for err in response.data["errors"]
+            )
+        )
+        self.assertFalse(Customer.objects.filter(email="valid@example.com", is_deleted=False).exists())
 
     def test_expense_crud_approval_filters_and_export(self):
         with tempfile.TemporaryDirectory() as tmp:

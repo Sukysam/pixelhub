@@ -432,6 +432,9 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
     errors: list[dict] = []
     seen_emails: set[str] = set()
     seen_names: set[str] = set()
+    name_max_length = int(Customer._meta.get_field("name").max_length or 0)
+    email_max_length = int(Customer._meta.get_field("email").max_length or 0)
+    phone_max_length = int(Customer._meta.get_field("phone").max_length or 0)
 
     incoming_emails = []
     for r in rows:
@@ -454,6 +457,9 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
         if not name:
             errors.append({"row": row_num, "field": "name", "message": "name is required"})
             continue
+        if name_max_length and len(name) > name_max_length:
+            errors.append({"row": row_num, "field": "name", "message": f"name must be at most {name_max_length} characters"})
+            continue
         name_key = name.lower()
         if name_key in seen_names:
             errors.append({"row": row_num, "field": "name", "message": "Duplicate name in file"})
@@ -461,6 +467,9 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
         seen_names.add(name_key)
 
         if email:
+            if email_max_length and len(email) > email_max_length:
+                errors.append({"row": row_num, "field": "email", "message": f"email must be at most {email_max_length} characters"})
+                continue
             email_key = email.lower()
             if email_key in seen_emails:
                 errors.append({"row": row_num, "field": "email", "message": "Duplicate email in file"})
@@ -474,6 +483,9 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
             except DjangoValidationError:
                 errors.append({"row": row_num, "field": "email", "message": "Invalid email"})
                 continue
+        if phone and phone_max_length and len(phone) > phone_max_length:
+            errors.append({"row": row_num, "field": "phone", "message": f"phone must be at most {phone_max_length} characters"})
+            continue
 
         to_create.append(
             Customer(
