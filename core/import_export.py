@@ -9,11 +9,14 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Callable
 
 from django.core.cache import cache
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils import timezone
 from openpyxl import load_workbook
 
-from .models import Customer, Invoice, InvoiceItem, Item
+from .models import Customer, Expense, Invoice, InvoiceItem, Item
 
 CENTS = Decimal("0.01")
 
@@ -423,3 +426,200 @@ def import_invoices_from_upload(
 
     return 200, {"imported_invoices": created_invoices, "imported_invoice_items": created_items, "rows": len(rows), "errors": errors}
 
+
+def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> tuple[int, dict]:
+    rows = _parse_upload_rows(upload)
+    errors: list[dict] = []
+    seen_emails: set[str] = set()
+    seen_names: set[str] = set()
+
+    incoming_emails = []
+    for r in rows:
+        email = str(r.get("email") or "").strip().lower()
+        if email:
+            incoming_emails.append(email)
+    existing_emails = set(
+        Customer.objects.filter(email__in=incoming_emails, is_deleted=False).values_list("email", flat=True)
+    )
+    existing_emails = {str(v or "").lower() for v in existing_emails if v}
+
+    to_create: list[Customer] = []
+    for r in rows:
+        row_num = int(r.get("_row") or 0)
+        name = str(r.get("name") or "").strip()
+        email = str(r.get("email") or "").strip() or None
+        phone = str(r.get("phone") or "").strip() or None
+        billing_address = str(r.get("billing_address") or "").strip() or None
+
+        if not name:
+            errors.append({"row": row_num, "field": "name", "message": "name is required"})
+            continue
+        name_key = name.lower()
+        if name_key in seen_names:
+            errors.append({"row": row_num, "field": "name", "message": "Duplicate name in file"})
+            continue
+        seen_names.add(name_key)
+
+        if email:
+            email_key = email.lower()
+            if email_key in seen_emails:
+                errors.append({"row": row_num, "field": "email", "message": "Duplicate email in file"})
+                continue
+            seen_emails.add(email_key)
+            if email_key in existing_emails:
+                errors.append({"row": row_num, "field": "email", "message": "email already exists"})
+                continue
+            try:
+                validate_email(email)
+            except DjangoValidationError:
+                errors.append({"row": row_num, "field": "email", "message": "Invalid email"})
+                continue
+
+        to_create.append(
+            Customer(
+                name=name,
+                email=email,
+                phone=phone,
+                billing_address=billing_address,
+            )
+        )
+
+    if errors and rollback_on_error:
+        token = _cache_error_log(errors)
+        return 400, {"imported": 0, "rows": len(rows), "errors": errors[:200], "error_log_token": token, "rolled_back": True}
+
+    if dry_run:
+        return 200, {"dry_run": True, "rows": len(rows), "would_create": len(to_create), "errors": errors}
+
+    created = 0
+    with transaction.atomic():
+        for i in range(0, len(to_create), 1000):
+            batch = to_create[i : i + 1000]
+            Customer.objects.bulk_create(batch, batch_size=1000)
+            created += len(batch)
+    return 200, {"imported": created, "rows": len(rows), "errors": errors}
+
+
+def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: bool, actor=None) -> tuple[int, dict]:
+    rows = _parse_upload_rows(upload)
+    errors: list[dict] = []
+    flags: list[dict] = []
+    User = get_user_model()
+
+    usernames = {str(r.get("assigned_to") or "").strip() for r in rows if str(r.get("assigned_to") or "").strip()}
+    users_by_name = {u.username: u for u in User.objects.filter(username__in=list(usernames))}
+
+    def _clean(value) -> str:
+        return str(value or "").strip()
+
+    def _parse_date(value, field: str, row_num: int):
+        raw = _clean(value)
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            errors.append({"row": row_num, "field": field, "message": "Invalid date. Use YYYY-MM-DD"})
+            return None
+
+    def _parse_decimal(value, field: str, row_num: int):
+        if value in (None, ""):
+            errors.append({"row": row_num, "field": field, "message": f"{field} is required"})
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError):
+            errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
+            return None
+
+    allowed_statuses = {s for s, _ in Expense.APPROVAL_STATUS_CHOICES}
+    to_create: list[Expense] = []
+    for r in rows:
+        row_num = int(r.get("_row") or 0)
+        amount = _parse_decimal(r.get("amount"), "amount", row_num)
+        if amount is None:
+            continue
+        if amount <= 0:
+            errors.append({"row": row_num, "field": "amount", "message": "amount must be > 0"})
+            continue
+
+        expense_date = _parse_date(r.get("expense_date"), "expense_date", row_num) or timezone.localdate()
+        category = _clean(r.get("category"))
+        if not category:
+            errors.append({"row": row_num, "field": "category", "message": "category is required"})
+            continue
+        project_code = _clean(r.get("project_code")) or None
+        cost_center = _clean(r.get("cost_center")) or None
+        if not project_code and not cost_center:
+            errors.append({"row": row_num, "field": "project_code", "message": "project_code or cost_center is required"})
+            continue
+
+        approval_status = _clean(r.get("approval_status") or Expense.APPROVAL_STATUS_SUBMITTED) or Expense.APPROVAL_STATUS_SUBMITTED
+        if approval_status not in allowed_statuses:
+            errors.append({"row": row_num, "field": "approval_status", "message": "Invalid approval_status"})
+            continue
+
+        assigned_to_name = _clean(r.get("assigned_to")) or None
+        assigned_to = users_by_name.get(assigned_to_name) if assigned_to_name else actor
+        if assigned_to_name and assigned_to is None:
+            errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
+            continue
+
+        policy_status = Expense.POLICY_STATUS_COMPLIANT
+        policy_notes: list[str] = []
+        if amount >= Decimal("1000.00"):
+            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
+            policy_notes.append("Receipt upload required after import for expenses >= 1000.00")
+        if expense_date > timezone.localdate():
+            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
+            policy_notes.append("Future-dated expense requires review")
+        if policy_status != Expense.POLICY_STATUS_COMPLIANT:
+            flags.append({"row": row_num, "status": policy_status, "notes": "; ".join(policy_notes)})
+
+        to_create.append(
+            Expense(
+                amount=amount,
+                expense_date=expense_date,
+                category=category,
+                description=_clean(r.get("description")) or None,
+                vendor=_clean(r.get("vendor")) or None,
+                merchant_reference=_clean(r.get("merchant_reference")) or None,
+                project_code=project_code,
+                cost_center=cost_center,
+                approval_status=approval_status,
+                policy_status=policy_status,
+                policy_notes="; ".join(policy_notes) or None,
+                assigned_to=assigned_to,
+                created_by=actor if getattr(actor, "is_authenticated", False) else None,
+                approved_by=(actor if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
+                approved_at=(timezone.now() if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
+            )
+        )
+
+    if errors and rollback_on_error:
+        token = _cache_error_log(errors)
+        return 400, {
+            "imported": 0,
+            "rows": len(rows),
+            "errors": errors[:200],
+            "flags": flags[:200],
+            "error_log_token": token,
+            "rolled_back": True,
+        }
+
+    if dry_run:
+        return 200, {
+            "dry_run": True,
+            "rows": len(rows),
+            "would_create": len(to_create),
+            "errors": errors,
+            "flags": flags,
+        }
+
+    created = 0
+    with transaction.atomic():
+        for i in range(0, len(to_create), 1000):
+            batch = to_create[i : i + 1000]
+            Expense.objects.bulk_create(batch, batch_size=1000)
+            created += len(batch)
+    return 200, {"imported": created, "rows": len(rows), "errors": errors, "flags": flags}

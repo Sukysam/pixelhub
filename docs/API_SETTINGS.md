@@ -182,6 +182,53 @@ Response (400 when `rollback_on_error=true` and any validation error):
 { "imported": 0, "rows": 10, "errors": [{"row":2,"field":"sku","message":"sku already exists"}], "error_log_token":"...", "rolled_back": true }
 ```
 
+## Customer Export/Import
+### GET /customers/export/
+Exports customer records and derived commercial status.
+
+Query params:
+- `file_format`: `csv` | `xlsx` (default: `csv`)
+- `fields`: comma-separated allowed fields from `name,email,phone,billing_address,account_status,segment,invoice_count,lifetime_value,total_paid_amount,last_invoice_date,order_history,created_at,updated_at`
+- `created_from`, `created_to`: `YYYY-MM-DD`
+- `segment`: `prospect` | `standard` | `vip`
+- `account_status`: `active` | `prospect` | `inactive`
+- plus existing customer filters such as `q`, `email`, and `phone`
+
+Notes:
+- `account_status` is derived from invoice activity.
+- `segment` is derived from invoice count and lifetime value.
+- `order_history` is exported as a compact string of recent invoice references.
+
+### GET /customers/import_template/
+Downloads a CSV/XLSX template with columns:
+- `name`
+- `email`
+- `phone`
+- `billing_address`
+
+### POST /customers/import/
+Imports customers from CSV/XLSX.
+
+Form fields:
+- `file`: required (`.csv` or `.xlsx`)
+- `dry_run`: `true|false` (default: `false`)
+- `rollback_on_error`: `true|false` (default: `true`)
+
+Validation:
+- `name` is required
+- `email` must be valid if supplied
+- duplicate emails in the file or existing active customer set are rejected
+
+Success response:
+```json
+{ "imported": 25, "rows": 25, "errors": [] }
+```
+
+Rollback error response:
+```json
+{ "imported": 0, "rows": 3, "errors": [{"row":2,"field":"email","message":"email already exists"}], "error_log_token":"...", "rolled_back": true }
+```
+
 ## Invoice Read APIs
 ### GET /invoices/
 Lists invoices with customer, totals, payment progress, and line-item count metadata.
@@ -267,6 +314,76 @@ List/detail response fields include:
 
 ### GET /receipts/<id>/
 Returns one receipt plus `linked_invoice` with invoice number, status, total amount, customer association, and due date.
+
+## Expense Read APIs
+### GET /expenses/
+Lists expenses with approval, policy, assignment, and receipt metadata.
+
+Query params:
+- `page`
+- `q`: searches category, description, vendor, reference, project/cost center, and assigned username
+- `category`
+- `approval_status`: `draft` | `submitted` | `approved` | `rejected`
+- `policy_status`: `compliant` | `review_required` | `non_compliant`
+- `assigned_to`: numeric user id, username fragment, or `me`
+- `project_code`, `cost_center`
+- `expense_date_from`, `expense_date_to`
+- `amount_min`, `amount_max`
+- `ordering` or `sort`: `id`, `amount`, `expense_date`, `category`, `vendor`, `approval_status`, `policy_status`, `assigned_to`, `project_code`, `cost_center`, `created_at`, `updated_at`
+
+List/detail response fields include:
+- core expense fields
+- `receipt_url`
+- `assigned_to_name`
+- `created_by_name`
+- `approved_by_name`
+- `policy_status`
+- `policy_notes`
+
+### POST /expenses/<id>/approve/
+Approves or rejects an expense.
+
+Body:
+```json
+{ "approval_status": "approved", "policy_notes": "Reviewed and accepted" }
+```
+
+### GET /expenses/export/
+Exports expenses in `csv`, `xlsx`, or `pdf`.
+
+Query params:
+- `file_format`: `csv` | `xlsx` | `pdf`
+- `fields`: comma-separated allowed fields from `expense_date,amount,category,description,vendor,merchant_reference,project_code,cost_center,approval_status,policy_status,policy_notes,assigned_to,created_by,approved_by,approved_at,receipt_url,created_at,updated_at`
+- all standard expense filters listed above
+
+### GET /expenses/import_template/
+Downloads a CSV/XLSX template with columns:
+- `amount`
+- `expense_date`
+- `category`
+- `description`
+- `vendor`
+- `merchant_reference`
+- `project_code`
+- `cost_center`
+- `assigned_to`
+- `approval_status`
+
+### POST /expenses/import/
+Imports expenses from CSV/XLSX.
+
+Validation and policy behavior:
+- `amount` must be positive
+- `category` is required
+- one of `project_code` or `cost_center` is required
+- `assigned_to` must resolve to an existing username if supplied
+- amounts `>= 1000.00` are imported with `policy_status=review_required` until a receipt is uploaded and approved
+- future-dated expenses are flagged for review
+
+Success response:
+```json
+{ "imported": 12, "rows": 12, "errors": [], "flags": [{"row":2,"status":"review_required","notes":"Receipt upload required after import for expenses >= 1000.00"}] }
+```
 
 ## Import Error Logs
 ### GET /imports/error-log/<token>/

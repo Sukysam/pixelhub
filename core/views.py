@@ -1774,6 +1774,10 @@ class CustomerViewSet(SoftDeleteModelViewSet):
                 invoice_count=Count("invoices", filter=Q(invoices__is_deleted=False), distinct=True),
                 lifetime_value=Coalesce(Sum("invoices__total_amount", filter=Q(invoices__is_deleted=False)), Decimal("0.00")),
                 last_invoice_date=Max("invoices__issue_date", filter=Q(invoices__is_deleted=False)),
+                total_paid_amount=Coalesce(
+                    Sum("invoices__receipts__amount_paid", filter=Q(invoices__is_deleted=False, invoices__receipts__is_deleted=False)),
+                    Decimal("0.00"),
+                ),
             )
         )
         p = self.request.query_params
@@ -1810,6 +1814,26 @@ class CustomerViewSet(SoftDeleteModelViewSet):
             qs = qs.filter(created_at__date__gte=created_from)
         if created_to:
             qs = qs.filter(created_at__date__lte=created_to)
+
+        account_status = str(p.get("account_status") or "").strip().lower()
+        if account_status:
+            if account_status == "active":
+                qs = qs.filter(invoice_count__gt=0)
+            elif account_status in ("prospect", "inactive"):
+                qs = qs.filter(invoice_count=0)
+            else:
+                raise ValidationError({"account_status": "Invalid account_status. Use active, prospect, or inactive"})
+
+        segment = str(p.get("segment") or "").strip().lower()
+        if segment:
+            if segment == "vip":
+                qs = qs.filter(Q(invoice_count__gte=5) | Q(lifetime_value__gte=Decimal("10000.00")))
+            elif segment == "standard":
+                qs = qs.filter(invoice_count__gt=0).exclude(Q(invoice_count__gte=5) | Q(lifetime_value__gte=Decimal("10000.00")))
+            elif segment == "prospect":
+                qs = qs.filter(invoice_count=0)
+            else:
+                raise ValidationError({"segment": "Invalid segment. Use prospect, standard, or vip"})
 
         return _apply_ordering_query(
             qs,
@@ -1871,6 +1895,210 @@ class CustomerViewSet(SoftDeleteModelViewSet):
                 customer.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
                 _log_audit(request.user, "bulk_delete", customer, {"bulk": True})
         return Response({"deleted": len(ids)}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export(self, request):
+        self._require_model_perm("view")
+
+        fmt = str(request.query_params.get("file_format") or request.query_params.get("export_format") or "csv").strip().lower()
+        if fmt not in ("csv", "xlsx"):
+            raise ValidationError({"file_format": "Invalid file_format. Use csv or xlsx"})
+
+        allowed_fields = [
+            "id",
+            "name",
+            "email",
+            "phone",
+            "billing_address",
+            "account_status",
+            "segment",
+            "invoice_count",
+            "lifetime_value",
+            "total_paid_amount",
+            "last_invoice_date",
+            "order_history",
+            "created_at",
+            "updated_at",
+        ]
+        fields_raw = request.query_params.get("fields")
+        if fields_raw in (None, ""):
+            fields = [
+                "name",
+                "email",
+                "phone",
+                "account_status",
+                "segment",
+                "invoice_count",
+                "lifetime_value",
+                "total_paid_amount",
+                "last_invoice_date",
+            ]
+        else:
+            parts = [p.strip() for p in str(fields_raw).split(",") if p.strip()]
+            invalid = [p for p in parts if p not in allowed_fields]
+            if invalid:
+                raise ValidationError({"fields": f"Invalid fields: {', '.join(invalid)}"})
+            fields = parts or allowed_fields
+
+        rows_limit = 50000
+        try:
+            limit_raw = request.query_params.get("limit")
+            if limit_raw not in (None, ""):
+                rows_limit = int(limit_raw)
+        except ValueError:
+            raise ValidationError({"limit": "Invalid limit"})
+        rows_limit = max(1, min(rows_limit, 50000))
+
+        qs = self.filter_queryset(self.get_queryset()).order_by("-id")[:rows_limit]
+
+        def _csv_cell(value: str) -> str:
+            v = str(value or "")
+            if v and v[0] in ("=", "+", "-", "@"):
+                return "'" + v
+            return v
+
+        def _account_status(customer: Customer) -> str:
+            return "active" if int(getattr(customer, "invoice_count", 0) or 0) > 0 else "prospect"
+
+        def _segment(customer: Customer) -> str:
+            invoice_count = int(getattr(customer, "invoice_count", 0) or 0)
+            lifetime_value = Decimal(str(getattr(customer, "lifetime_value", Decimal("0.00")) or Decimal("0.00")))
+            if invoice_count == 0:
+                return "prospect"
+            if invoice_count >= 5 or lifetime_value >= Decimal("10000.00"):
+                return "vip"
+            return "standard"
+
+        def _order_history(customer: Customer) -> str:
+            invoices = customer.invoices.filter(is_deleted=False).order_by("-issue_date", "-id")[:20]
+            parts = [f"{inv.invoice_number}:{inv.status}:{inv.total_amount}" for inv in invoices]
+            return " | ".join(parts)
+
+        def _value_for(customer: Customer, field: str) -> str:
+            if field == "account_status":
+                return _account_status(customer)
+            if field == "segment":
+                return _segment(customer)
+            if field == "invoice_count":
+                return str(int(getattr(customer, "invoice_count", 0) or 0))
+            if field in ("lifetime_value", "total_paid_amount"):
+                return str(getattr(customer, field, "") or "")
+            if field == "last_invoice_date":
+                value = getattr(customer, field, None)
+                return str(value or "")
+            if field == "order_history":
+                return _order_history(customer)
+            if field in ("created_at", "updated_at"):
+                dt = getattr(customer, field, None)
+                return dt.isoformat() if dt else ""
+            return str(getattr(customer, field, "") or "")
+
+        filename_base = "customers"
+        _log_operation(request.user, "export", Customer, "customers_export", {"format": fmt, "fields": fields, "limit": rows_limit})
+
+        if fmt == "csv":
+            class _Echo:
+                def write(self, value):
+                    return value
+
+            def _iter_rows():
+                yield writer.writerow(fields)
+                for customer in qs.iterator(chunk_size=2000):
+                    yield writer.writerow([_csv_cell(_value_for(customer, f)) for f in fields])
+
+            pseudo_buffer = _Echo()
+            writer = csv.writer(pseudo_buffer)
+            resp = StreamingHttpResponse(_iter_rows(), content_type="text/csv; charset=utf-8")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.csv"'
+            return resp
+
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Customers")
+        ws.append(fields)
+        for customer in qs.iterator(chunk_size=2000):
+            ws.append([_value_for(customer, f) for f in fields])
+        out = io.BytesIO()
+        wb.save(out)
+        resp = HttpResponse(out.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        resp["Content-Disposition"] = f'attachment; filename="{filename_base}.xlsx"'
+        return resp
+
+    @action(detail=False, methods=["get"], url_path="import_template")
+    def import_template(self, request):
+        self._require_any_model_perm(["add", "change"])
+
+        fmt = str(request.query_params.get("file_format") or "xlsx").strip().lower()
+        if fmt not in ("csv", "xlsx"):
+            raise ValidationError({"file_format": "Invalid file_format. Use csv or xlsx"})
+
+        header = ["name", "email", "phone", "billing_address"]
+        example = ["Example Customer", "buyer@example.com", "+2348012345678", "12 Marina Road, Lagos"]
+        filename_base = "customer_import_template"
+
+        if fmt == "csv":
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(header)
+            w.writerow(example)
+            resp = HttpResponse(out.getvalue(), content_type="text/csv; charset=utf-8")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.csv"'
+            return resp
+
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Template")
+        ws.append(header)
+        ws.append(example)
+        out = io.BytesIO()
+        wb.save(out)
+        resp = HttpResponse(out.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        resp["Content-Disposition"] = f'attachment; filename="{filename_base}.xlsx"'
+        return resp
+
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_customers(self, request):
+        self._require_any_model_perm(["add", "change"])
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "file is required"})
+
+        dry_run = str(request.data.get("dry_run") or "").strip().lower() in ("1", "true", "yes", "on")
+        rollback_on_error = str(request.data.get("rollback_on_error") or "").strip().lower() not in ("0", "false", "no", "off")
+        from .import_export import import_customers_from_upload
+
+        try:
+            status_code, payload = import_customers_from_upload(upload, dry_run=dry_run, rollback_on_error=rollback_on_error)
+        except ValueError:
+            raise ValidationError({"file": "Unsupported file type. Use .csv or .xlsx"})
+
+        if status_code >= 400:
+            _log_operation(
+                request.user,
+                "import",
+                Customer,
+                "customers_import_failed",
+                {"dry_run": dry_run, "rows": int(payload.get("rows") or 0), "errors": len(payload.get("errors") or [])},
+            )
+            return Response(payload, status=status_code)
+
+        if payload.get("dry_run"):
+            _log_operation(
+                request.user,
+                "import",
+                Customer,
+                "customers_import_dry_run",
+                {"rows": int(payload.get("rows") or 0), "would_create": int(payload.get("would_create") or 0), "errors": len(payload.get("errors") or [])},
+            )
+            return Response(payload, status=status_code)
+
+        _log_operation(
+            request.user,
+            "import",
+            Customer,
+            "customers_import",
+            {"rows": int(payload.get("rows") or 0), "created": int(payload.get("imported") or 0), "errors": len(payload.get("errors") or [])},
+        )
+        return Response(payload, status=status_code)
 
 
 class ItemViewSet(SoftDeleteModelViewSet):
@@ -3370,9 +3598,402 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
 
 
 class ExpenseViewSet(SoftDeleteModelViewSet):
-    queryset = Expense.objects.all().order_by("-expense_date", "-id")
+    queryset = Expense.objects.all().select_related("assigned_to", "created_by", "approved_by").order_by("-expense_date", "-id")
     serializer_class = ExpenseSerializer
     pagination_class = OptionalPageNumberPagination
+    parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("assigned_to", "created_by", "approved_by")
+        p = self.request.query_params
+
+        q = str(p.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(category__icontains=q)
+                | Q(description__icontains=q)
+                | Q(vendor__icontains=q)
+                | Q(project_code__icontains=q)
+                | Q(cost_center__icontains=q)
+                | Q(merchant_reference__icontains=q)
+                | Q(assigned_to__username__icontains=q)
+            )
+
+        category = str(p.get("category") or "").strip()
+        if category:
+            qs = qs.filter(category__icontains=category)
+
+        approval_status = str(p.get("approval_status") or "").strip()
+        if approval_status:
+            allowed = {code for code, _ in Expense.APPROVAL_STATUS_CHOICES}
+            if approval_status not in allowed:
+                raise ValidationError({"approval_status": "Invalid approval_status"})
+            qs = qs.filter(approval_status=approval_status)
+
+        policy_status = str(p.get("policy_status") or "").strip()
+        if policy_status:
+            allowed = {code for code, _ in Expense.POLICY_STATUS_CHOICES}
+            if policy_status not in allowed:
+                raise ValidationError({"policy_status": "Invalid policy_status"})
+            qs = qs.filter(policy_status=policy_status)
+
+        project_code = str(p.get("project_code") or "").strip()
+        if project_code:
+            qs = qs.filter(project_code__icontains=project_code)
+
+        cost_center = str(p.get("cost_center") or "").strip()
+        if cost_center:
+            qs = qs.filter(cost_center__icontains=cost_center)
+
+        assigned_to = str(p.get("assigned_to") or "").strip()
+        if assigned_to:
+            if assigned_to == "me" and getattr(self.request.user, "is_authenticated", False):
+                qs = qs.filter(assigned_to=self.request.user)
+            else:
+                try:
+                    qs = qs.filter(assigned_to_id=int(assigned_to))
+                except ValueError:
+                    qs = qs.filter(assigned_to__username__icontains=assigned_to)
+
+        def _date_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return date.fromisoformat(str(raw))
+            except ValueError:
+                raise ValidationError({key: "Invalid date. Use YYYY-MM-DD"})
+
+        expense_from = _date_param("expense_date_from")
+        expense_to = _date_param("expense_date_to")
+        if expense_from:
+            qs = qs.filter(expense_date__gte=expense_from)
+        if expense_to:
+            qs = qs.filter(expense_date__lte=expense_to)
+
+        def _decimal_param(key: str):
+            raw = p.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return Decimal(str(raw))
+            except (TypeError, ValueError, InvalidOperation):
+                raise ValidationError({key: "Invalid decimal"})
+
+        amount_min = _decimal_param("amount_min")
+        amount_max = _decimal_param("amount_max")
+        if amount_min is not None:
+            qs = qs.filter(amount__gte=amount_min)
+        if amount_max is not None:
+            qs = qs.filter(amount__lte=amount_max)
+
+        return _apply_ordering_query(
+            qs,
+            params=p,
+            allowed_fields={
+                "id": "id",
+                "amount": "amount",
+                "expense_date": "expense_date",
+                "category": "category",
+                "vendor": "vendor",
+                "approval_status": "approval_status",
+                "policy_status": "policy_status",
+                "assigned_to": "assigned_to__username",
+                "project_code": "project_code",
+                "cost_center": "cost_center",
+                "created_at": "created_at",
+                "updated_at": "updated_at",
+            },
+            default=("-expense_date", "-id"),
+        )
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        self._require_model_perm("change")
+        expense = self.get_object()
+        approval_status = str(request.data.get("approval_status") or "").strip() or Expense.APPROVAL_STATUS_APPROVED
+        if approval_status not in (Expense.APPROVAL_STATUS_APPROVED, Expense.APPROVAL_STATUS_REJECTED):
+            raise ValidationError({"approval_status": "approval_status must be approved or rejected"})
+        with transaction.atomic():
+            locked = Expense.objects.select_for_update().get(pk=expense.pk, is_deleted=False)
+            before_status = locked.approval_status
+            serializer = self.get_serializer(
+                locked,
+                data={
+                    "approval_status": approval_status,
+                    "updated_at": locked.updated_at.isoformat(),
+                    "policy_notes": request.data.get("policy_notes"),
+                },
+                partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            updated = serializer.save()
+            _log_audit(
+                request.user,
+                "update",
+                updated,
+                {"approval_status": {"from": before_status, "to": updated.approval_status}, "approved_by": request.user.username},
+            )
+        return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="export")
+    def export(self, request):
+        self._require_model_perm("view")
+
+        fmt = str(request.query_params.get("file_format") or request.query_params.get("export_format") or "csv").strip().lower()
+        if fmt not in ("csv", "xlsx", "pdf"):
+            raise ValidationError({"file_format": "Invalid file_format. Use csv, xlsx, or pdf"})
+
+        allowed_fields = [
+            "id",
+            "amount",
+            "expense_date",
+            "category",
+            "description",
+            "vendor",
+            "merchant_reference",
+            "project_code",
+            "cost_center",
+            "approval_status",
+            "policy_status",
+            "policy_notes",
+            "assigned_to",
+            "created_by",
+            "approved_by",
+            "approved_at",
+            "receipt_url",
+            "created_at",
+            "updated_at",
+        ]
+        fields_raw = request.query_params.get("fields")
+        if fields_raw in (None, ""):
+            fields = [
+                "expense_date",
+                "amount",
+                "category",
+                "vendor",
+                "project_code",
+                "cost_center",
+                "approval_status",
+                "policy_status",
+                "assigned_to",
+            ]
+        else:
+            parts = [p.strip() for p in str(fields_raw).split(",") if p.strip()]
+            invalid = [p for p in parts if p not in allowed_fields]
+            if invalid:
+                raise ValidationError({"fields": f"Invalid fields: {', '.join(invalid)}"})
+            fields = parts or allowed_fields
+
+        rows_limit = 50000 if fmt in ("csv", "xlsx") else 2000
+        try:
+            limit_raw = request.query_params.get("limit")
+            if limit_raw not in (None, ""):
+                rows_limit = int(limit_raw)
+        except ValueError:
+            raise ValidationError({"limit": "Invalid limit"})
+        rows_limit = max(1, min(rows_limit, 50000 if fmt in ("csv", "xlsx") else 5000))
+
+        qs = self.filter_queryset(self.get_queryset())[:rows_limit]
+
+        def _csv_cell(value: str) -> str:
+            v = str(value or "")
+            if v and v[0] in ("=", "+", "-", "@"):
+                return "'" + v
+            return v
+
+        def _value_for(expense: Expense, field: str) -> str:
+            if field == "assigned_to":
+                return str(getattr(getattr(expense, "assigned_to", None), "username", "") or "")
+            if field == "created_by":
+                return str(getattr(getattr(expense, "created_by", None), "username", "") or "")
+            if field == "approved_by":
+                return str(getattr(getattr(expense, "approved_by", None), "username", "") or "")
+            if field == "receipt_url":
+                return request.build_absolute_uri(expense.receipt_file.url) if getattr(expense, "receipt_file", None) else ""
+            if field in ("expense_date",):
+                return str(getattr(expense, field, "") or "")
+            if field in ("amount",):
+                return str(getattr(expense, field, "") or "")
+            if field in ("created_at", "updated_at", "approved_at"):
+                dt = getattr(expense, field, None)
+                return dt.isoformat() if dt else ""
+            return str(getattr(expense, field, "") or "")
+
+        filename_base = "expenses"
+        _log_operation(request.user, "export", Expense, "expenses_export", {"format": fmt, "fields": fields, "limit": rows_limit})
+
+        if fmt == "csv":
+            class _Echo:
+                def write(self, value):
+                    return value
+
+            def _iter_rows():
+                yield writer.writerow(fields)
+                for expense in qs.iterator(chunk_size=2000):
+                    yield writer.writerow([_csv_cell(_value_for(expense, f)) for f in fields])
+
+            pseudo_buffer = _Echo()
+            writer = csv.writer(pseudo_buffer)
+            resp = StreamingHttpResponse(_iter_rows(), content_type="text/csv; charset=utf-8")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.csv"'
+            return resp
+
+        if fmt == "xlsx":
+            wb = Workbook(write_only=True)
+            ws = wb.create_sheet("Expenses")
+            ws.append(fields)
+            for expense in qs.iterator(chunk_size=2000):
+                ws.append([_value_for(expense, f) for f in fields])
+            out = io.BytesIO()
+            wb.save(out)
+            resp = HttpResponse(out.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.xlsx"'
+            return resp
+
+        rows = []
+        for expense in qs.iterator(chunk_size=2000):
+            rows.append({f: _value_for(expense, f) for f in fields})
+        company_name = str(_effective_company_identity_for_user(request.user)["company_name"] or "PIXELHUB").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = "<html><head><meta charset='utf-8' /><style>body{font-family:Arial, sans-serif;font-size:10pt;}table{border-collapse:collapse;width:100%;}th,td{border:1px solid #ddd;padding:4px;}th{background:#f3f3f3;text-align:left;}.doc-company{font-size:18pt;font-weight:700;margin:0 0 4px;color:#1a4d8e;}.doc-title{font-size:12pt;font-weight:700;margin:0 0 12px;}</style></head><body>"
+        html += f"<div class='doc-company'>{company_name}</div><div class='doc-title'>Expenses Export</div>"
+        html += "<table><thead><tr>" + "".join([f"<th>{f}</th>" for f in fields]) + "</tr></thead><tbody>"
+        for row in rows:
+            html += "<tr>" + "".join([f"<td>{str(row.get(f, '')).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')}</td>" for f in fields]) + "</tr>"
+        html += "</tbody></table></body></html>"
+        try:
+            from weasyprint import HTML
+
+            pdf = HTML(string=html).write_pdf()
+            resp = HttpResponse(pdf, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.pdf"'
+            resp["X-PDF-Backend"] = "weasyprint"
+            return resp
+        except (OSError, ValueError) as e:
+            logger.warning("pdf.weasyprint_render_failed error=%s expenses_export=1", e)
+            resp = HttpResponse(html, content_type="text/html; charset=utf-8")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.html"'
+            resp["X-PDF-Backend"] = "failed"
+            return resp
+
+    @action(detail=False, methods=["get"], url_path="import_template")
+    def import_template(self, request):
+        self._require_any_model_perm(["add", "change"])
+
+        fmt = str(request.query_params.get("file_format") or "xlsx").strip().lower()
+        if fmt not in ("csv", "xlsx"):
+            raise ValidationError({"file_format": "Invalid file_format. Use csv or xlsx"})
+
+        header = [
+            "amount",
+            "expense_date",
+            "category",
+            "description",
+            "vendor",
+            "merchant_reference",
+            "project_code",
+            "cost_center",
+            "assigned_to",
+            "approval_status",
+        ]
+        example = [
+            "250.00",
+            str(timezone.localdate()),
+            "Travel",
+            "Client visit taxi fare",
+            "Ride Service",
+            "TRIP-1001",
+            "PROJECT-ALPHA",
+            "",
+            getattr(request.user, "username", ""),
+            Expense.APPROVAL_STATUS_SUBMITTED,
+        ]
+        filename_base = "expense_import_template"
+
+        if fmt == "csv":
+            out = io.StringIO()
+            w = csv.writer(out)
+            w.writerow(header)
+            w.writerow(example)
+            resp = HttpResponse(out.getvalue(), content_type="text/csv; charset=utf-8")
+            resp["Content-Disposition"] = f'attachment; filename="{filename_base}.csv"'
+            return resp
+
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Template")
+        ws.append(header)
+        ws.append(example)
+        out = io.BytesIO()
+        wb.save(out)
+        resp = HttpResponse(out.getvalue(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        resp["Content-Disposition"] = f'attachment; filename="{filename_base}.xlsx"'
+        return resp
+
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_expenses(self, request):
+        self._require_any_model_perm(["add", "change"])
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": "file is required"})
+
+        dry_run = str(request.data.get("dry_run") or "").strip().lower() in ("1", "true", "yes", "on")
+        rollback_on_error = str(request.data.get("rollback_on_error") or "").strip().lower() not in ("0", "false", "no", "off")
+        from .import_export import import_expenses_from_upload
+
+        try:
+            status_code, payload = import_expenses_from_upload(
+                upload,
+                dry_run=dry_run,
+                rollback_on_error=rollback_on_error,
+                actor=request.user,
+            )
+        except ValueError:
+            raise ValidationError({"file": "Unsupported file type. Use .csv or .xlsx"})
+
+        if status_code >= 400:
+            _log_operation(
+                request.user,
+                "import",
+                Expense,
+                "expenses_import_failed",
+                {
+                    "dry_run": dry_run,
+                    "rows": int(payload.get("rows") or 0),
+                    "errors": len(payload.get("errors") or []),
+                    "flags": len(payload.get("flags") or []),
+                },
+            )
+            return Response(payload, status=status_code)
+
+        if payload.get("dry_run"):
+            _log_operation(
+                request.user,
+                "import",
+                Expense,
+                "expenses_import_dry_run",
+                {
+                    "rows": int(payload.get("rows") or 0),
+                    "would_create": int(payload.get("would_create") or 0),
+                    "errors": len(payload.get("errors") or []),
+                    "flags": len(payload.get("flags") or []),
+                },
+            )
+            return Response(payload, status=status_code)
+
+        _log_operation(
+            request.user,
+            "import",
+            Expense,
+            "expenses_import",
+            {
+                "rows": int(payload.get("rows") or 0),
+                "created": int(payload.get("imported") or 0),
+                "errors": len(payload.get("errors") or []),
+                "flags": len(payload.get("flags") or []),
+            },
+        )
+        return Response(payload, status=status_code)
 
 
 class CurrencyViewSet(viewsets.ModelViewSet):

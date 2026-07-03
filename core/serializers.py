@@ -1,5 +1,7 @@
 import re
+from datetime import timedelta
 from decimal import Decimal
+from django.utils import timezone
 from django.db.models import Sum
 from rest_framework import serializers
 from .models import (
@@ -96,6 +98,9 @@ class CustomerSerializer(serializers.ModelSerializer):
     invoice_count = serializers.SerializerMethodField()
     lifetime_value = serializers.SerializerMethodField()
     last_invoice_date = serializers.SerializerMethodField()
+    total_paid_amount = serializers.SerializerMethodField()
+    account_status = serializers.SerializerMethodField()
+    segment = serializers.SerializerMethodField()
 
     class Meta:
         model = Customer
@@ -112,6 +117,9 @@ class CustomerSerializer(serializers.ModelSerializer):
             "invoice_count",
             "lifetime_value",
             "last_invoice_date",
+            "total_paid_amount",
+            "account_status",
+            "segment",
         )
         read_only_fields = ("id", "created_at", "is_deleted", "deleted_at", "updated_at")
 
@@ -124,6 +132,25 @@ class CustomerSerializer(serializers.ModelSerializer):
 
     def get_last_invoice_date(self, obj):
         return getattr(obj, "last_invoice_date", None)
+
+    def get_total_paid_amount(self, obj):
+        value = getattr(obj, "total_paid_amount", Decimal("0.00")) or Decimal("0.00")
+        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+
+    def get_account_status(self, obj):
+        if bool(getattr(obj, "is_deleted", False)):
+            return "archived"
+        invoice_count = int(getattr(obj, "invoice_count", 0) or 0)
+        return "active" if invoice_count > 0 else "prospect"
+
+    def get_segment(self, obj):
+        invoice_count = int(getattr(obj, "invoice_count", 0) or 0)
+        lifetime_value = Decimal(str(getattr(obj, "lifetime_value", Decimal("0.00")) or Decimal("0.00")))
+        if invoice_count == 0:
+            return "prospect"
+        if invoice_count >= 5 or lifetime_value >= Decimal("10000.00"):
+            return "vip"
+        return "standard"
 
 
 class CustomerOrderHistorySerializer(serializers.ModelSerializer):
@@ -508,15 +535,130 @@ class ReceiptDetailSerializer(ReceiptSerializer):
 
 
 class ExpenseSerializer(serializers.ModelSerializer):
+    assigned_to_name = serializers.CharField(source="assigned_to.username", read_only=True)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    approved_by_name = serializers.CharField(source="approved_by.username", read_only=True)
+    receipt_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Expense
-        fields = "__all__"
-        read_only_fields = ("id", "created_at", "is_deleted", "deleted_at", "updated_at")
+        fields = (
+            "id",
+            "amount",
+            "expense_date",
+            "category",
+            "description",
+            "vendor",
+            "merchant_reference",
+            "project_code",
+            "cost_center",
+            "receipt_file",
+            "receipt_url",
+            "approval_status",
+            "policy_status",
+            "policy_notes",
+            "assigned_to",
+            "assigned_to_name",
+            "created_by",
+            "created_by_name",
+            "approved_by",
+            "approved_by_name",
+            "approved_at",
+            "created_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+        )
+        read_only_fields = (
+            "id",
+            "policy_status",
+            "policy_notes",
+            "created_by",
+            "created_by_name",
+            "approved_by",
+            "approved_by_name",
+            "approved_at",
+            "created_at",
+            "is_deleted",
+            "deleted_at",
+            "updated_at",
+        )
 
     def validate_amount(self, value):
         if value <= 0:
             raise serializers.ValidationError("amount must be > 0")
         return value
+
+    def get_receipt_url(self, obj):
+        file_field = getattr(obj, "receipt_file", None)
+        if not file_field:
+            return None
+        try:
+            url = file_field.url
+        except ValueError:
+            return None
+        request = self.context.get("request")
+        if request is not None:
+            return request.build_absolute_uri(url)
+        return url
+
+    def validate(self, attrs):
+        expense_date = attrs.get("expense_date") or getattr(self.instance, "expense_date", None) or timezone.localdate()
+        category = str(attrs.get("category") if "category" in attrs else getattr(self.instance, "category", "") or "").strip()
+        project_code = str(attrs.get("project_code") if "project_code" in attrs else getattr(self.instance, "project_code", "") or "").strip()
+        cost_center = str(attrs.get("cost_center") if "cost_center" in attrs else getattr(self.instance, "cost_center", "") or "").strip()
+        approval_status = str(
+            attrs.get("approval_status")
+            if "approval_status" in attrs
+            else getattr(self.instance, "approval_status", Expense.APPROVAL_STATUS_DRAFT)
+        ).strip() or Expense.APPROVAL_STATUS_DRAFT
+        receipt_file = attrs.get("receipt_file") if "receipt_file" in attrs else getattr(self.instance, "receipt_file", None)
+        amount = attrs.get("amount") if "amount" in attrs else getattr(self.instance, "amount", None)
+
+        if not category:
+            raise serializers.ValidationError({"category": "category is required"})
+        if not project_code and not cost_center:
+            raise serializers.ValidationError({"detail": "Either project_code or cost_center is required"})
+        if expense_date and expense_date > timezone.localdate() + timedelta(days=1):
+            raise serializers.ValidationError({"expense_date": "expense_date cannot be more than one day in the future"})
+
+        if approval_status in (Expense.APPROVAL_STATUS_APPROVED, Expense.APPROVAL_STATUS_REJECTED):
+            request = self.context.get("request")
+            if request is None or not getattr(request.user, "is_authenticated", False):
+                raise serializers.ValidationError({"approval_status": "Authenticated approval is required"})
+
+        policy_notes: list[str] = []
+        policy_status = Expense.POLICY_STATUS_COMPLIANT
+        amount_val = Decimal(str(amount or "0"))
+        if amount_val >= Decimal("1000.00") and not receipt_file:
+            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
+            policy_notes.append("Receipt is required for expenses >= 1000.00")
+        if expense_date and expense_date > timezone.localdate():
+            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
+            policy_notes.append("Future-dated expense requires review")
+
+        attrs["policy_status"] = policy_status
+        attrs["policy_notes"] = "; ".join(policy_notes) or None
+        return attrs
+
+    def create(self, validated_data):
+        request = self.context.get("request")
+        if request is not None and getattr(request.user, "is_authenticated", False):
+            validated_data.setdefault("created_by", request.user)
+            validated_data.setdefault("assigned_to", request.user)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        approval_status = validated_data.get("approval_status")
+        request = self.context.get("request")
+        if approval_status in (Expense.APPROVAL_STATUS_APPROVED, Expense.APPROVAL_STATUS_REJECTED):
+            if request is not None and getattr(request.user, "is_authenticated", False):
+                validated_data["approved_by"] = request.user
+                validated_data["approved_at"] = timezone.now()
+        elif approval_status in (Expense.APPROVAL_STATUS_DRAFT, Expense.APPROVAL_STATUS_SUBMITTED):
+            validated_data["approved_by"] = None
+            validated_data["approved_at"] = None
+        return super().update(instance, validated_data)
 
 
 class CurrencySerializer(serializers.ModelSerializer):

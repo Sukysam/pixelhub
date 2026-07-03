@@ -74,6 +74,11 @@ def _webp_logo_upload_file(name: str = "logo.webp") -> SimpleUploadedFile:
     return SimpleUploadedFile(name, buf.getvalue(), content_type="image/webp")
 
 
+def _pdf_upload_file(name: str = "receipt.pdf") -> SimpleUploadedFile:
+    data = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
+    return SimpleUploadedFile(name, data, content_type="application/pdf")
+
+
 class _MockJsonResponse:
     def __init__(self, payload):
         self.payload = payload
@@ -1779,6 +1784,134 @@ class ImportExportTests(APITestCase):
         res = self.client.post("/api/invoices/import/", {"file": up, "rollback_on_error": "true"}, format="multipart")
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("error_log_token", res.data)
+
+
+class CustomerExpenseImportExportTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_superuser(username="ops_admin", email="ops@example.com", password=_test_secret())
+        self.client.force_authenticate(user=self.user)
+
+    def test_customer_export_and_import_support_transaction_fields(self):
+        customer = Customer.objects.create(name="Export Buyer", email="buyer@example.com", phone="+2348012345678")
+        item = Item.objects.create(type="product", name="Export Widget", sku="CUST-EXPORT-1", unit_price=Decimal("25.00"), stock_quantity=5)
+        invoice = Invoice.objects.create(
+            invoice_number="INV-CUST-EXPORT",
+            customer=customer,
+            status="Paid",
+            subtotal=Decimal("25.00"),
+            tax_total=Decimal("0.00"),
+            total_amount=Decimal("25.00"),
+        )
+        InvoiceItem.objects.create(
+            invoice=invoice,
+            item=item,
+            quantity=1,
+            unit_price=Decimal("25.00"),
+            line_subtotal=Decimal("25.00"),
+            line_tax=Decimal("0.00"),
+            line_total=Decimal("25.00"),
+        )
+        Receipt.objects.create(
+            invoice=invoice,
+            amount_paid=Decimal("25.00"),
+            payment_date=timezone.localdate(),
+            payment_method="Cash",
+        )
+
+        res = self.client.get(
+            "/api/customers/export/?file_format=csv&fields=name,account_status,segment,invoice_count,total_paid_amount,order_history"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        body = b"".join(res.streaming_content).decode("utf-8")
+        self.assertIn("Export Buyer", body)
+        self.assertIn("active", body)
+        self.assertIn("INV-CUST-EXPORT:Paid:25.00", body)
+        self.assertIn("25.00", body)
+
+        template = self.client.get("/api/customers/import_template/?file_format=xlsx")
+        self.assertEqual(template.status_code, status.HTTP_200_OK)
+        wb = load_workbook(io.BytesIO(template.content))
+        self.assertEqual(wb.active["A1"].value, "name")
+
+    def test_customer_import_rollback_and_success(self):
+        Customer.objects.create(name="Existing", email="existing@example.com")
+        bad_csv = "name,email,phone,billing_address\nNew One,existing@example.com,+2348000000000,Addr\nBroken,not-an-email,,\n"
+        bad_upload = SimpleUploadedFile("customers.csv", bad_csv.encode("utf-8"), content_type="text/csv")
+        bad_res = self.client.post("/api/customers/import/", {"file": bad_upload, "rollback_on_error": "true"}, format="multipart")
+        self.assertEqual(bad_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("error_log_token", bad_res.data)
+        log_res = self.client.get(f"/api/imports/error-log/{bad_res.data['error_log_token']}/")
+        self.assertEqual(log_res.status_code, status.HTTP_200_OK)
+        self.assertIn("email already exists", log_res.content.decode("utf-8", errors="ignore"))
+
+        good_csv = "name,email,phone,billing_address\nImported Person,imported@example.com,+2348010000000,12 Palm Ave\n"
+        good_upload = SimpleUploadedFile("customers.csv", good_csv.encode("utf-8"), content_type="text/csv")
+        good_res = self.client.post("/api/customers/import/", {"file": good_upload}, format="multipart")
+        self.assertEqual(good_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(good_res.data["imported"], 1)
+        self.assertTrue(Customer.objects.filter(email="imported@example.com", is_deleted=False).exists())
+
+    def test_expense_crud_approval_filters_and_export(self):
+        create_res = self.client.post(
+            "/api/expenses/",
+            {
+                "amount": "250.00",
+                "expense_date": str(timezone.localdate()),
+                "category": "Travel",
+                "description": "Airport taxi",
+                "vendor": "Ride Co",
+                "merchant_reference": "TRAVEL-1",
+                "project_code": "PROJECT-ALPHA",
+                "approval_status": "submitted",
+                "receipt_file": _pdf_upload_file(),
+            },
+            format="multipart",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        expense_id = create_res.data["id"]
+        self.assertEqual(create_res.data["created_by"], self.user.id)
+        self.assertEqual(create_res.data["assigned_to"], self.user.id)
+        self.assertTrue(str(create_res.data.get("receipt_url") or "").endswith(".pdf"))
+
+        approve_res = self.client.post(
+            f"/api/expenses/{expense_id}/approve/",
+            {"approval_status": "approved", "policy_notes": "Reviewed and accepted"},
+            format="json",
+        )
+        self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_res.data["approval_status"], "approved")
+        self.assertEqual(approve_res.data["approved_by"], self.user.id)
+
+        filtered = self.client.get("/api/expenses/?approval_status=approved&category=Travel")
+        self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+        self.assertEqual(filtered.data["count"], 1)
+
+        export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=expense_date,amount,category,approval_status,assigned_to")
+        self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+        body = b"".join(export_res.streaming_content).decode("utf-8")
+        self.assertIn("Travel", body)
+        self.assertIn("approved", body)
+        self.assertIn(self.user.username, body)
+
+    def test_expense_import_flags_and_error_log(self):
+        dry_run_csv = (
+            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
+            f"1250.00,{timezone.localdate()},Software,Annual license,Vendor Ltd,SOFT-1,PROJECT-BETA,,{self.user.username},submitted\n"
+        )
+        dry_run_upload = SimpleUploadedFile("expenses.csv", dry_run_csv.encode("utf-8"), content_type="text/csv")
+        dry_run_res = self.client.post("/api/expenses/import/", {"file": dry_run_upload, "dry_run": "true"}, format="multipart")
+        self.assertEqual(dry_run_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(dry_run_res.data["dry_run"])
+        self.assertEqual(len(dry_run_res.data.get("flags", [])), 1)
+        self.assertEqual(dry_run_res.data["flags"][0]["status"], "review_required")
+
+        bad_csv = "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n12.00,2026-01-01,,Bad Row,Vendor Ltd,REF-1,,,unknown-user,submitted\n"
+        bad_upload = SimpleUploadedFile("expenses.csv", bad_csv.encode("utf-8"), content_type="text/csv")
+        bad_res = self.client.post("/api/expenses/import/", {"file": bad_upload, "rollback_on_error": "true"}, format="multipart")
+        self.assertEqual(bad_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("error_log_token", bad_res.data)
+        self.assertFalse(Expense.objects.filter(vendor="Vendor Ltd", description="Bad Row", is_deleted=False).exists())
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")

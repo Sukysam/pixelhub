@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Home, Users, Package, FileText, CreditCard, BarChart3, Settings } from "lucide-react";
+import { Home, Users, Package, FileText, CreditCard, BarChart3, Settings, Wallet } from "lucide-react";
 import { apiRequest, clearAuthToken, clearAuthUser, getAuthUser } from "@/lib/api";
 import { useI18n, type Lang } from "@/lib/i18n";
 
@@ -12,6 +12,7 @@ const navItems = [
   { name: "Inventory", href: "/inventory", icon: Package },
   { name: "Invoices", href: "/invoices", icon: FileText },
   { name: "Receipts", href: "/receipts", icon: CreditCard },
+  { name: "Expenses", href: "/expenses", icon: Wallet },
   { name: "Reports", href: "/reports", icon: BarChart3 },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
