@@ -52,6 +52,12 @@ from .models import (
     AdminUserInvitation,
     evaluate_invoice_payment_status,
 )
+from .import_export import (
+    import_customers_from_upload,
+    import_expenses_from_upload,
+    import_invoices_from_upload,
+    import_items_from_upload,
+)
 from .expense_security import decrypt_expense_text, decrypt_receipt_bytes, is_encrypted_expense_value
 from .views import _rate_limit
 from .documents import create_delivery, render_invoice, render_receipt
@@ -78,6 +84,10 @@ def _webp_logo_upload_file(name: str = "logo.webp") -> SimpleUploadedFile:
 def _pdf_upload_file(name: str = "receipt.pdf") -> SimpleUploadedFile:
     data = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
     return SimpleUploadedFile(name, data, content_type="application/pdf")
+
+
+def _csv_upload_file(name: str, body: str) -> SimpleUploadedFile:
+    return SimpleUploadedFile(name, body.encode("utf-8"), content_type="text/csv")
 
 
 class _MockJsonResponse:
@@ -1970,6 +1980,208 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertEqual(bad_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("error_log_token", bad_res.data)
         self.assertFalse(Expense.objects.filter(vendor="Vendor Ltd", description="Bad Row", is_deleted=False).exists())
+
+    def test_import_items_function_covers_validation_edges(self):
+        upload = _csv_upload_file(
+            "items.csv",
+            (
+                "type,sku,name,unit_price,tax_rate,stock_quantity,description,unit_of_measure,tax_category\n"
+                "invalid,SKU-INV,Bad Type,10.00,0,1,,,\n"
+                "product,SKU-NONAME,,10.00,0,1,,,\n"
+                "product,SKU-DUP,First Dup,10.00,0,1,,,\n"
+                "product,SKU-DUP,Second Dup,10.00,0,1,,,\n"
+                "product,,Repeat Name,10.00,0,1,,,\n"
+                "product,,Repeat Name,10.00,0,1,,,\n"
+                "product,SKU-NOPRICE,No Price,,0,1,,,\n"
+                "product,SKU-NEGPRICE,Negative Price,-1.00,0,1,,,\n"
+                "product,SKU-BADTAXTXT,Bad Tax Text,10.00,oops,1,,,\n"
+                "product,SKU-BADTAXRANGE,Bad Tax Range,10.00,101,1,,,\n"
+                "product,SKU-BADQTYTXT,Bad Qty Text,10.00,0,nope,,,\n"
+                "product,SKU-BADQTYNEG,Bad Qty Negative,10.00,0,-5,,,\n"
+                "service,SKU-SVC,Service Import,20.00,,9,Consulting,hour,reduced\n"
+            ),
+        )
+
+        status_code, payload = import_items_from_upload(upload, dry_run=True, rollback_on_error=False)
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["would_create"], 3)
+        messages = {(err["field"], err["message"]) for err in payload["errors"]}
+        self.assertIn(("type", "Invalid type"), messages)
+        self.assertIn(("name", "Name is required"), messages)
+        self.assertIn(("sku", "Duplicate sku in file"), messages)
+        self.assertIn(("name", "Duplicate name/type in file"), messages)
+        self.assertIn(("unit_price", "unit_price is required"), messages)
+        self.assertIn(("unit_price", "unit_price must be >= 0"), messages)
+        self.assertIn(("tax_rate", "Invalid tax_rate"), messages)
+        self.assertIn(("tax_rate", "tax_rate must be between 0 and 100"), messages)
+        self.assertIn(("stock_quantity", "stock_quantity must be an integer"), messages)
+        self.assertIn(("stock_quantity", "stock_quantity must be >= 0"), messages)
+        self.assertFalse(Item.objects.filter(sku="SKU-SVC", is_deleted=False).exists())
+
+    def test_import_invoices_function_covers_name_lookup_and_validation_edges(self):
+        Customer.objects.create(name="Lookup Buyer", email="lookup@example.com")
+        Item.objects.create(type="product", name="Widget A", sku="W-A", unit_price=Decimal("10.00"), tax_rate=Decimal("7.50"), stock_quantity=5)
+        success_upload = _csv_upload_file(
+            "invoices-success.csv",
+            (
+                "invoice_key,invoice_number,customer_email,customer_name,status,issue_date,due_date,item_sku,quantity,unit_price,tax_rate,description,unit_of_measure\n"
+                "OK-NAME,,lookup@example.com,,Draft,2026-05-01,,W-A,2,,,Email lookup line,pcs\n"
+            ),
+        )
+
+        success_status, success_payload = import_invoices_from_upload(
+            success_upload,
+            dry_run=True,
+            rollback_on_error=False,
+            deduct_inventory_for_invoice=lambda invoice: None,
+        )
+
+        self.assertEqual(success_status, 200)
+        self.assertTrue(success_payload["dry_run"])
+
+        upload = _csv_upload_file(
+            "invoices.csv",
+            (
+                "invoice_key,invoice_number,customer_email,customer_name,status,issue_date,due_date,item_sku,quantity,unit_price,tax_rate,description,unit_of_measure\n"
+                "ERR-MISSING-CUSTOMER,,,,Draft,2026-05-01,,W-A,1,,,Missing customer,pcs\n"
+                "ERR-MISSING-SKU,,lookup@example.com,,Draft,2026-05-01,,,1,,,Missing sku,pcs\n"
+                "ERR-BAD-STATUS,,lookup@example.com,,Unknown,2026-05-01,,W-A,1,,,Bad status,pcs\n"
+                "ERR-MIXED,,lookup@example.com,,Draft,2026-05-01,,W-A,1,,,First mixed,pcs\n"
+                "ERR-MIXED,,lookup@example.com,,Sent,2026-05-01,,W-A,1,,,Second mixed,pcs\n"
+                "ERR-CUSTOMER-NOT-FOUND,,ghost@example.com,,Draft,2026-05-01,,W-A,1,,,Missing customer record,pcs\n"
+                "ERR-BAD-DATE,,lookup@example.com,,Draft,not-a-date,bad-date,W-A,1,,,Bad dates,pcs\n"
+            ),
+        )
+
+        status_code, payload = import_invoices_from_upload(
+            upload,
+            dry_run=True,
+            rollback_on_error=False,
+            deduct_inventory_for_invoice=lambda invoice: None,
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["dry_run"])
+        messages = {(err["field"], err["message"]) for err in payload["errors"]}
+        self.assertIn(("customer_email", "customer_email or customer_name is required"), messages)
+        self.assertIn(("item_sku", "item_sku is required"), messages)
+        self.assertIn(("status", "Invalid status"), messages)
+        self.assertIn(("status", "Mixed statuses within the same invoice group"), messages)
+        self.assertIn(("customer", "Customer not found"), messages)
+        self.assertIn(("issue_date", "Invalid date. Use YYYY-MM-DD"), messages)
+        self.assertIn(("due_date", "Invalid date. Use YYYY-MM-DD"), messages)
+
+        line_error_upload = _csv_upload_file(
+            "invoices-line-errors.csv",
+            (
+                "invoice_key,invoice_number,customer_email,customer_name,status,issue_date,due_date,item_sku,quantity,unit_price,tax_rate,description,unit_of_measure\n"
+                "ERR-MISSING-QTY,,lookup@example.com,,Draft,2026-05-01,,W-A,,,,Missing qty,pcs\n"
+                "ERR-BAD-QTY,,lookup@example.com,,Draft,2026-05-01,,W-A,nope,,,Bad qty,pcs\n"
+                "ERR-ZERO-QTY,,lookup@example.com,,Draft,2026-05-01,,W-A,0,,,Zero qty,pcs\n"
+                "ERR-BAD-PRICE,,lookup@example.com,,Draft,2026-05-01,,W-A,1,nope,,Bad price,pcs\n"
+                "ERR-NEG-PRICE,,lookup@example.com,,Draft,2026-05-01,,W-A,1,-2.00,,Negative price,pcs\n"
+                "ERR-BAD-TAX,,lookup@example.com,,Draft,2026-05-01,,W-A,1,,nope,Bad tax,pcs\n"
+                "ERR-RANGE-TAX,,lookup@example.com,,Draft,2026-05-01,,W-A,1,,120,Bad tax range,pcs\n"
+            ),
+        )
+
+        line_status, line_payload = import_invoices_from_upload(
+            line_error_upload,
+            dry_run=True,
+            rollback_on_error=False,
+            deduct_inventory_for_invoice=lambda invoice: None,
+        )
+
+        self.assertEqual(line_status, 200)
+        line_messages = {(err["field"], err["message"]) for err in line_payload["errors"]}
+        self.assertIn(("quantity", "quantity is required"), line_messages)
+        self.assertIn(("quantity", "quantity must be an integer"), line_messages)
+        self.assertIn(("quantity", "quantity must be >= 1"), line_messages)
+        self.assertIn(("unit_price", "Invalid unit_price"), line_messages)
+        self.assertIn(("unit_price", "unit_price must be >= 0"), line_messages)
+        self.assertIn(("tax_rate", "Invalid tax_rate"), line_messages)
+        self.assertIn(("tax_rate", "tax_rate must be between 0 and 100"), line_messages)
+
+    def test_import_customers_function_covers_duplicate_name_email_and_dry_run(self):
+        upload = _csv_upload_file(
+            "customers.csv",
+            (
+                "name,email,phone,billing_address\n"
+                ",missing@example.com,+2348010000000,No name\n"
+                "Same Name,first@example.com,+2348010000001,Addr 1\n"
+                "Same Name,second@example.com,+2348010000002,Addr 2\n"
+                "Unique Person,dup@example.com,+2348010000003,Addr 3\n"
+                "Another Person,dup@example.com,+2348010000004,Addr 4\n"
+            ),
+        )
+
+        status_code, payload = import_customers_from_upload(upload, dry_run=True, rollback_on_error=False)
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["would_create"], 2)
+        messages = {(err["field"], err["message"]) for err in payload["errors"]}
+        self.assertIn(("name", "name is required"), messages)
+        self.assertIn(("name", "Duplicate name in file"), messages)
+        self.assertIn(("email", "Duplicate email in file"), messages)
+
+    def test_import_expenses_function_covers_validation_and_success_creation(self):
+        missing_amount = _csv_upload_file(
+            "expenses.csv",
+            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
+            ",,,Missing everything,Vendor,REF-0,,,,\n",
+        )
+        status_code, payload = import_expenses_from_upload(
+            missing_amount,
+            dry_run=True,
+            rollback_on_error=False,
+            actor=self.user,
+        )
+        self.assertEqual(status_code, 200)
+        self.assertIn(("amount", "amount is required"), {(err["field"], err["message"]) for err in payload["errors"]})
+
+        upload = _csv_upload_file(
+            "expenses.csv",
+            (
+                "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
+                "oops,2026-05-01,Office,Bad amount,Vendor,REF-1,PRJ-1,,,submitted\n"
+                "-5.00,2026-05-01,Office,Negative amount,Vendor,REF-2,PRJ-1,,,submitted\n"
+                "10.00,not-a-date,Office,Bad date,Vendor,REF-3,PRJ-1,,,submitted\n"
+                "15.00,2026-05-01,Office,Missing cost refs,Vendor,REF-4,,,,submitted\n"
+                "20.00,2026-05-01,Office,Bad status,Vendor,REF-5,PRJ-1,,,not-valid\n"
+                "25.00,2026-05-01,Office,Unknown assignee,Vendor,REF-6,PRJ-1,,ghost-user,submitted\n"
+                f"1500.00,{timezone.localdate() + timedelta(days=2)},Travel,Future approved,Vendor,REF-7,PRJ-2,,{self.user.username},approved\n"
+                f"35.00,{timezone.localdate()},Meals,Created expense,Vendor,REF-8,PRJ-3,,{self.user.username},approved\n"
+            ),
+        )
+
+        status_code, payload = import_expenses_from_upload(
+            upload,
+            dry_run=False,
+            rollback_on_error=False,
+            actor=self.user,
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["imported"], 3)
+        messages = {(err["field"], err["message"]) for err in payload["errors"]}
+        self.assertIn(("amount", "Invalid amount"), messages)
+        self.assertIn(("amount", "amount must be > 0"), messages)
+        self.assertIn(("expense_date", "Invalid date. Use YYYY-MM-DD"), messages)
+        self.assertIn(("project_code", "project_code or cost_center is required"), messages)
+        self.assertIn(("approval_status", "Invalid approval_status"), messages)
+        self.assertIn(("assigned_to", "Assigned user not found"), messages)
+        self.assertTrue(any(flag["status"] == Expense.POLICY_STATUS_REVIEW_REQUIRED for flag in payload["flags"]))
+
+        created = Expense.objects.filter(merchant_reference__isnull=False, is_deleted=False).order_by("id")
+        self.assertEqual(created.count(), 3)
+        self.assertTrue(all(exp.created_by == self.user for exp in created))
+        approved = created.filter(approval_status=Expense.APPROVAL_STATUS_APPROVED).first()
+        self.assertIsNotNone(approved)
+        self.assertEqual(approved.approved_by, self.user)
+        self.assertIsNotNone(approved.approved_at)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
