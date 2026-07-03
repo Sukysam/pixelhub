@@ -7,6 +7,8 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 
+from .expense_security import encrypt_expense_text
+
 
 class Role(models.Model):
     name = models.CharField(max_length=50, unique=True)
@@ -306,10 +308,12 @@ class Expense(SoftDeleteModel):
     category = models.CharField(max_length=100, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     vendor = models.CharField(max_length=255, blank=True, null=True)
-    merchant_reference = models.CharField(max_length=120, blank=True, null=True)
+    merchant_reference = models.TextField(blank=True, null=True)
     project_code = models.CharField(max_length=120, blank=True, null=True)
     cost_center = models.CharField(max_length=120, blank=True, null=True)
     receipt_file = models.FileField(upload_to="uploads/expenses/receipts/", blank=True, null=True)
+    receipt_original_name = models.CharField(max_length=255, blank=True, null=True)
+    receipt_content_type = models.CharField(max_length=120, blank=True, null=True)
     approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default=APPROVAL_STATUS_DRAFT)
     policy_status = models.CharField(max_length=20, choices=POLICY_STATUS_CHOICES, default=POLICY_STATUS_COMPLIANT)
     policy_notes = models.TextField(blank=True, null=True)
@@ -351,6 +355,12 @@ class Expense(SoftDeleteModel):
 
     def __str__(self):
         return f"Expense {self.amount} on {self.expense_date}"
+
+    def save(self, *args, **kwargs):
+        for field_name in ("description", "merchant_reference", "policy_notes"):
+            value = getattr(self, field_name, None)
+            setattr(self, field_name, encrypt_expense_text(value))
+        super().save(*args, **kwargs)
 
 
 class InvoiceNumberSequence(models.Model):

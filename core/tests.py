@@ -52,6 +52,7 @@ from .models import (
     AdminUserInvitation,
     evaluate_invoice_payment_status,
 )
+from .expense_security import decrypt_expense_text, decrypt_receipt_bytes, is_encrypted_expense_value
 from .views import _rate_limit
 from .documents import create_delivery, render_invoice, render_receipt
 
@@ -1853,46 +1854,103 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertTrue(Customer.objects.filter(email="imported@example.com", is_deleted=False).exists())
 
     def test_expense_crud_approval_filters_and_export(self):
-        create_res = self.client.post(
-            "/api/expenses/",
-            {
-                "amount": "250.00",
-                "expense_date": str(timezone.localdate()),
-                "category": "Travel",
-                "description": "Airport taxi",
-                "vendor": "Ride Co",
-                "merchant_reference": "TRAVEL-1",
-                "project_code": "PROJECT-ALPHA",
-                "approval_status": "submitted",
-                "receipt_file": _pdf_upload_file(),
-            },
-            format="multipart",
-        )
-        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
-        expense_id = create_res.data["id"]
-        self.assertEqual(create_res.data["created_by"], self.user.id)
-        self.assertEqual(create_res.data["assigned_to"], self.user.id)
-        self.assertTrue(str(create_res.data.get("receipt_url") or "").endswith(".pdf"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                create_res = self.client.post(
+                    "/api/expenses/",
+                    {
+                        "amount": "250.00",
+                        "expense_date": str(timezone.localdate()),
+                        "category": "Travel",
+                        "description": "Airport taxi",
+                        "vendor": "Ride Co",
+                        "merchant_reference": "TRAVEL-1",
+                        "project_code": "PROJECT-ALPHA",
+                        "approval_status": "submitted",
+                        "receipt_file": _pdf_upload_file(),
+                    },
+                    format="multipart",
+                )
+                self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+                expense_id = create_res.data["id"]
+                self.assertEqual(create_res.data["created_by"], self.user.id)
+                self.assertEqual(create_res.data["assigned_to"], self.user.id)
+                self.assertTrue(str(create_res.data.get("receipt_url") or "").endswith(f"/api/expenses/{expense_id}/receipt/"))
 
-        approve_res = self.client.post(
-            f"/api/expenses/{expense_id}/approve/",
-            {"approval_status": "approved", "policy_notes": "Reviewed and accepted"},
-            format="json",
-        )
-        self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
-        self.assertEqual(approve_res.data["approval_status"], "approved")
-        self.assertEqual(approve_res.data["approved_by"], self.user.id)
+                approve_res = self.client.post(
+                    f"/api/expenses/{expense_id}/approve/",
+                    {"approval_status": "approved", "policy_notes": "Reviewed and accepted"},
+                    format="json",
+                )
+                self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
+                self.assertEqual(approve_res.data["approval_status"], "approved")
+                self.assertEqual(approve_res.data["approved_by"], self.user.id)
 
-        filtered = self.client.get("/api/expenses/?approval_status=approved&category=Travel")
-        self.assertEqual(filtered.status_code, status.HTTP_200_OK)
-        self.assertEqual(filtered.data["count"], 1)
+                filtered = self.client.get("/api/expenses/?approval_status=approved&category=Travel")
+                self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+                self.assertEqual(filtered.data["count"], 1)
 
-        export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=expense_date,amount,category,approval_status,assigned_to")
-        self.assertEqual(export_res.status_code, status.HTTP_200_OK)
-        body = b"".join(export_res.streaming_content).decode("utf-8")
-        self.assertIn("Travel", body)
-        self.assertIn("approved", body)
-        self.assertIn(self.user.username, body)
+                export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=expense_date,amount,category,approval_status,assigned_to")
+                self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+                body = b"".join(export_res.streaming_content).decode("utf-8")
+                self.assertIn("Travel", body)
+                self.assertIn("approved", body)
+                self.assertIn(self.user.username, body)
+
+    def test_expense_storage_is_encrypted_at_rest_and_receipt_download_is_decrypted(self):
+        original_receipt = b"%PDF-1.4\nEncrypted expense receipt payload\n%%EOF"
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
+                upload = SimpleUploadedFile("secure-receipt.pdf", original_receipt, content_type="application/pdf")
+                create_res = self.client.post(
+                    "/api/expenses/",
+                    {
+                        "amount": "1500.00",
+                        "expense_date": str(timezone.localdate()),
+                        "category": "Compliance",
+                        "description": "Background verification",
+                        "vendor": "Secure Vendor",
+                        "merchant_reference": "SEC-42",
+                        "project_code": "PROJECT-GAMMA",
+                        "receipt_file": upload,
+                    },
+                    format="multipart",
+                )
+                self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+                expense = Expense.objects.get(pk=create_res.data["id"])
+                self.assertTrue(is_encrypted_expense_value(expense.description))
+                self.assertTrue(is_encrypted_expense_value(expense.merchant_reference))
+                self.assertEqual(decrypt_expense_text(expense.description), "Background verification")
+                self.assertEqual(decrypt_expense_text(expense.merchant_reference), "SEC-42")
+                self.assertEqual(expense.receipt_original_name, "secure-receipt.pdf")
+                self.assertEqual(expense.receipt_content_type, "application/pdf")
+                self.assertTrue(str(expense.receipt_file.name).endswith(".enc"))
+
+                with expense.receipt_file.open("rb") as stored_file:
+                    encrypted_bytes = stored_file.read()
+                self.assertNotEqual(encrypted_bytes, original_receipt)
+                self.assertEqual(decrypt_receipt_bytes(encrypted_bytes), original_receipt)
+
+                detail_res = self.client.get(f"/api/expenses/?q=verification")
+                self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+                self.assertEqual(detail_res.data["count"], 1)
+                self.assertEqual(detail_res.data["results"][0]["description"], "Background verification")
+                self.assertEqual(detail_res.data["results"][0]["merchant_reference"], "SEC-42")
+
+                export_res = self.client.get(
+                    "/api/expenses/export/?file_format=csv&fields=description,merchant_reference,policy_notes,receipt_url"
+                )
+                self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+                export_body = b"".join(export_res.streaming_content).decode("utf-8")
+                self.assertIn("Background verification", export_body)
+                self.assertIn("SEC-42", export_body)
+                self.assertIn(f"http://testserver/api/expenses/{expense.id}/receipt/", export_body)
+
+                receipt_res = self.client.get(f"/api/expenses/{expense.id}/receipt/")
+                self.assertEqual(receipt_res.status_code, status.HTTP_200_OK)
+                self.assertEqual(receipt_res.content, original_receipt)
+                self.assertEqual(receipt_res["Content-Type"], "application/pdf")
+                self.assertIn("secure-receipt.pdf", receipt_res["Content-Disposition"])
 
     def test_expense_import_flags_and_error_log(self):
         dry_run_csv = (

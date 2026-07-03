@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.utils import timezone
 from django.db.models import Sum
 from rest_framework import serializers
+from .expense_security import decrypt_expense_text, encrypt_uploaded_receipt
 from .models import (
     Customer,
     Item,
@@ -539,6 +540,8 @@ class ExpenseSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
     approved_by_name = serializers.CharField(source="approved_by.username", read_only=True)
     receipt_url = serializers.SerializerMethodField()
+    receipt_filename = serializers.SerializerMethodField()
+    receipt_file = serializers.FileField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = Expense
@@ -553,6 +556,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
             "project_code",
             "cost_center",
             "receipt_file",
+            "receipt_filename",
             "receipt_url",
             "approval_status",
             "policy_status",
@@ -572,7 +576,6 @@ class ExpenseSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "policy_status",
-            "policy_notes",
             "created_by",
             "created_by_name",
             "approved_by",
@@ -593,14 +596,19 @@ class ExpenseSerializer(serializers.ModelSerializer):
         file_field = getattr(obj, "receipt_file", None)
         if not file_field:
             return None
-        try:
-            url = file_field.url
-        except ValueError:
-            return None
         request = self.context.get("request")
         if request is not None:
-            return request.build_absolute_uri(url)
-        return url
+            return request.build_absolute_uri(f"/api/expenses/{obj.id}/receipt/")
+        return f"/api/expenses/{obj.id}/receipt/"
+
+    def get_receipt_filename(self, obj):
+        return getattr(obj, "receipt_original_name", None)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for field_name in ("description", "merchant_reference", "policy_notes"):
+            data[field_name] = decrypt_expense_text(getattr(instance, field_name, None))
+        return data
 
     def validate(self, attrs):
         expense_date = attrs.get("expense_date") or getattr(self.instance, "expense_date", None) or timezone.localdate()
@@ -643,12 +651,24 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context.get("request")
+        upload = validated_data.pop("receipt_file", None)
+        if upload is not None:
+            encrypted_file, original_name, content_type = encrypt_uploaded_receipt(upload)
+            validated_data["receipt_file"] = encrypted_file
+            validated_data["receipt_original_name"] = original_name
+            validated_data["receipt_content_type"] = content_type
         if request is not None and getattr(request.user, "is_authenticated", False):
             validated_data.setdefault("created_by", request.user)
             validated_data.setdefault("assigned_to", request.user)
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
+        upload = validated_data.pop("receipt_file", None)
+        if upload is not None:
+            encrypted_file, original_name, content_type = encrypt_uploaded_receipt(upload)
+            validated_data["receipt_file"] = encrypted_file
+            validated_data["receipt_original_name"] = original_name
+            validated_data["receipt_content_type"] = content_type
         approval_status = validated_data.get("approval_status")
         request = self.context.get("request")
         if approval_status in (Expense.APPROVAL_STATUS_APPROVED, Expense.APPROVAL_STATUS_REJECTED):

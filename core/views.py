@@ -85,6 +85,7 @@ from .logo_uploads import (
     create_logo_asset,
     normalize_logo_scope,
 )
+from .expense_security import decrypt_expense_text, decrypt_receipt_bytes
 from .serializers import (
     CustomerSerializer,
     CustomerDetailSerializer,
@@ -3609,15 +3610,24 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
 
         q = str(p.get("q") or "").strip()
         if q:
-            qs = qs.filter(
-                Q(category__icontains=q)
-                | Q(description__icontains=q)
-                | Q(vendor__icontains=q)
-                | Q(project_code__icontains=q)
-                | Q(cost_center__icontains=q)
-                | Q(merchant_reference__icontains=q)
-                | Q(assigned_to__username__icontains=q)
+            db_match_ids = set(
+                qs.filter(
+                    Q(category__icontains=q)
+                    | Q(vendor__icontains=q)
+                    | Q(project_code__icontains=q)
+                    | Q(cost_center__icontains=q)
+                    | Q(assigned_to__username__icontains=q)
+                ).values_list("id", flat=True)
             )
+            lowered_q = q.lower()
+            for expense_id, description_value, merchant_reference_value in qs.values_list(
+                "id", "description", "merchant_reference"
+            ).iterator(chunk_size=2000):
+                description = decrypt_expense_text(description_value) or ""
+                merchant_reference = decrypt_expense_text(merchant_reference_value) or ""
+                if lowered_q in description.lower() or lowered_q in merchant_reference.lower():
+                    db_match_ids.add(expense_id)
+            qs = qs.filter(pk__in=db_match_ids) if db_match_ids else qs.none()
 
         category = str(p.get("category") or "").strip()
         if category:
@@ -3736,6 +3746,32 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             )
         return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=["get"], url_path="receipt")
+    def receipt(self, request, pk=None):
+        self._require_model_perm("view")
+        expense = self.get_object()
+        receipt_file = getattr(expense, "receipt_file", None)
+        if not receipt_file:
+            raise NotFound("Receipt file not found")
+        try:
+            with receipt_file.open("rb") as stored_file:
+                payload = decrypt_receipt_bytes(stored_file.read())
+        except FileNotFoundError:
+            raise NotFound("Receipt file not found")
+        except Exception as exc:
+            logger.exception("expense.receipt_decrypt_failed expense_id=%s error=%s", expense.id, exc)
+            raise APIException("Receipt file is unavailable")
+
+        filename = (
+            getattr(expense, "receipt_original_name", None)
+            or os.path.basename(getattr(receipt_file, "name", "")).removesuffix(".enc")
+            or f"expense-receipt-{expense.id}.bin"
+        )
+        response = HttpResponse(payload, content_type=getattr(expense, "receipt_content_type", None) or "application/octet-stream")
+        response["Content-Disposition"] = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
+        response["Cache-Control"] = "no-store"
+        return response
+
     @action(detail=False, methods=["get"], url_path="export")
     def export(self, request):
         self._require_model_perm("view")
@@ -3810,7 +3846,9 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             if field == "approved_by":
                 return str(getattr(getattr(expense, "approved_by", None), "username", "") or "")
             if field == "receipt_url":
-                return request.build_absolute_uri(expense.receipt_file.url) if getattr(expense, "receipt_file", None) else ""
+                return request.build_absolute_uri(f"/api/expenses/{expense.id}/receipt/") if getattr(expense, "receipt_file", None) else ""
+            if field in ("description", "merchant_reference", "policy_notes"):
+                return str(decrypt_expense_text(getattr(expense, field, None)) or "")
             if field in ("expense_date",):
                 return str(getattr(expense, field, "") or "")
             if field in ("amount",):
