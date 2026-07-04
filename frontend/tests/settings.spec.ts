@@ -71,6 +71,8 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const roleName = `ops_ui_${Date.now()}`;
   await page.getByRole("button", { name: "New Role" }).click();
   const roleDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create Role" }) });
+  await expect(roleDialog).toBeVisible({ timeout: 30_000 });
+  await expect(roleDialog.getByLabel("Role Name")).toBeVisible({ timeout: 30_000 });
   await roleDialog.getByLabel("Role Name").fill(roleName);
   await roleDialog.getByLabel("Description").fill("Operations role created from settings UI");
   await roleDialog.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
@@ -780,6 +782,8 @@ test("invoice and receipt share and save actions generate links and downloads", 
     (window as any).__openCalls = [];
     (window as any).__copiedText = "";
     (window as any).__downloadObjectUrlCalls = 0;
+    (window as any).__savedDocumentStatus = null;
+    (window as any).__savedDocumentRequestCount = 0;
     (window as any).open = (url: any) => {
       (window as any).__openCalls.push(String(url));
       return {} as any;
@@ -795,6 +799,17 @@ test("invoice and receipt share and save actions generate links and downloads", 
       (window as any).__downloadObjectUrlCalls += 1;
       return orig(...(args as [any]));
     }) as any;
+    const origFetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const res = await origFetch(...args);
+      const input = args[0];
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+      if (url.includes("/api/documents/saved/")) {
+        (window as any).__savedDocumentStatus = res.status;
+        (window as any).__savedDocumentRequestCount += 1;
+      }
+      return res;
+    };
   });
 
   const suffix = `${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
@@ -834,9 +849,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await page.goto("/invoices");
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
   await invRow.getByRole("button", { name: "View Invoice" }).click();
-  await expect(page.getByRole("heading", { name: "Invoice Summary" })).toBeVisible();
+  const invoiceSummaryDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Invoice Summary" }) });
+  await expect(invoiceSummaryDialog).toBeVisible();
 
-  await page.getByRole("button", { name: "Share" }).click();
+  await invoiceSummaryDialog.getByRole("button", { name: "Share" }).click();
   const invoiceShareDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Share Invoice" }) });
   await expect(invoiceShareDialog).toBeVisible();
   const invoiceShareLink = invoiceShareDialog.getByLabel("Secure Link");
@@ -846,7 +862,15 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await page.keyboard.press("Escape");
   await expect(invoiceShareDialog).toBeHidden();
 
-  await page.getByRole("button", { name: "Save PDF" }).click();
+  await page.goto("/invoices");
+  const invRowAgain = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
+  await invRowAgain.getByRole("button", { name: "View Invoice" }).click();
+  await expect(invoiceSummaryDialog).toBeVisible();
+  await invoiceSummaryDialog.getByRole("button", { name: "Save PDF" }).click();
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0 || (window as any).__savedDocumentRequestCount > 0);
+  const invoiceSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
+  expect(invoiceSaveStatus, "invoice save request should succeed").toBeGreaterThanOrEqual(200);
+  expect(invoiceSaveStatus, "invoice save request should succeed").toBeLessThan(300);
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
 
   await page.goto("/receipts");
@@ -864,6 +888,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await expect(receiptShareDialog).toBeHidden();
 
   await receiptRow.getByRole("button", { name: "Save PDF" }).click();
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1 || (window as any).__savedDocumentRequestCount > 1);
+  const receiptSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
+  expect(receiptSaveStatus, "receipt save request should succeed").toBeGreaterThanOrEqual(200);
+  expect(receiptSaveStatus, "receipt save request should succeed").toBeLessThan(300);
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
 });
 
