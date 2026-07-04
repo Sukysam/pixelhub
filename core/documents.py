@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import re
 import secrets
 from dataclasses import dataclass
@@ -12,13 +11,22 @@ from typing import Any, Literal, cast
 from urllib.parse import urljoin
 
 from django.conf import settings
-from django.core.cache import cache
 from django.core.mail import EmailMessage
 from django.template.loader import get_template
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from .finance_services import invoice_discount_context
 from .models import DocumentDelivery, Invoice, Receipt
+from .rendering_service import (
+    currency_for_code,
+    detect_country,
+    effective_company_identity_for_user,
+    effective_region_settings_for_user,
+    effective_templates_for_user,
+    format_date_for_pattern,
+    format_money,
+)
 
 DocumentFormat = Literal["pdf", "html", "text"]
 DocumentType = Literal["invoice", "receipt"]
@@ -98,9 +106,7 @@ def _absolute_media_url(request, value: Any) -> str | None:
 
 
 def _resolved_document_templates(request, user) -> dict[str, dict[str, Any]]:
-    from .views import _effective_templates_for_user
-
-    templates = _effective_templates_for_user(user)
+    templates = effective_templates_for_user(user)
     global_appearance = dict(templates.get("global_appearance") or {})
     invoice_template = dict(templates.get("invoice_template") or {})
     receipt_template = dict(templates.get("receipt_template") or {})
@@ -161,19 +167,11 @@ def _receipt_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, 
 
 
 def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDocument:
-    from .views import (
-        _currency_for_code,
-        _effective_company_identity_for_user,
-        _effective_region_settings_for_user,
-        _format_date_for_pattern,
-        _invoice_discount_context,
-        _format_money,
-    )
     templates = _resolved_document_templates(request, request.user)
     invoice_render = _invoice_render_settings(templates)
-    identity = _effective_company_identity_for_user(request.user)
-    region = _effective_region_settings_for_user(request, request.user)
-    currency = _currency_for_code(region["currency_code"])
+    identity = effective_company_identity_for_user(request.user)
+    region = effective_region_settings_for_user(request, request.user, detect_country=detect_country)
+    currency = currency_for_code(region["currency_code"])
     symbol_position = (templates.get("invoice_template") or {}).get("currency_symbol_position") or "prefix"
 
     invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
@@ -185,25 +183,31 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
                 "description": li.description or li.item.description,
                 "unit_of_measure": li.unit_of_measure,
                 "quantity": li.quantity,
-                "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
-                "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
-                "line_tax": _format_money(Decimal(li.line_tax), currency, region["number_format"], symbol_position),
-                "line_subtotal": _format_money(Decimal(li.line_subtotal), currency, region["number_format"], symbol_position),
+                "unit_price": format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
+                "line_total": format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
+                "line_tax": format_money(Decimal(li.line_tax), currency, region["number_format"], symbol_position),
+                "line_subtotal": format_money(Decimal(li.line_subtotal), currency, region["number_format"], symbol_position),
             }
         )
 
     template = get_template("core/invoice_pdf.html")
-    discount_context = _invoice_discount_context(invoice, currency, region["number_format"], symbol_position)
+    discount_context = invoice_discount_context(
+        invoice,
+        currency,
+        region["number_format"],
+        symbol_position,
+        format_money=format_money,
+    )
     html = template.render(
         {
             "invoice": invoice,
             "invoice_items": rendered_items,
-            "issue_date_fmt": _format_date_for_pattern(invoice.issue_date, region["date_format"]),
-            "due_date_fmt": _format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
-            "subtotal_fmt": _format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
+            "issue_date_fmt": format_date_for_pattern(invoice.issue_date, region["date_format"]),
+            "due_date_fmt": format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
+            "subtotal_fmt": format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
             **discount_context,
-            "tax_total_fmt": _format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
-            "total_amount_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
+            "tax_total_fmt": format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),
+            "total_amount_fmt": format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
             "currency_code": currency.code if currency else region["currency_code"],
             "invoice_render": invoice_render,
             **templates,
@@ -273,18 +277,11 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
 
 
 def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDocument:
-    from .views import (
-        _currency_for_code,
-        _effective_company_identity_for_user,
-        _effective_region_settings_for_user,
-        _format_date_for_pattern,
-        _format_money,
-    )
     templates = _resolved_document_templates(request, request.user)
     receipt_render = _receipt_render_settings(templates)
-    identity = _effective_company_identity_for_user(request.user)
-    region = _effective_region_settings_for_user(request, request.user)
-    currency = _currency_for_code(region["currency_code"])
+    identity = effective_company_identity_for_user(request.user)
+    region = effective_region_settings_for_user(request, request.user, detect_country=detect_country)
+    currency = currency_for_code(region["currency_code"])
     symbol_position = (templates.get("receipt_template") or {}).get("currency_symbol_position") or "prefix"
 
     rt = templates.get("receipt_template") or {}
@@ -303,8 +300,8 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
                 "name": li.item.name,
                 "description": li.description or li.item.description,
                 "quantity": li.quantity,
-                "unit_price": _format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
-                "line_total": _format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
+                "unit_price": format_money(Decimal(li.unit_price), currency, region["number_format"], symbol_position),
+                "line_total": format_money(Decimal(li.line_total), currency, region["number_format"], symbol_position),
             }
         )
 
@@ -313,9 +310,9 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
         {
             "receipt": receipt,
             "receipt_number": receipt_number,
-            "payment_date_fmt": _format_date_for_pattern(receipt.payment_date, region["date_format"]),
-            "amount_paid_fmt": _format_money(Decimal(receipt.amount_paid), currency, region["number_format"], symbol_position),
-            "invoice_total_fmt": _format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
+            "payment_date_fmt": format_date_for_pattern(receipt.payment_date, region["date_format"]),
+            "amount_paid_fmt": format_money(Decimal(receipt.amount_paid), currency, region["number_format"], symbol_position),
+            "invoice_total_fmt": format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
             "invoice_items": rendered_items,
             "receipt_render": receipt_render,
             **templates,

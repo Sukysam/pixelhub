@@ -60,6 +60,19 @@ from .import_export import (
     import_items_from_upload,
 )
 from .expense_security import decrypt_expense_text, decrypt_receipt_bytes, is_encrypted_expense_value
+from .finance_services import (
+    outstanding_invoice_amount,
+    resolve_invoice_discount,
+    sync_invoice_status_with_payments,
+    invoice_discount_context,
+)
+from .rendering_service import (
+    detect_country,
+    effective_company_identity_for_user,
+    effective_region_settings_for_user,
+    effective_templates_for_user,
+    format_money,
+)
 from .views import _rate_limit
 from .documents import create_delivery, render_invoice, render_receipt
 
@@ -625,6 +638,87 @@ class PersistenceTests(APITestCase):
             evaluate_invoice_payment_status("abc", "0.00")
         with self.assertRaises(ValueError):
             evaluate_invoice_payment_status("10.00", "NaN")
+
+    def test_resolve_invoice_discount_and_context_service(self):
+        usd, _ = Currency.objects.get_or_create(
+            code="USD",
+            defaults={"name": "US Dollar", "symbol": "$", "decimal_places": 2},
+        )
+        discount_type, discount_value, discount_amount = resolve_invoice_discount(
+            Decimal("200.00"),
+            Invoice.DISCOUNT_TYPE_PERCENTAGE,
+            "12.5",
+        )
+        self.assertEqual(discount_type, Invoice.DISCOUNT_TYPE_PERCENTAGE)
+        self.assertEqual(discount_value, Decimal("12.50"))
+        self.assertEqual(discount_amount, Decimal("25.00"))
+
+        invoice = Invoice(
+            invoice_number="INV-DISCOUNT-SVC",
+            customer=Customer(name="Svc Customer"),
+            subtotal=Decimal("200.00"),
+            discount_type=discount_type,
+            discount_value=discount_value,
+            discount_amount=discount_amount,
+            tax_total=Decimal("0.00"),
+            total_amount=Decimal("175.00"),
+        )
+        context = invoice_discount_context(
+            invoice,
+            usd,
+            "1,234.56",
+            "prefix",
+            format_money=format_money,
+        )
+        self.assertTrue(context["has_discount"])
+        self.assertEqual(context["discount_value_label"], "12.5%")
+        self.assertEqual(context["discount_amount_fmt"], "$25.00")
+
+    def test_payment_sync_service_updates_invoice_status(self):
+        customer = Customer.objects.create(name="Svc Status Customer")
+        invoice = Invoice.objects.create(
+            invoice_number="INV-SYNC-1",
+            customer=customer,
+            status="Paid",
+            subtotal=Decimal("10.00"),
+            total_amount=Decimal("10.00"),
+        )
+        self.assertEqual(outstanding_invoice_amount("10.00", "12.00"), Decimal("0.00"))
+        self.assertEqual(sync_invoice_status_with_payments(invoice, Decimal("1.00")), "Sent")
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "Sent")
+        self.assertEqual(sync_invoice_status_with_payments(invoice, Decimal("10.00")), "Paid")
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, "Paid")
+
+    def test_rendering_services_resolve_identity_templates_and_region(self):
+        profile, _ = UserProfile.objects.get_or_create(user=self.user)
+        profile.company_legal_name = "Profile Company"
+        profile.save(update_fields=["company_legal_name", "updated_at"])
+        self.assertEqual(profile.company_legal_name, "Profile Company")
+        identity = effective_company_identity_for_user(self.user)
+        self.assertEqual(identity["company_name"], "Profile Company")
+
+        templates = effective_templates_for_user(self.user)
+        self.assertEqual(templates["global_appearance"]["company_name"], "Profile Company")
+        self.assertEqual(templates["invoice_template"]["layout"], "classic")
+
+        request_stub = type(
+            "Req",
+            (),
+            {
+                "user": self.user,
+                "query_params": {},
+                "headers": {"accept-language": "de-DE,de;q=0.9"},
+            },
+        )()
+        self.assertEqual(detect_country(request_stub), "DE")
+
+        region = effective_region_settings_for_user(request_stub, self.user, detect_country=detect_country)
+        self.assertEqual(region["country"], "DE")
+        self.assertEqual(region["currency_code"], "NGN")
+        self.assertEqual(region["date_format"], "YYYY-MM-DD")
+        self.assertEqual(region["number_format"], "1,234.56")
 
     def test_item_delete_blocked_when_referenced_by_active_invoice(self):
         customer = self.client.post(reverse("customer-list"), {"name": "B"}, format="json").data
