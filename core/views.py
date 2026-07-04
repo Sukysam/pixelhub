@@ -3828,9 +3828,9 @@ class CountryDefaultsApi(APIView):
 
     def get(self, request):
         country = (request.query_params.get("country") or "").upper()
-        if not country or country not in COUNTRY_CONFIG:
+        cfg = _country_config(country)
+        if not country or cfg is None:
             raise ValidationError({"country": "Unsupported country"})
-        cfg = COUNTRY_CONFIG[country]
         return Response(
             {
                 "country": country,
