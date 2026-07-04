@@ -69,8 +69,10 @@ test("admin can manage roles and users from settings", async ({ page, request })
   await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible();
 
   const roleName = `ops_ui_${Date.now()}`;
-  await page.getByRole("button", { name: "New Role" }).click();
-  const roleDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create Role" }) });
+  const newRoleButton = page.getByRole("button", { name: "New Role" });
+  await expect(newRoleButton).toBeVisible({ timeout: 30_000 });
+  await newRoleButton.evaluate((node: HTMLButtonElement) => node.click());
+  const roleDialog = page.getByRole("dialog", { name: "Create Role" });
   await expect(roleDialog).toBeVisible({ timeout: 30_000 });
   await expect(roleDialog.getByLabel("Role Name")).toBeVisible({ timeout: 30_000 });
   await roleDialog.getByLabel("Role Name").fill(roleName);

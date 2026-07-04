@@ -26,7 +26,15 @@ export function resolveMediaUrl(value: string): string {
 
 export async function downloadWithAuth(path: string, fallbackFilename = "download"): Promise<string> {
   const token = getAuthToken();
-  const url = `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
+  let url = path;
+  if (!/^https?:\/\//i.test(path)) {
+    if (path.startsWith("/api/")) {
+      const origin = apiOrigin();
+      url = origin ? `${origin}${path}` : path;
+    } else {
+      url = `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
+    }
+  }
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Token ${token}`;
   const res = await fetch(url, { headers, credentials: "include", cache: "no-store" });
