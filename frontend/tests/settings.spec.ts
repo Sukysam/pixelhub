@@ -843,6 +843,8 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await expect(invoiceShareLink).toHaveValue(/\/api\/documents\/deliveries\/\d+\/download\/\?token=/);
   await invoiceShareDialog.getByRole("button", { name: "Copy Link" }).click();
   await expect.poll(async () => await page.evaluate(() => (window as any).__copiedText as string)).toContain("/api/documents/deliveries/");
+  await page.keyboard.press("Escape");
+  await expect(invoiceShareDialog).toBeHidden();
 
   await page.getByRole("button", { name: "Save PDF" }).click();
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
@@ -858,6 +860,8 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await expect.poll(async () => (await page.evaluate(() => (window as any).__openCalls as string[])).length).toBeGreaterThan(0);
   const openCalls = await page.evaluate(() => (window as any).__openCalls as string[]);
   expect(openCalls.some((url) => url.includes("t.me/share/url"))).toBeTruthy();
+  await page.keyboard.press("Escape");
+  await expect(receiptShareDialog).toBeHidden();
 
   await receiptRow.getByRole("button", { name: "Save PDF" }).click();
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
