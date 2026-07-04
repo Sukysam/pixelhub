@@ -79,7 +79,7 @@ test("admin can manage roles and users from settings", async ({ page, request })
   await roleNameInput.fill(roleName);
   await roleDescriptionInput.fill("Operations role created from settings UI");
   await page.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
-  await page.getByRole("button", { name: "Create role" }).click({ force: true });
+  await page.getByRole("button", { name: "Create role" }).last().evaluate((node: HTMLButtonElement) => node.click());
   await expect(page.getByText("Role created successfully.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText(roleName)).toBeVisible();
 
@@ -803,6 +803,14 @@ test("invoice and receipt share and save actions generate links and downloads", 
       },
     };
     Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true });
+    const origAnchorClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (...args) {
+      if (this.hasAttribute("download") || String(this.href || "").startsWith("blob:")) {
+        (window as any).__downloadObjectUrlCalls += 1;
+        return;
+      }
+      return origAnchorClick.apply(this, args as []);
+    };
     const origFetch = window.fetch.bind(window);
     window.fetch = async (...args) => {
       const res = await origFetch(...args);
@@ -811,9 +819,6 @@ test("invoice and receipt share and save actions generate links and downloads", 
       if (url.includes("/api/documents/saved/")) {
         (window as any).__savedDocumentStatus = res.status;
         (window as any).__savedDocumentRequestCount += 1;
-      }
-      if (url.includes("/api/documents/saved/") && res.ok) {
-        (window as any).__downloadObjectUrlCalls += 1;
       }
       return res;
     };
@@ -847,11 +852,17 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string; invoice_number: string };
 
   const ref = `E2E-SHARE-SAVE-${suffix}`;
-  const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
+  const receiptRes = await request.post(`${API_BASE_URL}/receipts/`, {
     headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-share-save-${suffix}` },
-    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Bank Transfer", reference_number: ref },
+    data: {
+      invoice: invoice.id,
+      amount_paid: invoiceDetail.total_amount,
+      payment_method: "Bank Transfer",
+      reference_number: ref,
+      payment_date: new Date().toISOString().slice(0, 10),
+    },
   });
-  expect(payRes.ok()).toBeTruthy();
+  expect(receiptRes.ok()).toBeTruthy();
 
   await page.goto("/invoices");
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
@@ -878,6 +889,7 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const invoiceSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeGreaterThanOrEqual(200);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeLessThan(300);
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
 
   await page.goto("/receipts");
   const receiptRow = page.getByRole("row", { name: new RegExp(ref) }).first();
@@ -898,6 +910,7 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const receiptSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeGreaterThanOrEqual(200);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeLessThan(300);
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
 });
 
 test("inventory export and import flows work end-to-end", async ({ page, request }) => {
