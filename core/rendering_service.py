@@ -86,6 +86,22 @@ def logo_urls_for_asset(asset: Optional[LogoAsset]) -> dict[str, Optional[str]]:
     }
 
 
+def effective_logo_assets_for_user(user) -> dict[str, Optional[LogoAsset]]:
+    gs = get_global_settings()
+    global_logo = getattr(gs, "appearance_logo", None)
+    invoice_logo = None
+    receipt_logo = None
+    if getattr(user, "is_authenticated", False) and gs.allow_user_overrides:
+        us = get_user_settings(user)
+        invoice_logo = getattr(us, "invoice_logo", None)
+        receipt_logo = getattr(us, "receipt_logo", None)
+    return {
+        "global_appearance": global_logo,
+        "invoice_template": invoice_logo,
+        "receipt_template": receipt_logo,
+    }
+
+
 def effective_company_identity_for_user(user) -> dict[str, Optional[str]]:
     gs = get_global_settings()
     appearance = gs.appearance or {}

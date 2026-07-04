@@ -24,6 +24,30 @@ export function resolveMediaUrl(value: string): string {
   return s;
 }
 
+export async function downloadWithAuth(path: string, fallbackFilename = "download"): Promise<string> {
+  const token = getAuthToken();
+  const url = `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Token ${token}`;
+  const res = await fetch(url, { headers, credentials: "include", cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`Download failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/i.exec(cd);
+  const filename = match?.[1] ?? fallbackFilename;
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
+  return filename;
+}
+
 export class ApiError extends Error {
   status: number;
   details?: unknown;

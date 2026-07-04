@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 from dataclasses import dataclass
@@ -11,17 +13,19 @@ from typing import Any, Literal, cast
 from urllib.parse import urljoin
 
 from django.conf import settings
+from django.core.files.base import ContentFile
 from django.core.mail import EmailMessage
 from django.template.loader import get_template
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from .finance_services import invoice_discount_context
-from .models import DocumentDelivery, Invoice, Receipt
+from .models import DocumentDelivery, Invoice, Receipt, SavedDocument
 from .rendering_service import (
     currency_for_code,
     detect_country,
     effective_company_identity_for_user,
+    effective_logo_assets_for_user,
     effective_region_settings_for_user,
     effective_templates_for_user,
     format_date_for_pattern,
@@ -35,6 +39,7 @@ DeliveryChannel = Literal["print", "email", "share"]
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 E164_RE = re.compile(r"^\+[1-9]\d{9,14}$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -105,15 +110,99 @@ def _absolute_media_url(request, value: Any) -> str | None:
     return raw
 
 
+def _embedded_file_data_url(field_file, content_type: str | None) -> str | None:
+    if not getattr(field_file, "name", None):
+        return None
+    storage = getattr(field_file, "storage", None)
+    if storage is None:
+        return None
+    try:
+        with storage.open(field_file.name, "rb") as fh:
+            raw = fh.read()
+    except Exception:
+        logger.warning("document.logo_read_failed file=%s", getattr(field_file, "name", None), exc_info=True)
+        return None
+    if not raw:
+        return None
+    mime = str(content_type or "").strip() or "application/octet-stream"
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _embedded_logo_data_url(asset) -> str | None:
+    if asset is None:
+        return None
+    primary = _embedded_file_data_url(getattr(asset, "file", None), getattr(asset, "content_type", None))
+    if primary:
+        return primary
+    return _embedded_file_data_url(getattr(asset, "thumbnail", None), "image/png")
+
+
+class _TemplateContext(dict):
+    def __missing__(self, key):
+        return ""
+
+
+def _render_template_string(template: str | None, context: dict[str, Any], *, field_name: str, default: str) -> str:
+    raw = str(template or "").strip()
+    source = raw or default
+    try:
+        return source.format_map(_TemplateContext(context)).strip()
+    except KeyError as exc:
+        raise ValidationError({field_name: f"Unknown placeholder: {exc.args[0]}"}) from exc
+    except ValueError as exc:
+        raise ValidationError({field_name: "Invalid template format"}) from exc
+
+
+def _document_context_for_delivery(delivery: DocumentDelivery, token: str | None = None) -> dict[str, Any]:
+    identity = effective_company_identity_for_user(delivery.user)
+    download_url = None
+    if token:
+        download_url = f"{backend_public_base_url()}/api/documents/deliveries/{delivery.id}/download/?token={token}"
+    if delivery.document_type == "invoice":
+        invoice = cast(Invoice, delivery.invoice)
+        return {
+            "company_name": identity["company_name"] or "PIXELHUB",
+            "document_type": "invoice",
+            "document_label": "Invoice",
+            "document_number": invoice.invoice_number,
+            "customer_name": invoice.customer.name,
+            "customer_email": invoice.customer.email or "",
+            "total_amount": str(invoice.total_amount),
+            "issue_date": str(invoice.issue_date or ""),
+            "due_date": str(invoice.due_date or ""),
+            "download_url": download_url or "",
+        }
+    receipt = cast(Receipt, delivery.receipt)
+    return {
+        "company_name": identity["company_name"] or "PIXELHUB",
+        "document_type": "receipt",
+        "document_label": "Receipt",
+        "document_number": f"RCPT-{receipt.id}",
+        "customer_name": receipt.invoice.customer.name,
+        "customer_email": receipt.invoice.customer.email or "",
+        "total_amount": str(receipt.amount_paid),
+        "issue_date": str(receipt.payment_date or ""),
+        "due_date": "",
+        "download_url": download_url or "",
+    }
+
+
 def _resolved_document_templates(request, user) -> dict[str, dict[str, Any]]:
     templates = effective_templates_for_user(user)
+    assets = effective_logo_assets_for_user(user)
     global_appearance = dict(templates.get("global_appearance") or {})
     invoice_template = dict(templates.get("invoice_template") or {})
     receipt_template = dict(templates.get("receipt_template") or {})
 
-    for bucket in (global_appearance, invoice_template, receipt_template):
+    for key, bucket in (
+        ("global_appearance", global_appearance),
+        ("invoice_template", invoice_template),
+        ("receipt_template", receipt_template),
+    ):
         bucket["logo_url"] = _absolute_media_url(request, bucket.get("logo_url"))
         bucket["logo_thumbnail_url"] = _absolute_media_url(request, bucket.get("logo_thumbnail_url"))
+        bucket["logo_embedded_url"] = _embedded_logo_data_url(assets.get(key))
 
     invoice_template["layout"] = (
         invoice_template.get("layout")
@@ -139,6 +228,10 @@ def _invoice_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, 
         "layout": invoice_template.get("layout") or "classic",
         "primary_color": invoice_template.get("primary_color") or global_appearance.get("primary_color") or "#1a4d8e",
         "font_family": invoice_template.get("font_family") or global_appearance.get("font_family") or "Helvetica",
+        "logo_src": invoice_template.get("logo_embedded_url")
+        or global_appearance.get("logo_embedded_url")
+        or invoice_template.get("logo_url")
+        or global_appearance.get("logo_url"),
         "logo_url": invoice_template.get("logo_url") or global_appearance.get("logo_url"),
         "footer_text": invoice_template.get("footer_text")
         or global_appearance.get("invoice_footer_text")
@@ -154,6 +247,10 @@ def _receipt_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, 
         "layout": receipt_template.get("layout") or "classic",
         "primary_color": receipt_template.get("primary_color") or global_appearance.get("primary_color") or "#1a4d8e",
         "font_family": receipt_template.get("font_family") or global_appearance.get("font_family") or "Helvetica",
+        "logo_src": receipt_template.get("logo_embedded_url")
+        or global_appearance.get("logo_embedded_url")
+        or receipt_template.get("logo_url")
+        or global_appearance.get("logo_url"),
         "logo_url": receipt_template.get("logo_url") or global_appearance.get("logo_url"),
         "header_text": receipt_template.get("header_text") or "Receipt",
         "footer_text": receipt_template.get("footer_text")
@@ -387,6 +484,7 @@ def create_delivery(
     to_email: str | None = None,
     to_phone: str | None = None,
     ttl_minutes: int = 60,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[DocumentDelivery, str | None]:
     if channel not in ("print", "email", "share"):
         raise ValidationError({"channel": "Invalid channel"})
@@ -428,6 +526,7 @@ def create_delivery(
         status="sent" if channel == "share" else "queued",
         download_token_hash=token_hash,
         download_expires_at=expires_at,
+        metadata=metadata or {},
     )
     return delivery, token
 
@@ -488,19 +587,30 @@ def send_delivery(request, delivery: DocumentDelivery, token: str | None) -> Doc
             raise ValidationError({"to_email": "to_email is required"})
         if delivery.document_type == "invoice":
             doc = render_invoice(request, cast(Invoice, delivery.invoice), cast(DocumentFormat, delivery.format))
-            subject = f"Invoice {cast(Invoice, delivery.invoice).invoice_number}"
         else:
             doc = render_receipt(request, cast(Receipt, delivery.receipt), cast(DocumentFormat, delivery.format))
-            subject = f"Receipt RCPT-{cast(Receipt, delivery.receipt).id}"
         if not token and delivery.download_token_hash:
             token, token_hash, expires_at = create_download_token(ttl_minutes=60)
             delivery.download_token_hash = token_hash
             delivery.download_expires_at = expires_at
             delivery.save(update_fields=["download_token_hash", "download_expires_at", "updated_at"])
-        link = None
-        if token:
-            link = f"{backend_public_base_url()}/api/documents/deliveries/{delivery.id}/download/?token={token}"
-        body_text = "Please find your document attached." + (f"\n\nDownload link: {link}\n" if link else "")
+        context = _document_context_for_delivery(delivery, token)
+        subject = _render_template_string(
+            str((delivery.metadata or {}).get("email_subject_template") or ""),
+            context,
+            field_name="email_subject_template",
+            default="{document_label} {document_number}",
+        )
+        body_text = _render_template_string(
+            str((delivery.metadata or {}).get("email_message_template") or ""),
+            context,
+            field_name="email_message_template",
+            default=(
+                "Hello {customer_name},\n\n"
+                "Please find your {document_type} attached from {company_name}."
+                "\n\nDownload link: {download_url}\n"
+            ),
+        )
         body_html = None
         attachment = doc if delivery.format == "pdf" else None
         if delivery.format in ("html", "text"):
@@ -516,3 +626,47 @@ def send_delivery(request, delivery: DocumentDelivery, token: str | None) -> Doc
         return delivery
 
     raise ValidationError({"channel": "Invalid channel"})
+
+
+def save_document_backup(
+    request,
+    *,
+    user,
+    document_type: DocumentType,
+    document_id: int,
+    metadata: dict[str, Any] | None = None,
+) -> SavedDocument:
+    if document_type == "invoice":
+        invoice = Invoice.objects.filter(pk=document_id, is_deleted=False).select_related("customer").first()
+        if invoice is None:
+            raise ValidationError({"document_id": "Invoice not found"})
+        receipt = None
+        rendered = render_invoice(request, invoice, "pdf")
+    elif document_type == "receipt":
+        receipt = Receipt.objects.filter(pk=document_id, is_deleted=False).select_related("invoice", "invoice__customer").first()
+        if receipt is None:
+            raise ValidationError({"document_id": "Receipt not found"})
+        invoice = None
+        rendered = render_receipt(request, receipt, "pdf")
+    else:
+        raise ValidationError({"document_type": "Invalid document_type"})
+    if not rendered.content_type.startswith("application/pdf"):
+        raise ValidationError({"detail": "PDF generation failed for this document"})
+
+    saved = SavedDocument(
+        user=user,
+        document_type=document_type,
+        invoice=invoice,
+        receipt=receipt,
+        format="pdf",
+        original_filename=rendered.filename,
+        content_type=rendered.content_type,
+        sha256=hashlib.sha256(rendered.content).hexdigest(),
+        size_bytes=len(rendered.content),
+        storage_backend="",
+        metadata=metadata or {},
+    )
+    saved.file.save(rendered.filename, ContentFile(rendered.content), save=False)
+    saved.storage_backend = saved.file.storage.__class__.__name__
+    saved.save()
+    return saved

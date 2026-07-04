@@ -1,3 +1,5 @@
+import os
+import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
@@ -608,6 +610,11 @@ class AdminUserInvitation(models.Model):
         return f"AdminUserInvitation {self.user_id}"
 
 
+def saved_document_upload_to(instance, filename: str) -> str:
+    ext = os.path.splitext(str(filename or ""))[1].lower() or ".pdf"
+    return f"uploads/documents/backups/user_{instance.user_id}/{uuid.uuid4().hex}{ext}"
+
+
 class DocumentDelivery(models.Model):
     DOCUMENT_TYPE_CHOICES = [
         ("invoice", "Invoice"),
@@ -670,6 +677,43 @@ class DocumentDelivery(models.Model):
 
     def __str__(self):
         return f"DocumentDelivery {self.id} {self.document_type}:{self.channel}:{self.status}"
+
+
+class SavedDocument(models.Model):
+    DOCUMENT_TYPE_CHOICES = DocumentDelivery.DOCUMENT_TYPE_CHOICES
+    FORMAT_CHOICES = [("pdf", "PDF")]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="saved_documents")
+    document_type = models.CharField(max_length=20, choices=DOCUMENT_TYPE_CHOICES)
+    invoice = models.ForeignKey(Invoice, blank=True, null=True, on_delete=models.CASCADE, related_name="saved_documents")
+    receipt = models.ForeignKey(Receipt, blank=True, null=True, on_delete=models.CASCADE, related_name="saved_documents")
+    format = models.CharField(max_length=10, choices=FORMAT_CHOICES, default="pdf")
+    original_filename = models.CharField(max_length=255)
+    file = models.FileField(upload_to=saved_document_upload_to)
+    content_type = models.CharField(max_length=100, default="application/pdf")
+    sha256 = models.CharField(max_length=64)
+    size_bytes = models.PositiveIntegerField(default=0)
+    storage_backend = models.CharField(max_length=120, blank=True, null=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "document_type", "created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(invoice__isnull=False, receipt__isnull=True)
+                    | models.Q(invoice__isnull=True, receipt__isnull=False)
+                ),
+                name="chk_saved_document_one_document",
+            ),
+        ]
+
+    def __str__(self):
+        return f"SavedDocument {self.id} {self.document_type}:{self.user_id}"
 
 
 class PaymentTransaction(models.Model):

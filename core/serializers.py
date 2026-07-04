@@ -18,6 +18,7 @@ from .models import (
     UserSettings,
     AuditLog,
     DocumentDelivery,
+    SavedDocument,
     PaymentTransaction,
     BusinessAccount,
     BusinessMembership,
@@ -835,6 +836,28 @@ class DocumentDeliverySerializer(serializers.ModelSerializer):
         model = DocumentDelivery
         fields = "__all__"
         read_only_fields = ("id", "user", "status", "attempt_count", "last_attempt_at", "next_retry_at", "created_at", "updated_at")
+
+
+class SavedDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SavedDocument
+        fields = "__all__"
+        read_only_fields = (
+            "id",
+            "user",
+            "document_type",
+            "invoice",
+            "receipt",
+            "format",
+            "original_filename",
+            "file",
+            "content_type",
+            "sha256",
+            "size_bytes",
+            "storage_backend",
+            "created_at",
+            "updated_at",
+        )
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):

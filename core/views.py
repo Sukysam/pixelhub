@@ -69,6 +69,7 @@ from .models import (
     RolePermission,
     UserRole,
     DocumentDelivery,
+    SavedDocument,
     PaymentTransaction,
     PaymentWebhookEvent,
     BusinessAccount,
@@ -124,6 +125,7 @@ from .serializers import (
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
     DocumentDeliverySerializer,
+    SavedDocumentSerializer,
     PaymentTransactionSerializer,
     normalize_signup_phone,
     validate_application_password,
@@ -5620,6 +5622,14 @@ class DocumentDeliveryViewSet(viewsets.ModelViewSet):
         except (TypeError, ValueError):
             raise ValidationError({"document_id": "document_id must be an integer"})
 
+        delivery_metadata: dict[str, Any] = {}
+        email_subject_template = str(request.data.get("email_subject_template") or "").strip()
+        email_message_template = str(request.data.get("email_message_template") or "").strip()
+        if email_subject_template:
+            delivery_metadata["email_subject_template"] = email_subject_template
+        if email_message_template:
+            delivery_metadata["email_message_template"] = email_message_template
+
         delivery, token = create_delivery(
             user=user,
             document_type=document_type,
@@ -5629,6 +5639,7 @@ class DocumentDeliveryViewSet(viewsets.ModelViewSet):
             to_email=request.data.get("to_email"),
             to_phone=request.data.get("to_phone"),
             ttl_minutes=ttl_minutes_int,
+            metadata=delivery_metadata,
         )
         if channel == "print":
             printer_name = str(request.data.get("printer_name") or "").strip()
@@ -5728,6 +5739,82 @@ class DocumentDeliveryViewSet(viewsets.ModelViewSet):
         resp["Content-Disposition"] = f'attachment; filename="{doc.filename}"'
         resp["X-Content-Type-Options"] = "nosniff"
         return resp
+
+
+class SavedDocumentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = SavedDocumentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OptionalPageNumberPagination
+
+    def get_queryset(self):
+        qs = SavedDocument.objects.all().select_related("invoice", "receipt", "receipt__invoice", "user").order_by("-id")
+        roles = set(user_role_names(self.request.user))
+        if "admin" in roles or "staff" in roles or bool(getattr(self.request.user, "is_superuser", False)):
+            return qs
+        return qs.filter(user=self.request.user)
+
+    def _report(self, saved_document: SavedDocument) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "saved_document_id": saved_document.id,
+            "document_type": saved_document.document_type,
+            "format": saved_document.format,
+            "storage_backend": saved_document.storage_backend,
+            "size_bytes": saved_document.size_bytes,
+            "created_at": saved_document.created_at.isoformat() if saved_document.created_at else None,
+        }
+
+    def create(self, request, *args, **kwargs):
+        from .documents import save_document_backup
+
+        user = request.user
+        if not getattr(user, "is_authenticated", False):
+            raise PermissionDenied()
+
+        document_type = str(request.data.get("document_type") or "").strip()
+        document_id = request.data.get("document_id")
+        try:
+            document_id_int = int(document_id)
+        except (TypeError, ValueError):
+            raise ValidationError({"document_id": "document_id must be an integer"})
+
+        save_label = str(request.data.get("label") or "").strip()
+        try:
+            saved_document = save_document_backup(
+                request,
+                user=user,
+                document_type=document_type,
+                document_id=document_id_int,
+                metadata={"label": save_label} if save_label else {},
+            )
+        except ValidationError:
+            raise
+        except Exception as exc:
+            logger.exception("saved_document.create_failed document_type=%s document_id=%s", document_type, document_id_int)
+            raise APIException(f"Failed to save document backup: {exc}") from exc
+
+        _log_audit(user, "create", saved_document, {"document_type": document_type, "document_id": document_id_int})
+        payload = {
+            "saved_document": self.get_serializer(saved_document).data,
+            "download_url": f"/api/documents/saved/{saved_document.id}/download/",
+            "report": self._report(saved_document),
+        }
+        return Response(payload, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        saved_document = self.get_object()
+        try:
+            with saved_document.file.storage.open(saved_document.file.name, "rb") as fh:
+                content = fh.read()
+        except Exception as exc:
+            logger.exception("saved_document.download_failed saved_document_id=%s", saved_document.id)
+            raise APIException(f"Failed to open saved document: {exc}") from exc
+
+        response = HttpResponse(content, content_type=saved_document.content_type or "application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="{saved_document.original_filename}"'
+        response["X-Content-Type-Options"] = "nosniff"
+        return response
 
 
 class PrinterListApi(APIView):

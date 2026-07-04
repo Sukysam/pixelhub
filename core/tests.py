@@ -45,6 +45,7 @@ from .models import (
     Role,
     UserRole,
     DocumentDelivery,
+    SavedDocument,
     PaymentTransaction,
     BusinessAccount,
     BusinessMembership,
@@ -74,7 +75,7 @@ from .rendering_service import (
     format_money,
 )
 from .views import _rate_limit
-from .documents import create_delivery, render_invoice, render_receipt
+from .documents import RenderedDocument, create_delivery, render_invoice, render_receipt
 
 
 def _test_secret() -> str:
@@ -1398,10 +1399,8 @@ class SettingsLogoUploadTests(APITestCase):
                 rendered_receipt = render_receipt(request_stub, receipt, "html").content.decode("utf-8")
                 self.assertIn('class="invoice-layout-compact"', rendered_invoice)
                 self.assertIn('class="receipt-layout-compact"', rendered_receipt)
-                self.assertIn("https://backend.example", rendered_invoice)
-                self.assertIn("https://backend.example", rendered_receipt)
-                self.assertIn(str(invoice_logo.data["logo_url"]), rendered_invoice)
-                self.assertIn(str(receipt_logo.data["logo_url"]), rendered_receipt)
+                self.assertIn("data:image/png;base64,", rendered_invoice)
+                self.assertIn("data:image/webp;base64,", rendered_receipt)
                 self.assertIn("Visible description", rendered_invoice)
                 self.assertIn("Compact invoice footer", rendered_invoice)
                 self.assertIn("Compact Receipt", rendered_receipt)
@@ -1411,8 +1410,7 @@ class SettingsLogoUploadTests(APITestCase):
                 receipt_html = self.client.get(f"/api/receipts/{receipt.id}/print_html/")
                 self.assertEqual(receipt_html.status_code, status.HTTP_200_OK)
                 self.assertContains(receipt_html, 'class="receipt-layout-compact"')
-                self.assertContains(receipt_html, "http://testserver/media/uploads/logos/")
-                self.assertContains(receipt_html, str(receipt_logo.data["logo_url"]))
+                self.assertContains(receipt_html, "data:image/webp;base64,")
 
     def test_user_settings_patch_ignores_manual_logo_url(self):
         self.client.force_authenticate(user=self.user)
@@ -3465,6 +3463,28 @@ class DocumentDeliveryAndPaymentsTests(APITestCase):
         delivery_id = res.data["report"]["delivery_id"]
         self.assertTrue(AuditLog.objects.filter(object_id=str(delivery_id), action="create").exists())
 
+    @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+    def test_delivery_send_supports_custom_email_templates(self):
+        res = self.client.post(
+            "/api/documents/deliveries/",
+            {
+                "document_type": "invoice",
+                "document_id": self.invoice.id,
+                "channel": "email",
+                "format": "pdf",
+                "to_email": "buyer@example.com",
+                "email_subject_template": "Billing packet for {document_number}",
+                "email_message_template": "Hello {customer_name}, download here: {download_url}",
+                "send_now": True,
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].subject, "Billing packet for INV-2026-DOCPAY")
+        self.assertIn("Hello Buyer, download here:", mail.outbox[0].body)
+        self.assertIn("/api/documents/deliveries/", mail.outbox[0].body)
+
     def test_invoice_share_link_returns_download_url_and_token_works(self):
         res = self.client.post(f"/api/invoices/{self.invoice.id}/share_link/", {"ttl_minutes": 60}, format="json")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -3495,6 +3515,35 @@ class DocumentDeliveryAndPaymentsTests(APITestCase):
         res = self.client.post(f"/api/receipts/{receipt_id}/share_link/", {"ttl_minutes": 60}, format="json")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn("download_url", res.data)
+
+    def test_save_document_backup_creates_record_and_downloads_pdf(self):
+        with patch(
+            "core.documents.render_invoice",
+            return_value=RenderedDocument(
+                filename="invoice_INV-2026-DOCPAY.pdf",
+                content_type="application/pdf",
+                content=b"%PDF-1.4\nmock\n",
+                backend="mock",
+            ),
+        ):
+            res = self.client.post(
+                "/api/documents/saved/",
+                {
+                    "document_type": "invoice",
+                    "document_id": self.invoice.id,
+                    "label": self.invoice.invoice_number,
+                },
+                format="json",
+            )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertIn("download_url", res.data)
+        saved_id = int(res.data["saved_document"]["id"])
+        saved = SavedDocument.objects.get(pk=saved_id)
+        self.assertEqual(saved.document_type, "invoice")
+        self.assertTrue(saved.file.name)
+        dl = self.client.get(res.data["download_url"])
+        self.assertEqual(dl.status_code, status.HTTP_200_OK)
+        self.assertTrue(dl["Content-Type"].startswith("application/pdf"))
 
     @override_settings(PAYSTACK_SECRET_KEY=GW_SHARED)
     def test_paystack_webhook_marks_transaction_succeeded_and_creates_receipt(self):

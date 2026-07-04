@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Plus, Search, Trash2 } from "lucide-react";
-import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getErrorMessage } from "@/lib/api";
+import { ApiError, apiRequest, downloadWithAuth, getErrorMessage } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
@@ -128,6 +128,19 @@ function whatsappShareUrl(text: string, phone: string): string {
   const params = new URLSearchParams();
   if (msg) params.set("text", msg);
   return digits ? `https://wa.me/${digits}?${params.toString()}` : `https://wa.me/?${params.toString()}`;
+}
+
+function telegramShareUrl(text: string): string {
+  const params = new URLSearchParams();
+  if (text.trim()) params.set("text", text.trim());
+  return `https://t.me/share/url?${params.toString()}`;
+}
+
+function mailtoShareUrl(subject: string, body: string): string {
+  const params = new URLSearchParams();
+  if (subject.trim()) params.set("subject", subject.trim());
+  if (body.trim()) params.set("body", body.trim());
+  return `mailto:?${params.toString()}`;
 }
 
 function normalizeItem(raw: ItemApi): Item {
@@ -346,27 +359,6 @@ export default function InvoicesPage() {
     | null
   >(null);
 
-  const downloadWithAuth = useCallback(async (path: string) => {
-    const token = getAuthToken();
-    const url = `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Token ${token}`;
-    const res = await fetch(url, { headers, credentials: "include", cache: "no-store" });
-    if (!res.ok) throw new Error(`Download failed (${res.status})`);
-    const blob = await res.blob();
-    const cd = res.headers.get("content-disposition") ?? "";
-    const match = /filename="([^"]+)"/i.exec(cd);
-    const filename = match?.[1] ?? "download";
-    const href = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = href;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(href);
-  }, []);
-
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [discountType, setDiscountType] = useState<DiscountType>("percentage");
@@ -406,6 +398,8 @@ export default function InvoicesPage() {
   const [sendToEmail, setSendToEmail] = useState("");
   const [sendToPhone, setSendToPhone] = useState("");
   const [sendPrinterName, setSendPrinterName] = useState("");
+  const [sendEmailSubject, setSendEmailSubject] = useState("");
+  const [sendEmailMessage, setSendEmailMessage] = useState("");
   const [sendingDoc, setSendingDoc] = useState(false);
   const [sendEmailTouched, setSendEmailTouched] = useState(false);
   const [sendPhoneTouched, setSendPhoneTouched] = useState(false);
@@ -413,6 +407,11 @@ export default function InvoicesPage() {
   const [sendPhoneAutoFilled, setSendPhoneAutoFilled] = useState(false);
   const [sendEmailWarning, setSendEmailWarning] = useState<string | null>(null);
   const [sendPhoneWarning, setSendPhoneWarning] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState<string | null>(null);
+  const [savingDocument, setSavingDocument] = useState(false);
 
   const [isPickerOpen, setIsPickerOpen] = useState(false);
   const [pickerLineId, setPickerLineId] = useState<number | null>(null);
@@ -1119,6 +1118,10 @@ export default function InvoicesPage() {
     setSendToEmail("");
     setSendToPhone("");
     setSendPrinterName("");
+    setSendEmailSubject("Invoice {document_number} from {company_name}");
+    setSendEmailMessage(
+      "Hello {customer_name},\n\nPlease find your {document_type} attached from {company_name}.\n\nDownload link: {download_url}\n"
+    );
     setSendEmailTouched(false);
     setSendPhoneTouched(false);
     setSendEmailAutoFilled(false);
@@ -1162,6 +1165,83 @@ export default function InvoicesPage() {
       }
     }
   }, [customers, invoiceSummaryInvoice, sendChannel, sendEmailTouched, sendOpen, sendPhoneTouched, sendToEmail, sendToPhone]);
+
+  const buildInvoiceShareText = useCallback(
+    (downloadUrl: string) => {
+      if (!invoiceSummaryInvoice) return downloadUrl;
+      const cust = customers.find((c) => c.id === invoiceSummaryInvoice.customer);
+      const customerName = cust?.name?.trim() || `#${invoiceSummaryInvoice.customer}`;
+      const total = formatMoney(Number(invoiceSummaryInvoice.total_amount));
+      return [`Invoice ${invoiceSummaryInvoice.invoice_number}`, `Customer: ${customerName}`, `Total: ${total}`, downloadUrl].join("\n");
+    },
+    [customers, formatMoney, invoiceSummaryInvoice]
+  );
+
+  const openShareInvoice = async () => {
+    if (!invoiceSummaryInvoice || shareLoading) return;
+    setInvoiceSummaryError(null);
+    setShareLoading(true);
+    try {
+      const share = await apiRequest<{ download_url: string; expires_at?: string | null }>(`/invoices/${invoiceSummaryInvoice.id}/share_link/`, {
+        method: "POST",
+        body: JSON.stringify({ ttl_minutes: 60 * 24 * 7 }),
+      });
+      setShareLink(share.download_url);
+      setShareExpiresAt(share.expires_at ?? null);
+      setShareOpen(true);
+    } catch (e: unknown) {
+      setInvoiceSummaryError(toUserMessage(e, "Failed to generate share link"));
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const shareInvoiceVia = async (platform: "copy" | "whatsapp" | "telegram" | "email") => {
+    if (!shareLink || !invoiceSummaryInvoice) return;
+    const text = buildInvoiceShareText(shareLink);
+    if (platform === "copy") {
+      await navigator.clipboard.writeText(shareLink);
+      setSuccess("Share link copied.");
+      return;
+    }
+    const url =
+      platform === "whatsapp"
+        ? whatsappShareUrl(text, "")
+        : platform === "telegram"
+          ? telegramShareUrl(text)
+          : mailtoShareUrl(`Invoice ${invoiceSummaryInvoice.invoice_number}`, text);
+    const win = window.open(url, "_blank", "noopener,noreferrer");
+    if (!win) {
+      setInvoiceSummaryError("Pop-up blocked. Please allow pop-ups, then try again.");
+      return;
+    }
+    setSuccess(`Opened ${platform === "email" ? "email" : platform} sharing.`);
+  };
+
+  const saveInvoicePdf = async () => {
+    if (!invoiceSummaryInvoice || savingDocument) return;
+    setInvoiceSummaryError(null);
+    setSavingDocument(true);
+    try {
+      const saved = await apiRequest<{ download_url: string; report?: { ok?: boolean } }>(
+        "/documents/saved/",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            document_type: "invoice",
+            document_id: invoiceSummaryInvoice.id,
+            label: invoiceSummaryInvoice.invoice_number,
+          }),
+        }
+      );
+      await downloadWithAuth(saved.download_url, `invoice_${invoiceSummaryInvoice.invoice_number}.pdf`);
+      setSuccess(`Invoice ${invoiceSummaryInvoice.invoice_number} saved and backed up.`);
+    } catch (e: unknown) {
+      setInvoiceSummaryError(toUserMessage(e, "Failed to save invoice PDF"));
+    } finally {
+      setSavingDocument(false);
+    }
+  };
 
   const openInvoiceDetails = async (invoiceId: number) => {
     setInvoiceSummaryError(null);
@@ -1402,10 +1482,7 @@ export default function InvoicesPage() {
           method: "POST",
           body: JSON.stringify({ ttl_minutes: 60 * 24 * 7 }),
         });
-        const cust = customers.find((c) => c.id === invoiceSummaryInvoice.customer);
-        const customerName = cust?.name?.trim() || `#${invoiceSummaryInvoice.customer}`;
-        const total = formatMoney(Number(invoiceSummaryInvoice.total_amount));
-        const msg = [`Invoice ${invoiceSummaryInvoice.invoice_number}`, `Customer: ${customerName}`, `Total: ${total}`, share.download_url].join("\n");
+        const msg = buildInvoiceShareText(share.download_url);
         const url = whatsappShareUrl(msg, sendToPhone.trim());
         const win = window.open(url, "_blank", "noopener,noreferrer");
         if (!win) {
@@ -1428,6 +1505,8 @@ export default function InvoicesPage() {
             format: sendFormat,
             to_email: sendChannel === "email" ? sendToEmail.trim() : undefined,
             printer_name: sendChannel === "print" ? sendPrinterName.trim() : undefined,
+            email_subject_template: sendChannel === "email" ? sendEmailSubject : undefined,
+            email_message_template: sendChannel === "email" ? sendEmailMessage : undefined,
             send_now: true,
           }),
         }
@@ -2452,6 +2531,22 @@ export default function InvoicesPage() {
               >
                 Send
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void openShareInvoice()}
+                disabled={!invoiceSummaryInvoice || invoiceSummaryLoading || invoiceSummaryConfirming || invoiceSummaryCancelling || invoiceSummaryPaying || shareLoading}
+              >
+                {shareLoading ? "Preparing..." : "Share"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void saveInvoicePdf()}
+                disabled={!invoiceSummaryInvoice || invoiceSummaryLoading || invoiceSummaryConfirming || invoiceSummaryCancelling || invoiceSummaryPaying || savingDocument}
+              >
+                {savingDocument ? "Saving PDF..." : "Save PDF"}
+              </Button>
               {invoiceSummaryMode === "create" ? (
                 <>
                   <Button
@@ -2635,7 +2730,7 @@ export default function InvoicesPage() {
               </Select>
             </div>
             {sendChannel === "email" ? (
-              <div>
+              <div className="space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <Label htmlFor="send_email">To Email</Label>
                   <span
@@ -2662,6 +2757,23 @@ export default function InvoicesPage() {
                 />
                 {sendEmailWarning ? <div className="mt-1 text-xs text-amber-700">{sendEmailWarning}</div> : null}
                 {sendToEmail.trim() && !isValidEmail(sendToEmail) ? <div className="mt-1 text-xs text-red-700">Invalid email format</div> : null}
+                <div>
+                  <Label htmlFor="send_email_subject">Subject Template</Label>
+                  <Input id="send_email_subject" value={sendEmailSubject} onChange={(e) => setSendEmailSubject(e.target.value)} disabled={sendingDoc} />
+                </div>
+                <div>
+                  <Label htmlFor="send_email_message">Message Template</Label>
+                  <textarea
+                    id="send_email_message"
+                    value={sendEmailMessage}
+                    onChange={(e) => setSendEmailMessage(e.target.value)}
+                    disabled={sendingDoc}
+                    className="min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                  <div className="mt-1 text-xs text-gray-600">
+                    Available placeholders: {"{customer_name}"}, {"{document_number}"}, {"{company_name}"}, {"{download_url}"}
+                  </div>
+                </div>
               </div>
             ) : null}
             {sendChannel === "whatsapp" ? (
@@ -2710,6 +2822,37 @@ export default function InvoicesPage() {
               </Button>
               <Button onClick={() => void sendInvoice()} disabled={sendingDoc} aria-busy={sendingDoc}>
                 {sendingDoc ? "Sending..." : "Send"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Share Invoice</DialogTitle>
+          </DialogHeader>
+          <div className="p-6 pt-0 space-y-4">
+            <div>
+              <Label htmlFor="share_invoice_link">Secure Link</Label>
+              <Input id="share_invoice_link" value={shareLink} readOnly />
+              <div className="mt-1 text-xs text-gray-600">
+                {shareExpiresAt ? `Expires ${new Date(shareExpiresAt).toLocaleString()}.` : "Secure, time-limited access link."}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Button variant="outline" onClick={() => void shareInvoiceVia("copy")} disabled={!shareLink}>
+                Copy Link
+              </Button>
+              <Button variant="outline" onClick={() => void shareInvoiceVia("whatsapp")} disabled={!shareLink}>
+                WhatsApp
+              </Button>
+              <Button variant="outline" onClick={() => void shareInvoiceVia("telegram")} disabled={!shareLink}>
+                Telegram
+              </Button>
+              <Button variant="outline" onClick={() => void shareInvoiceVia("email")} disabled={!shareLink}>
+                Email
               </Button>
             </div>
           </div>

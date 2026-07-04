@@ -771,6 +771,98 @@ test("sending an invoice via WhatsApp opens a wa.me share link with prefilled te
   expect(openCalls[0]).toContain("text=");
 });
 
+test("invoice and receipt share and save actions generate links and downloads", async ({ page, request }) => {
+  test.slow();
+  const token = await adminToken(request);
+  await setSession(page, request, token);
+
+  await page.addInitScript(() => {
+    (window as any).__openCalls = [];
+    (window as any).__copiedText = "";
+    (window as any).__downloadObjectUrlCalls = 0;
+    (window as any).open = (url: any) => {
+      (window as any).__openCalls.push(String(url));
+      return {} as any;
+    };
+    const clipboard = {
+      writeText: async (value: string) => {
+        (window as any).__copiedText = String(value);
+      },
+    };
+    Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true });
+    const orig = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = ((...args: any[]) => {
+      (window as any).__downloadObjectUrlCalls += 1;
+      return orig(...(args as [any]));
+    }) as any;
+  });
+
+  const suffix = `${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
+  const customerRes = await request.post(`${API_BASE_URL}/customers/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { name: `Share Save Buyer ${suffix}`, email: `sharesave_${suffix}@example.com`, phone: "+2348012345678" },
+  });
+  expect(customerRes.ok()).toBeTruthy();
+  const customer = await customerRes.json();
+
+  const itemRes = await request.post(`${API_BASE_URL}/items/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { name: `Share Save Item ${suffix}`, unit_price: "10.00", stock_quantity: 10 },
+  });
+  expect(itemRes.ok()).toBeTruthy();
+  const item = await itemRes.json();
+
+  const invRes = await request.post(`${API_BASE_URL}/invoices/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { customer: customer.id, status: "Sent", items: [{ item: item.id, quantity: 1 }] },
+  });
+  expect(invRes.ok()).toBeTruthy();
+  const invoice = await invRes.json();
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string; invoice_number: string };
+
+  const ref = `E2E-SHARE-SAVE-${suffix}`;
+  const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
+    headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-share-save-${suffix}` },
+    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Bank Transfer", reference_number: ref },
+  });
+  expect(payRes.ok()).toBeTruthy();
+
+  await page.goto("/invoices");
+  const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
+  await invRow.getByRole("button", { name: "View Invoice" }).click();
+  await expect(page.getByRole("heading", { name: "Invoice Summary" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Share" }).click();
+  const invoiceShareDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Share Invoice" }) });
+  await expect(invoiceShareDialog).toBeVisible();
+  const invoiceShareLink = invoiceShareDialog.getByLabel("Secure Link");
+  await expect(invoiceShareLink).toHaveValue(/\/api\/documents\/deliveries\/\d+\/download\/\?token=/);
+  await invoiceShareDialog.getByRole("button", { name: "Copy Link" }).click();
+  await expect.poll(async () => await page.evaluate(() => (window as any).__copiedText as string)).toContain("/api/documents/deliveries/");
+
+  await page.getByRole("button", { name: "Save PDF" }).click();
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
+
+  await page.goto("/receipts");
+  const receiptRow = page.getByRole("row", { name: new RegExp(ref) }).first();
+  await receiptRow.getByRole("button", { name: "Share" }).click();
+  const receiptShareDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Share Receipt" }) });
+  await expect(receiptShareDialog).toBeVisible();
+  const receiptShareLink = receiptShareDialog.getByLabel("Secure Link");
+  await expect(receiptShareLink).toHaveValue(/\/api\/documents\/deliveries\/\d+\/download\/\?token=/);
+  await receiptShareDialog.getByRole("button", { name: "Telegram" }).click();
+  await expect.poll(async () => (await page.evaluate(() => (window as any).__openCalls as string[])).length).toBeGreaterThan(0);
+  const openCalls = await page.evaluate(() => (window as any).__openCalls as string[]);
+  expect(openCalls.some((url) => url.includes("t.me/share/url"))).toBeTruthy();
+
+  await receiptRow.getByRole("button", { name: "Save PDF" }).click();
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
+});
+
 test("inventory export and import flows work end-to-end", async ({ page, request }) => {
   const token = await adminToken(request);
   await setSession(page, request, token);

@@ -48,6 +48,7 @@ from .views import (
     InvoiceSavedViewDetailApi,
     ImportErrorLogDownloadApi,
     DocumentDeliveryViewSet,
+    SavedDocumentViewSet,
     PaymentTransactionViewSet,
     PrinterListApi,
     PaystackWebhookApi,
@@ -70,6 +71,7 @@ router.register(r'dashboard', DashboardViewSet, basename='dashboard')
 router.register(r'reports', ReportsViewSet, basename='reports')
 router.register(r'finance', FinanceViewSet, basename='finance')
 router.register(r'documents/deliveries', DocumentDeliveryViewSet, basename='document-delivery')
+router.register(r'documents/saved', SavedDocumentViewSet, basename='saved-document')
 router.register(r'payments/transactions', PaymentTransactionViewSet, basename='payment-transaction')
 router.register(r'business-accounts', BusinessAccountViewSet, basename='business-account')
 

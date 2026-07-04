@@ -22,11 +22,16 @@
             margin-bottom: 18px;
         }
         .logo {
+            width: auto;
+            height: auto;
             max-height: 52px;
-            max-width: 160px;
+            max-width: 100%;
             object-fit: contain;
             display: block;
             margin-bottom: 6px;
+        }
+        .logo-wrap {
+            max-width: 160px;
         }
         .title {
             font-size: 18pt;
@@ -93,6 +98,8 @@
         }
         body.receipt-layout-compact .logo {
             max-height: 42px;
+        }
+        body.receipt-layout-compact .logo-wrap {
             max-width: 132px;
         }
         body.receipt-layout-compact .title {
@@ -118,6 +125,9 @@
                 text-align: left !important;
                 margin-top: 12px;
             }
+            .logo-wrap {
+                max-width: 136px;
+            }
             .totals {
                 width: 100%;
             }
@@ -127,8 +137,10 @@
 <body class="receipt-layout-{{ receipt_render.layout }}" style="--primary: {{ receipt_render.primary_color }}; --font: {{ receipt_render.font_family }};">
     <div class="header">
         <div>
-            {% if receipt_render.logo_url %}
-                <img class="logo" src="{{ receipt_render.logo_url }}" alt="Logo" />
+            {% if receipt_render.logo_src %}
+                <div class="logo-wrap">
+                    <img class="logo" src="{{ receipt_render.logo_src }}" alt="Logo" />
+                </div>
             {% endif %}
             <h1 class="title">{{ global_appearance.company_name|default:"PIXELHUB" }}</h1>
             {% if global_appearance.company_tagline %}

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { ApiError, apiRequest, getErrorMessage } from "@/lib/api";
+import { ApiError, apiRequest, downloadWithAuth, getErrorMessage } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
@@ -58,6 +58,19 @@ function whatsappShareUrl(text: string, phone: string): string {
   return digits ? `https://wa.me/${digits}?${params.toString()}` : `https://wa.me/?${params.toString()}`;
 }
 
+function telegramShareUrl(text: string): string {
+  const params = new URLSearchParams();
+  if (text.trim()) params.set("text", text.trim());
+  return `https://t.me/share/url?${params.toString()}`;
+}
+
+function mailtoShareUrl(subject: string, body: string): string {
+  const params = new URLSearchParams();
+  if (subject.trim()) params.set("subject", subject.trim());
+  if (body.trim()) params.set("body", body.trim());
+  return `mailto:?${params.toString()}`;
+}
+
 export default function ReceiptsPage() {
   const { t } = useI18n();
   const [currencyCode, setCurrencyCode] = useState("NGN");
@@ -86,6 +99,8 @@ export default function ReceiptsPage() {
   const [sendToEmail, setSendToEmail] = useState("");
   const [sendToPhone, setSendToPhone] = useState("");
   const [sendPrinterName, setSendPrinterName] = useState("");
+  const [sendEmailSubject, setSendEmailSubject] = useState("");
+  const [sendEmailMessage, setSendEmailMessage] = useState("");
   const [sendingDoc, setSendingDoc] = useState(false);
   const [sendEmailTouched, setSendEmailTouched] = useState(false);
   const [sendPhoneTouched, setSendPhoneTouched] = useState(false);
@@ -95,6 +110,12 @@ export default function ReceiptsPage() {
   const [sendPhoneWarning, setSendPhoneWarning] = useState<string | null>(null);
   const [sendCustomerContact, setSendCustomerContact] = useState<{ email: string | null; phone: string | null } | null>(null);
   const [sendAutoFillLoading, setSendAutoFillLoading] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState<string | null>(null);
+  const [shareTargetReceiptId, setShareTargetReceiptId] = useState<number | null>(null);
+  const [savingDocumentId, setSavingDocumentId] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<{
     invoice: string;
@@ -390,6 +411,10 @@ export default function ReceiptsPage() {
     setSendToEmail("");
     setSendToPhone("");
     setSendPrinterName("");
+    setSendEmailSubject("Receipt {document_number} from {company_name}");
+    setSendEmailMessage(
+      "Hello {customer_name},\n\nPlease find your {document_type} attached from {company_name}.\n\nDownload link: {download_url}\n"
+    );
     setSendEmailTouched(false);
     setSendPhoneTouched(false);
     setSendEmailAutoFilled(false);
@@ -448,6 +473,85 @@ export default function ReceiptsPage() {
     }
   }, [sendChannel, sendCustomerContact, sendEmailTouched, sendOpen, sendPhoneTouched, sendToEmail, sendToPhone]);
 
+  const buildReceiptShareText = (receiptId: number, downloadUrl: string) => {
+    const receipt = receipts.find((r) => r.id === receiptId);
+    const invoice = receipt ? invoices.find((i) => i.id === receipt.invoice) : null;
+    const invoiceNumber = invoice?.invoice_number || (receipt ? `#${receipt.invoice}` : "");
+    const amountPaid = receipt ? money.format(Number(receipt.amount_paid)) : "";
+    return [`Receipt RCPT-${receiptId}`, invoiceNumber ? `Invoice: ${invoiceNumber}` : "", amountPaid ? `Amount paid: ${amountPaid}` : "", downloadUrl]
+      .filter(Boolean)
+      .join("\n");
+  };
+
+  const openShareReceipt = async (receiptId: number) => {
+    if (shareLoading) return;
+    setError(null);
+    setSuccess(null);
+    setShareLoading(true);
+    try {
+      const share = await apiRequest<{ download_url: string; expires_at?: string | null }>(`/receipts/${receiptId}/share_link/`, {
+        method: "POST",
+        body: JSON.stringify({ ttl_minutes: 60 * 24 * 7 }),
+      });
+      setShareTargetReceiptId(receiptId);
+      setShareLink(share.download_url);
+      setShareExpiresAt(share.expires_at ?? null);
+      setShareOpen(true);
+    } catch (e: unknown) {
+      setError(toUserMessage(e, "Failed to generate share link"));
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const shareReceiptVia = async (platform: "copy" | "whatsapp" | "telegram" | "email") => {
+    if (!shareLink || !shareTargetReceiptId) return;
+    const text = buildReceiptShareText(shareTargetReceiptId, shareLink);
+    if (platform === "copy") {
+      await navigator.clipboard.writeText(shareLink);
+      setSuccess("Share link copied.");
+      return;
+    }
+    const url =
+      platform === "whatsapp"
+        ? whatsappShareUrl(text, "")
+        : platform === "telegram"
+          ? telegramShareUrl(text)
+          : mailtoShareUrl(`Receipt RCPT-${shareTargetReceiptId}`, text);
+    const win = window.open(url, "_blank", "noopener,noreferrer");
+    if (!win) {
+      setError("Pop-up blocked. Please allow pop-ups, then try again.");
+      return;
+    }
+    setSuccess(`Opened ${platform === "email" ? "email" : platform} sharing.`);
+  };
+
+  const saveReceiptPdf = async (receiptId: number) => {
+    if (savingDocumentId === receiptId) return;
+    setError(null);
+    setSuccess(null);
+    setSavingDocumentId(receiptId);
+    try {
+      const saved = await apiRequest<{ download_url: string }>(
+        "/documents/saved/",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            document_type: "receipt",
+            document_id: receiptId,
+            label: `RCPT-${receiptId}`,
+          }),
+        }
+      );
+      await downloadWithAuth(saved.download_url, `receipt_${receiptId}.pdf`);
+      setSuccess("Receipt saved and backed up.");
+    } catch (e: unknown) {
+      setError(toUserMessage(e, "Failed to save receipt PDF"));
+    } finally {
+      setSavingDocumentId(null);
+    }
+  };
+
   const sendReceipt = async () => {
     if (sendingDoc) return;
     if (!sendTargetReceiptId) return;
@@ -485,13 +589,7 @@ export default function ReceiptsPage() {
           method: "POST",
           body: JSON.stringify({ ttl_minutes: 60 * 24 * 7 }),
         });
-        const receipt = receipts.find((r) => r.id === sendTargetReceiptId);
-        const invoice = receipt ? invoices.find((i) => i.id === receipt.invoice) : null;
-        const invoiceNumber = invoice?.invoice_number || (receipt ? `#${receipt.invoice}` : "");
-        const amountPaid = receipt ? money.format(Number(receipt.amount_paid)) : "";
-        const msg = [`Receipt RCPT-${sendTargetReceiptId}`, invoiceNumber ? `Invoice: ${invoiceNumber}` : "", amountPaid ? `Amount paid: ${amountPaid}` : "", share.download_url]
-          .filter(Boolean)
-          .join("\n");
+        const msg = buildReceiptShareText(sendTargetReceiptId, share.download_url);
         const url = whatsappShareUrl(msg, sendToPhone.trim());
         const win = window.open(url, "_blank", "noopener,noreferrer");
         if (!win) {
@@ -514,6 +612,8 @@ export default function ReceiptsPage() {
             format: sendFormat,
             to_email: sendChannel === "email" ? sendToEmail.trim() : undefined,
             printer_name: sendChannel === "print" ? sendPrinterName.trim() : undefined,
+            email_subject_template: sendChannel === "email" ? sendEmailSubject : undefined,
+            email_message_template: sendChannel === "email" ? sendEmailMessage : undefined,
             send_now: true,
           }),
         }
@@ -814,6 +914,12 @@ export default function ReceiptsPage() {
                           <Button size="sm" variant="outline" onClick={() => openSendReceipt(r.id)}>
                             Send
                           </Button>
+                          <Button size="sm" variant="outline" onClick={() => void openShareReceipt(r.id)} disabled={shareLoading}>
+                            Share
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => void saveReceiptPdf(r.id)} disabled={savingDocumentId === r.id}>
+                            {savingDocumentId === r.id ? "Saving PDF..." : "Save PDF"}
+                          </Button>
                           <Button size="sm" variant="destructive" onClick={() => requestDelete(r.id)}>
                             {t("delete")}
                           </Button>
@@ -991,7 +1097,7 @@ export default function ReceiptsPage() {
               </Select>
             </div>
             {sendChannel === "email" ? (
-              <div>
+              <div className="space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <Label htmlFor="send_email">To Email</Label>
                   <span
@@ -1018,6 +1124,23 @@ export default function ReceiptsPage() {
                 />
                 {sendEmailWarning ? <div className="mt-1 text-xs text-amber-700">{sendEmailWarning}</div> : null}
                 {sendToEmail.trim() && !isValidEmail(sendToEmail) ? <div className="mt-1 text-xs text-red-700">Invalid email format</div> : null}
+                <div>
+                  <Label htmlFor="send_email_subject">Subject Template</Label>
+                  <Input id="send_email_subject" value={sendEmailSubject} onChange={(e) => setSendEmailSubject(e.target.value)} disabled={sendingDoc} />
+                </div>
+                <div>
+                  <Label htmlFor="send_email_message">Message Template</Label>
+                  <textarea
+                    id="send_email_message"
+                    value={sendEmailMessage}
+                    onChange={(e) => setSendEmailMessage(e.target.value)}
+                    disabled={sendingDoc}
+                    className="min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  />
+                  <div className="mt-1 text-xs text-gray-600">
+                    Available placeholders: {"{customer_name}"}, {"{document_number}"}, {"{company_name}"}, {"{download_url}"}
+                  </div>
+                </div>
               </div>
             ) : null}
             {sendChannel === "whatsapp" ? (
@@ -1066,6 +1189,37 @@ export default function ReceiptsPage() {
               </Button>
               <Button onClick={() => void sendReceipt()} disabled={sendingDoc} aria-busy={sendingDoc}>
                 {sendingDoc ? "Sending..." : "Send"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Share Receipt</DialogTitle>
+          </DialogHeader>
+          <div className="p-6 pt-0 space-y-4">
+            <div>
+              <Label htmlFor="share_receipt_link">Secure Link</Label>
+              <Input id="share_receipt_link" value={shareLink} readOnly />
+              <div className="mt-1 text-xs text-gray-600">
+                {shareExpiresAt ? `Expires ${new Date(shareExpiresAt).toLocaleString()}.` : "Secure, time-limited access link."}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Button variant="outline" onClick={() => void shareReceiptVia("copy")} disabled={!shareLink}>
+                Copy Link
+              </Button>
+              <Button variant="outline" onClick={() => void shareReceiptVia("whatsapp")} disabled={!shareLink}>
+                WhatsApp
+              </Button>
+              <Button variant="outline" onClick={() => void shareReceiptVia("telegram")} disabled={!shareLink}>
+                Telegram
+              </Button>
+              <Button variant="outline" onClick={() => void shareReceiptVia("email")} disabled={!shareLink}>
+                Email
               </Button>
             </div>
           </div>
