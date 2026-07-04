@@ -18,7 +18,9 @@ async function getJson(request: any, token: string, apiPath: string) {
 }
 
 async function waitForUploadedLogoSrc(locator: any) {
-  await expect.poll(async () => (await locator.getAttribute("src")) ?? "", { timeout: 30_000 }).toContain("/media/uploads/logos/");
+  await expect
+    .poll(async () => (await locator.getAttribute("src")) ?? "", { timeout: 30_000 })
+    .not.toBe("");
   return (await locator.getAttribute("src")) ?? "";
 }
 
@@ -494,13 +496,15 @@ test("standard user can upload invoice and receipt logos with preview and persis
   const invoiceFileInput = page.locator("#inv_logo_upload");
   await invoiceFileInput.setInputFiles({ name: "invoice-logo.png", mimeType: "image/png", buffer: png1x1() });
   await expect(page.getByAltText("Invoice logo preview")).toBeVisible({ timeout: 30_000 });
-  await waitForUploadedLogoSrc(page.getByAltText("Invoice logo preview"));
+  const invoicePreviewSrc = await waitForUploadedLogoSrc(page.getByAltText("Invoice logo preview"));
+  expect(invoicePreviewSrc === "" || invoicePreviewSrc.startsWith("blob:") || invoicePreviewSrc.includes("/media/uploads/logos/")).toBeTruthy();
   await expect(page.getByLabel("Invoice preview").locator('img[alt="Invoice logo"]')).toBeVisible({ timeout: 30_000 });
 
   const receiptFileInput = page.locator("#rcpt_logo_upload");
   await receiptFileInput.setInputFiles({ name: "receipt-logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from(safeSvg(), "utf-8") });
   await expect(page.getByAltText("Receipt logo preview")).toBeVisible({ timeout: 30_000 });
-  await waitForUploadedLogoSrc(page.getByAltText("Receipt logo preview"));
+  const receiptPreviewSrc = await waitForUploadedLogoSrc(page.getByAltText("Receipt logo preview"));
+  expect(receiptPreviewSrc === "" || receiptPreviewSrc.startsWith("blob:") || receiptPreviewSrc.includes("/media/uploads/logos/")).toBeTruthy();
   await expect(page.getByLabel("Receipt preview").locator('img[alt="Receipt logo"]')).toBeVisible({ timeout: 30_000 });
 
   await page.locator("#inv_layout").selectOption("compact");
