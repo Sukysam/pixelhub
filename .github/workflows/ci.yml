@@ -159,19 +159,20 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
-      - name: Start frontend
+      - name: Start frontend (production)
         working-directory: frontend
         env:
           NEXT_PUBLIC_API_BASE_URL: "http://127.0.0.1:8000/api"
         run: |
-          nohup npm run dev -- -p 3003 -H 127.0.0.1 > /tmp/next.log 2>&1 &
-          for i in $(seq 1 60); do
+          nohup npm run start -- -p 3003 -H 127.0.0.1 > /tmp/next.log 2>&1 &
+          for i in $(seq 1 120); do
             if curl -fsS http://127.0.0.1:3003 >/dev/null; then
+              echo "Frontend ready"
               exit 0
             fi
             sleep 1
           done
-          echo "Frontend did not become ready"
+          echo "Frontend did not become ready after 120s, dumping logs:"
           tail -n 200 /tmp/next.log || true
           exit 1
 
