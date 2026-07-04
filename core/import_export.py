@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
 import uuid
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Callable
+from typing import Any, Callable
 
 from django.core.cache import cache
 from django.core.validators import validate_email
@@ -19,6 +20,7 @@ from openpyxl import load_workbook
 from .models import Customer, Expense, Invoice, InvoiceItem, Item
 
 CENTS = Decimal("0.01")
+logger = logging.getLogger(__name__)
 
 
 def _q2(value: Decimal) -> Decimal:
@@ -63,9 +65,103 @@ def _cache_error_log(errors: list[dict]) -> str:
     return str(token)
 
 
+def process_batch_import(
+    raw_items: list[dict],
+    *,
+    validate_item: Callable[[dict], tuple[Any | None, list[dict]]],
+    persist_valid_items: Callable[[list[Any]], tuple[int, list[dict] | None]],
+    dry_run: bool,
+    rollback_on_error: bool,
+    imported_key: str = "imported",
+    planned_key: str = "would_create",
+    empty_success_value: int = 0,
+) -> tuple[int, dict]:
+    valid_items: list[Any] = []
+    errors: list[dict] = []
+    successful_items: list[dict] = []
+    failed_items: list[dict] = []
+
+    for raw_item in raw_items:
+        row_num = int(raw_item.get("_row") or 0)
+        try:
+            normalized, item_errors = validate_item(raw_item)
+        except Exception as exc:
+            logger.exception("batch_import.item_exception row=%s error=%s", row_num, exc)
+            normalized = None
+            item_errors = [{"row": row_num, "field": "non_field_errors", "message": "Unexpected import error"}]
+
+        if item_errors:
+            errors.extend(item_errors)
+            failed_items.append(
+                {
+                    "row": row_num,
+                    "item": {k: v for k, v in raw_item.items() if k != "_row"},
+                    "errors": item_errors,
+                }
+            )
+            logger.warning("batch_import.item_failed row=%s errors=%s", row_num, item_errors)
+            continue
+
+        valid_items.append(normalized)
+        successful_items.append(
+            {
+                "row": row_num,
+                "item": {k: v for k, v in raw_item.items() if k != "_row"},
+            }
+        )
+
+    if errors and rollback_on_error:
+        token = _cache_error_log(errors)
+        logger.info(
+            "batch_import.rollback rows=%s valid_items=%s failed_items=%s",
+            len(raw_items),
+            len(valid_items),
+            len(failed_items),
+        )
+        return 400, {
+            imported_key: empty_success_value,
+            "rows": len(raw_items),
+            "errors": errors[:200],
+            "successful_items": [],
+            "failed_items": failed_items[:200],
+            "error_log_token": token,
+            "rolled_back": True,
+        }
+
+    if dry_run:
+        logger.info(
+            "batch_import.dry_run rows=%s planned=%s failed_items=%s",
+            len(raw_items),
+            len(valid_items),
+            len(failed_items),
+        )
+        return 200, {
+            "dry_run": True,
+            "rows": len(raw_items),
+            planned_key: len(valid_items),
+            "errors": errors,
+            "successful_items": successful_items,
+            "failed_items": failed_items,
+        }
+
+    created_count, persisted_items = persist_valid_items(valid_items)
+    logger.info(
+        "batch_import.complete rows=%s created=%s failed_items=%s",
+        len(raw_items),
+        created_count,
+        len(failed_items),
+    )
+    return 200, {
+        imported_key: created_count,
+        "rows": len(raw_items),
+        "errors": errors,
+        "successful_items": persisted_items if persisted_items is not None else successful_items,
+        "failed_items": failed_items,
+    }
+
+
 def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
-    errors: list[dict] = []
 
     def _to_decimal(value, field: str):
         if value in (None, ""):
@@ -86,8 +182,7 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
             sku_values.append(sku)
     existing_skus = set(Item.objects.filter(sku__in=sku_values, is_deleted=False).values_list("sku", flat=True))
 
-    to_create: list[Item] = []
-    for r in rows:
+    def _validate_row(r: dict) -> tuple[Item | None, list[dict]]:
         row_num = int(r.get("_row") or 0)
         raw_type = str(r.get("type") or "product").strip() or "product"
         raw_name = str(r.get("name") or "").strip()
@@ -96,63 +191,58 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
         desc = str(raw_desc).strip() if raw_desc not in (None, "") else None
         uom = str(r.get("unit_of_measure") or "pcs").strip() or "pcs"
         tax_category = str(r.get("tax_category") or "standard").strip() or "standard"
+        row_errors: list[dict] = []
 
         if raw_type not in allowed_types:
-            errors.append({"row": row_num, "field": "type", "message": "Invalid type"})
-            continue
+            row_errors.append({"row": row_num, "field": "type", "message": "Invalid type"})
         if not raw_name:
-            errors.append({"row": row_num, "field": "name", "message": "Name is required"})
-            continue
+            row_errors.append({"row": row_num, "field": "name", "message": "Name is required"})
 
         if raw_sku:
             if raw_sku in seen_skus:
-                errors.append({"row": row_num, "field": "sku", "message": "Duplicate sku in file"})
-                continue
-            seen_skus.add(raw_sku)
-            if raw_sku in existing_skus:
-                errors.append({"row": row_num, "field": "sku", "message": "sku already exists"})
-                continue
+                row_errors.append({"row": row_num, "field": "sku", "message": "Duplicate sku in file"})
+            else:
+                seen_skus.add(raw_sku)
+                if raw_sku in existing_skus:
+                    row_errors.append({"row": row_num, "field": "sku", "message": "sku already exists"})
         else:
             key = f"{raw_type}:{raw_name.lower()}"
             if key in seen_name_keys:
-                errors.append({"row": row_num, "field": "name", "message": "Duplicate name/type in file"})
-                continue
-            seen_name_keys.add(key)
+                row_errors.append({"row": row_num, "field": "name", "message": "Duplicate name/type in file"})
+            else:
+                seen_name_keys.add(key)
 
         unit_price, unit_price_err = _to_decimal(r.get("unit_price"), "unit_price")
         if unit_price_err:
-            errors.append({"row": row_num, "field": "unit_price", "message": unit_price_err})
-            continue
+            row_errors.append({"row": row_num, "field": "unit_price", "message": unit_price_err})
         if unit_price is None:
-            errors.append({"row": row_num, "field": "unit_price", "message": "unit_price is required"})
-            continue
-        if unit_price < 0:
-            errors.append({"row": row_num, "field": "unit_price", "message": "unit_price must be >= 0"})
-            continue
+            row_errors.append({"row": row_num, "field": "unit_price", "message": "unit_price is required"})
+        elif unit_price < 0:
+            row_errors.append({"row": row_num, "field": "unit_price", "message": "unit_price must be >= 0"})
 
         tax_rate, tax_rate_err = _to_decimal(r.get("tax_rate", 0), "tax_rate")
         if tax_rate_err:
-            errors.append({"row": row_num, "field": "tax_rate", "message": tax_rate_err})
-            continue
+            row_errors.append({"row": row_num, "field": "tax_rate", "message": tax_rate_err})
         if tax_rate is None:
             tax_rate = Decimal("0")
         if tax_rate < 0 or tax_rate > 100:
-            errors.append({"row": row_num, "field": "tax_rate", "message": "tax_rate must be between 0 and 100"})
-            continue
+            row_errors.append({"row": row_num, "field": "tax_rate", "message": "tax_rate must be between 0 and 100"})
 
         stock_qty_raw = r.get("stock_quantity", 0)
         try:
             stock_qty = int(stock_qty_raw) if stock_qty_raw not in (None, "") else 0
         except (TypeError, ValueError):
-            errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be an integer"})
-            continue
-        if stock_qty < 0:
-            errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be >= 0"})
-            continue
+            stock_qty = None
+            row_errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be an integer"})
+        if stock_qty is not None and stock_qty < 0:
+            row_errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be >= 0"})
         if raw_type == "service":
             stock_qty = 0
 
-        to_create.append(
+        if row_errors:
+            return None, row_errors
+
+        return (
             Item(
                 type=raw_type,
                 sku=raw_sku,
@@ -162,24 +252,27 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
                 tax_rate=tax_rate,
                 tax_category=tax_category,
                 unit_of_measure=uom,
-                stock_quantity=stock_qty,
-            )
+                stock_quantity=stock_qty or 0,
+            ),
+            [],
         )
 
-    if errors and rollback_on_error:
-        token = _cache_error_log(errors)
-        return 400, {"imported": 0, "rows": len(rows), "errors": errors[:200], "error_log_token": token, "rolled_back": True}
+    def _persist(valid_items: list[Item]) -> tuple[int, list[dict] | None]:
+        created = 0
+        with transaction.atomic():
+            batch_size = 1000
+            for i in range(0, len(valid_items), batch_size):
+                Item.objects.bulk_create(valid_items[i : i + batch_size], batch_size=batch_size)
+                created += len(valid_items[i : i + batch_size])
+        return created, None
 
-    if dry_run:
-        return 200, {"dry_run": True, "rows": len(rows), "would_create": len(to_create), "errors": errors}
-
-    created = 0
-    with transaction.atomic():
-        batch_size = 1000
-        for i in range(0, len(to_create), batch_size):
-            Item.objects.bulk_create(to_create[i : i + batch_size], batch_size=batch_size)
-            created += len(to_create[i : i + batch_size])
-    return 200, {"imported": created, "rows": len(rows), "errors": errors}
+    return process_batch_import(
+        rows,
+        validate_item=_validate_row,
+        persist_valid_items=_persist,
+        dry_run=dry_run,
+        rollback_on_error=rollback_on_error,
+    )
 
 
 def import_invoices_from_upload(
@@ -429,7 +522,6 @@ def import_invoices_from_upload(
 
 def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
-    errors: list[dict] = []
     seen_emails: set[str] = set()
     seen_names: set[str] = set()
     name_max_length = int(Customer._meta.get_field("name").max_length or 0)
@@ -446,75 +538,74 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
     )
     existing_emails = {str(v or "").lower() for v in existing_emails if v}
 
-    to_create: list[Customer] = []
-    for r in rows:
+    def _validate_row(r: dict) -> tuple[Customer | None, list[dict]]:
         row_num = int(r.get("_row") or 0)
         name = str(r.get("name") or "").strip()
         email = str(r.get("email") or "").strip() or None
         phone = str(r.get("phone") or "").strip() or None
         billing_address = str(r.get("billing_address") or "").strip() or None
+        row_errors: list[dict] = []
 
         if not name:
-            errors.append({"row": row_num, "field": "name", "message": "name is required"})
-            continue
+            row_errors.append({"row": row_num, "field": "name", "message": "name is required"})
         if name_max_length and len(name) > name_max_length:
-            errors.append({"row": row_num, "field": "name", "message": f"name must be at most {name_max_length} characters"})
-            continue
+            row_errors.append({"row": row_num, "field": "name", "message": f"name must be at most {name_max_length} characters"})
         name_key = name.lower()
         if name_key in seen_names:
-            errors.append({"row": row_num, "field": "name", "message": "Duplicate name in file"})
-            continue
-        seen_names.add(name_key)
+            row_errors.append({"row": row_num, "field": "name", "message": "Duplicate name in file"})
+        else:
+            seen_names.add(name_key)
 
         if email:
             if email_max_length and len(email) > email_max_length:
-                errors.append({"row": row_num, "field": "email", "message": f"email must be at most {email_max_length} characters"})
-                continue
+                row_errors.append({"row": row_num, "field": "email", "message": f"email must be at most {email_max_length} characters"})
             email_key = email.lower()
             if email_key in seen_emails:
-                errors.append({"row": row_num, "field": "email", "message": "Duplicate email in file"})
-                continue
-            seen_emails.add(email_key)
+                row_errors.append({"row": row_num, "field": "email", "message": "Duplicate email in file"})
+            else:
+                seen_emails.add(email_key)
             if email_key in existing_emails:
-                errors.append({"row": row_num, "field": "email", "message": "email already exists"})
-                continue
+                row_errors.append({"row": row_num, "field": "email", "message": "email already exists"})
             try:
                 validate_email(email)
             except DjangoValidationError:
-                errors.append({"row": row_num, "field": "email", "message": "Invalid email"})
-                continue
+                row_errors.append({"row": row_num, "field": "email", "message": "Invalid email"})
         if phone and phone_max_length and len(phone) > phone_max_length:
-            errors.append({"row": row_num, "field": "phone", "message": f"phone must be at most {phone_max_length} characters"})
-            continue
+            row_errors.append({"row": row_num, "field": "phone", "message": f"phone must be at most {phone_max_length} characters"})
 
-        to_create.append(
+        if row_errors:
+            return None, row_errors
+
+        return (
             Customer(
                 name=name,
                 email=email,
                 phone=phone,
                 billing_address=billing_address,
-            )
+            ),
+            [],
         )
 
-    if errors and rollback_on_error:
-        token = _cache_error_log(errors)
-        return 400, {"imported": 0, "rows": len(rows), "errors": errors[:200], "error_log_token": token, "rolled_back": True}
+    def _persist(valid_items: list[Customer]) -> tuple[int, list[dict] | None]:
+        created = 0
+        with transaction.atomic():
+            for i in range(0, len(valid_items), 1000):
+                batch = valid_items[i : i + 1000]
+                Customer.objects.bulk_create(batch, batch_size=1000)
+                created += len(batch)
+        return created, None
 
-    if dry_run:
-        return 200, {"dry_run": True, "rows": len(rows), "would_create": len(to_create), "errors": errors}
-
-    created = 0
-    with transaction.atomic():
-        for i in range(0, len(to_create), 1000):
-            batch = to_create[i : i + 1000]
-            Customer.objects.bulk_create(batch, batch_size=1000)
-            created += len(batch)
-    return 200, {"imported": created, "rows": len(rows), "errors": errors}
+    return process_batch_import(
+        rows,
+        validate_item=_validate_row,
+        persist_valid_items=_persist,
+        dry_run=dry_run,
+        rollback_on_error=rollback_on_error,
+    )
 
 
 def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: bool, actor=None) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
-    errors: list[dict] = []
     flags: list[dict] = []
     User = get_user_model()
 
@@ -524,62 +615,56 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
     def _clean(value) -> str:
         return str(value or "").strip()
 
-    def _parse_date(value, field: str, row_num: int):
+    def _parse_date(value, field: str, row_num: int, row_errors: list[dict]):
         raw = _clean(value)
         if not raw:
             return None
         try:
             return date.fromisoformat(raw)
         except ValueError:
-            errors.append({"row": row_num, "field": field, "message": "Invalid date. Use YYYY-MM-DD"})
+            row_errors.append({"row": row_num, "field": field, "message": "Invalid date. Use YYYY-MM-DD"})
             return None
 
-    def _parse_decimal(value, field: str, row_num: int):
+    def _parse_decimal(value, field: str, row_num: int, row_errors: list[dict]):
         if value in (None, ""):
-            errors.append({"row": row_num, "field": field, "message": f"{field} is required"})
+            row_errors.append({"row": row_num, "field": field, "message": f"{field} is required"})
             return None
         try:
             return Decimal(str(value))
         except (InvalidOperation, TypeError):
-            errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
+            row_errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
             return None
 
     allowed_statuses = {s for s, _ in Expense.APPROVAL_STATUS_CHOICES}
-    to_create: list[Expense] = []
-    for r in rows:
-        row_num = int(r.get("_row") or 0)
-        amount = _parse_decimal(r.get("amount"), "amount", row_num)
-        if amount is None:
-            continue
-        if amount <= 0:
-            errors.append({"row": row_num, "field": "amount", "message": "amount must be > 0"})
-            continue
 
-        expense_date = _parse_date(r.get("expense_date"), "expense_date", row_num) or timezone.localdate()
+    def _validate_row(r: dict) -> tuple[Expense | None, list[dict]]:
+        row_num = int(r.get("_row") or 0)
+        row_errors: list[dict] = []
+        amount = _parse_decimal(r.get("amount"), "amount", row_num, row_errors)
+        if amount is not None and amount <= 0:
+            row_errors.append({"row": row_num, "field": "amount", "message": "amount must be > 0"})
+
+        expense_date = _parse_date(r.get("expense_date"), "expense_date", row_num, row_errors) or timezone.localdate()
         category = _clean(r.get("category"))
         if not category:
-            errors.append({"row": row_num, "field": "category", "message": "category is required"})
-            continue
+            row_errors.append({"row": row_num, "field": "category", "message": "category is required"})
         project_code = _clean(r.get("project_code")) or None
         cost_center = _clean(r.get("cost_center")) or None
         if not project_code and not cost_center:
-            errors.append({"row": row_num, "field": "project_code", "message": "project_code or cost_center is required"})
-            continue
+            row_errors.append({"row": row_num, "field": "project_code", "message": "project_code or cost_center is required"})
 
         approval_status = _clean(r.get("approval_status") or Expense.APPROVAL_STATUS_SUBMITTED) or Expense.APPROVAL_STATUS_SUBMITTED
         if approval_status not in allowed_statuses:
-            errors.append({"row": row_num, "field": "approval_status", "message": "Invalid approval_status"})
-            continue
+            row_errors.append({"row": row_num, "field": "approval_status", "message": "Invalid approval_status"})
 
         assigned_to_name = _clean(r.get("assigned_to")) or None
         assigned_to = users_by_name.get(assigned_to_name) if assigned_to_name else actor
         if assigned_to_name and assigned_to is None:
-            errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
-            continue
+            row_errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
 
         policy_status = Expense.POLICY_STATUS_COMPLIANT
         policy_notes: list[str] = []
-        if amount >= Decimal("1000.00"):
+        if amount is not None and amount >= Decimal("1000.00"):
             policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
             policy_notes.append("Receipt upload required after import for expenses >= 1000.00")
         if expense_date > timezone.localdate():
@@ -588,7 +673,10 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         if policy_status != Expense.POLICY_STATUS_COMPLIANT:
             flags.append({"row": row_num, "status": policy_status, "notes": "; ".join(policy_notes)})
 
-        to_create.append(
+        if row_errors:
+            return None, row_errors
+
+        return (
             Expense(
                 amount=amount,
                 expense_date=expense_date,
@@ -605,33 +693,25 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
                 created_by=actor if getattr(actor, "is_authenticated", False) else None,
                 approved_by=(actor if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
                 approved_at=(timezone.now() if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
-            )
+            ),
+            [],
         )
 
-    if errors and rollback_on_error:
-        token = _cache_error_log(errors)
-        return 400, {
-            "imported": 0,
-            "rows": len(rows),
-            "errors": errors[:200],
-            "flags": flags[:200],
-            "error_log_token": token,
-            "rolled_back": True,
-        }
+    def _persist(valid_items: list[Expense]) -> tuple[int, list[dict] | None]:
+        created = 0
+        with transaction.atomic():
+            for i in range(0, len(valid_items), 1000):
+                batch = valid_items[i : i + 1000]
+                Expense.objects.bulk_create(batch, batch_size=1000)
+                created += len(batch)
+        return created, None
 
-    if dry_run:
-        return 200, {
-            "dry_run": True,
-            "rows": len(rows),
-            "would_create": len(to_create),
-            "errors": errors,
-            "flags": flags,
-        }
-
-    created = 0
-    with transaction.atomic():
-        for i in range(0, len(to_create), 1000):
-            batch = to_create[i : i + 1000]
-            Expense.objects.bulk_create(batch, batch_size=1000)
-            created += len(batch)
-    return 200, {"imported": created, "rows": len(rows), "errors": errors, "flags": flags}
+    status_code, payload = process_batch_import(
+        rows,
+        validate_item=_validate_row,
+        persist_valid_items=_persist,
+        dry_run=dry_run,
+        rollback_on_error=rollback_on_error,
+    )
+    payload["flags"] = flags[:200] if status_code >= 400 else flags
+    return status_code, payload

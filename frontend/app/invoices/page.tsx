@@ -142,6 +142,7 @@ interface LineItem {
   id: number;
   itemId: number | null;
   quantity: string;
+  unitPrice: string;
   taxRateOverride: string;
 }
 
@@ -155,6 +156,18 @@ function parseTaxRate(value: string): number | null {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || n > 100) return null;
   return n;
+}
+
+function parseUnitPrice(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function moneyInputValue(value: number): string {
+  return roundMoney(value).toFixed(2);
 }
 
 function luhnOk(value: string) {
@@ -849,10 +862,12 @@ export default function InvoicesPage() {
       if (!qty) continue;
       const item = itemsById.get(li.itemId);
       if (!item) continue;
+      const lineUnitPrice = parseUnitPrice(li.unitPrice);
+      if (lineUnitPrice === null) continue;
       const effectiveTaxRate =
         li.taxRateOverride.trim() !== "" ? parseTaxRate(li.taxRateOverride) : item.tax_rate;
       const taxRate = effectiveTaxRate ?? 0;
-      const { lineSubtotal, lineTax, lineTotal } = calcLineTotals(item.unit_price, qty, taxRate);
+      const { lineSubtotal, lineTax, lineTotal } = calcLineTotals(lineUnitPrice, qty, taxRate);
       subtotal += lineSubtotal;
       taxTotal += lineTax;
       grandTotal += lineTotal;
@@ -868,7 +883,7 @@ export default function InvoicesPage() {
   );
 
   const addLineItem = () => {
-    const li: LineItem = { id: Date.now(), itemId: null, quantity: "1", taxRateOverride: "" };
+    const li: LineItem = { id: Date.now(), itemId: null, quantity: "1", unitPrice: "", taxRateOverride: "" };
     setLineItems((prev) => [...prev, li]);
     setPickerLineId(li.id);
     setIsPickerOpen(true);
@@ -945,7 +960,7 @@ export default function InvoicesPage() {
       setInventoryItems((prev) => [normalized, ...prev]);
 
       if (addItemTargetLineId !== null) {
-        updateLineItem(addItemTargetLineId, { itemId: normalized.id });
+        updateLineItem(addItemTargetLineId, { itemId: normalized.id, unitPrice: moneyInputValue(normalized.unit_price) });
       }
 
       setIsAddItemOpen(false);
@@ -980,7 +995,7 @@ export default function InvoicesPage() {
       return;
     }
 
-    const normalizedLines: Array<{ item: number; quantity: number; tax_rate?: number }> = [];
+    const normalizedLines: Array<{ item: number; quantity: number; unit_price: number; tax_rate?: number }> = [];
     for (const li of lineItems) {
       if (!li.itemId) {
         setError("Please select an item for each line");
@@ -996,10 +1011,16 @@ export default function InvoicesPage() {
         setError("Tax rate override must be a number between 0 and 100");
         return;
       }
+      const unitPrice = parseUnitPrice(li.unitPrice);
+      if (unitPrice === null) {
+        setError("Unit price must be a valid number >= 0");
+        return;
+      }
 
-      const payloadLine: { item: number; quantity: number; tax_rate?: number } = {
+      const payloadLine: { item: number; quantity: number; unit_price: number; tax_rate?: number } = {
         item: li.itemId,
         quantity: qty,
+        unit_price: unitPrice,
       };
       if (override !== null) payloadLine.tax_rate = override;
       normalizedLines.push(payloadLine);
@@ -1504,7 +1525,8 @@ export default function InvoicesPage() {
                   {lineItems.map((li) => {
                     const invItem = li.itemId ? itemsById.get(li.itemId) : undefined;
                     const qty = parsePositiveInt(li.quantity) ?? 0;
-                    const unitPrice = invItem?.unit_price ?? 0;
+                    const parsedUnitPrice = parseUnitPrice(li.unitPrice);
+                    const unitPrice = parsedUnitPrice ?? 0;
                     const effectiveTaxRate =
                       li.taxRateOverride.trim() !== ""
                         ? parseTaxRate(li.taxRateOverride) ?? 0
@@ -1550,7 +1572,22 @@ export default function InvoicesPage() {
                           {invItem ? <div className="mt-1 text-xs text-gray-500">{invItem.unit_of_measure}</div> : null}
                         </td>
                         <td className="px-4 py-3">
-                          <div className="h-10 flex items-center text-sm text-gray-700">{formatMoney(unitPrice)}</div>
+                          <div className="space-y-1">
+                            <Input
+                              type="number"
+                              value={li.unitPrice}
+                              onChange={(e) => updateLineItem(li.id, { unitPrice: e.target.value })}
+                              placeholder={invItem ? moneyInputValue(invItem.unit_price) : "0.00"}
+                              min="0"
+                              step="0.01"
+                              disabled={loading || !invItem}
+                              aria-label="Editable unit price"
+                            />
+                            <div className="text-xs text-gray-500">Editable price</div>
+                            {li.unitPrice.trim() !== "" && parsedUnitPrice === null ? (
+                              <div className="text-xs text-red-600">{"Enter a valid amount >= 0"}</div>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-sm font-medium">{formatMoney(lineTotal)}</td>
                         <td className="px-4 py-3">
@@ -2130,7 +2167,7 @@ export default function InvoicesPage() {
                     className="w-full text-left p-3 hover:bg-gray-50"
                     onClick={() => {
                       if (pickerLineId === null) return;
-                      updateLineItem(pickerLineId, { itemId: i.id });
+                      updateLineItem(pickerLineId, { itemId: i.id, unitPrice: moneyInputValue(i.unit_price) });
                       setIsPickerOpen(false);
                       setPickerLineId(null);
                       setItemSearch("");

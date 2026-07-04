@@ -2621,6 +2621,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     item_id = raw.get("item") or raw.get("item_id") or raw.get("itemId")
                     qty = raw.get("quantity")
                     override_tax_rate = raw.get("tax_rate")
+                    override_unit_price = raw.get("unit_price")
                     try:
                         item_id = int(item_id)
                     except (TypeError, ValueError):
@@ -2631,8 +2632,19 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                         raise ValidationError("Each item must include a valid quantity")
                     if qty < 1:
                         raise ValidationError("quantity must be >= 1")
+                    if override_unit_price in (None, ""):
+                        normalized_unit_price = None
+                    else:
+                        try:
+                            normalized_unit_price = Decimal(str(override_unit_price))
+                        except (InvalidOperation, TypeError):
+                            raise ValidationError({"unit_price": "Each item must include a valid unit_price"})
+                        if not normalized_unit_price.is_finite():
+                            raise ValidationError({"unit_price": "Each item must include a valid unit_price"})
+                        if normalized_unit_price < 0:
+                            raise ValidationError({"unit_price": "unit_price must be >= 0"})
                     item_ids.append(item_id)
-                    normalized_items.append((item_id, qty, override_tax_rate))
+                    normalized_items.append((item_id, qty, override_tax_rate, normalized_unit_price))
 
                 items_by_id = {i.id: i for i in Item.objects.select_for_update().filter(id__in=item_ids, is_deleted=False)}
                 if len(items_by_id) != len(set(item_ids)):
@@ -2641,9 +2653,9 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 subtotal = Decimal("0.00")
                 tax_total = Decimal("0.00")
                 created_lines = []
-                for item_id, qty, override_tax_rate in normalized_items:
+                for item_id, qty, override_tax_rate, override_unit_price in normalized_items:
                     db_item = items_by_id[item_id]
-                    unit_price = db_item.unit_price
+                    unit_price = _q2(override_unit_price if override_unit_price is not None else db_item.unit_price)
                     line_subtotal = _q2(unit_price * qty)
 
                     if override_tax_rate is None or override_tax_rate == "":

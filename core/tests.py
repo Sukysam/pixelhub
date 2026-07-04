@@ -53,6 +53,7 @@ from .models import (
     evaluate_invoice_payment_status,
 )
 from .import_export import (
+    process_batch_import,
     import_customers_from_upload,
     import_expenses_from_upload,
     import_invoices_from_upload,
@@ -1498,6 +1499,49 @@ class InvoiceDiscountTests(APITestCase):
         self.assertEqual(Decimal(patch_res.data["discount_amount"]), Decimal("5.00"))
         self.assertEqual(Decimal(patch_res.data["total_amount"]), Decimal("17.00"))
 
+    def test_invoice_create_accepts_unit_price_override_and_recomputes_totals(self):
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 2, "unit_price": "12.50"}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(res.data["subtotal"]), Decimal("25.00"))
+        self.assertEqual(Decimal(res.data["tax_total"]), Decimal("2.50"))
+        self.assertEqual(Decimal(res.data["total_amount"]), Decimal("27.50"))
+        self.assertEqual(Decimal(res.data["invoice_items"][0]["unit_price"]), Decimal("12.50"))
+        self.assertEqual(Decimal(res.data["invoice_items"][0]["line_total"]), Decimal("27.50"))
+
+    def test_invoice_create_rejects_negative_or_invalid_unit_price_override(self):
+        invalid_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 1, "unit_price": "abc"}],
+            },
+            format="json",
+        )
+        self.assertEqual(invalid_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("unit_price", str(invalid_res.data).lower())
+
+        negative_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 1, "unit_price": "-1.00"}],
+            },
+            format="json",
+        )
+        self.assertEqual(negative_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("unit_price", str(negative_res.data).lower())
+
     def test_invoice_render_includes_discount_details(self):
         invoice = Invoice.objects.create(
             invoice_number="INV-DISC-1",
@@ -2055,7 +2099,43 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertIn(("tax_rate", "tax_rate must be between 0 and 100"), messages)
         self.assertIn(("stock_quantity", "stock_quantity must be an integer"), messages)
         self.assertIn(("stock_quantity", "stock_quantity must be >= 0"), messages)
+        self.assertEqual(len(payload["successful_items"]), 3)
+        self.assertEqual(len(payload["failed_items"]), 10)
         self.assertFalse(Item.objects.filter(sku="SKU-SVC", is_deleted=False).exists())
+
+    def test_process_batch_import_separates_successful_and_failed_items(self):
+        raw_items = [
+            {"_row": 2, "code": "GOOD-1", "amount": "12.00"},
+            {"_row": 3, "code": "BAD-1", "amount": "-5.00"},
+        ]
+
+        def validate_item(row):
+            try:
+                amount = Decimal(str(row["amount"]))
+            except Exception:
+                return None, [{"row": row["_row"], "field": "amount", "message": "Invalid amount"}]
+            if amount < 0:
+                return None, [{"row": row["_row"], "field": "amount", "message": "amount must be >= 0"}]
+            return {"code": row["code"], "amount": amount}, []
+
+        def persist_valid_items(valid_items):
+            return len(valid_items), [{"row": 2, "item": {"code": valid_items[0]["code"], "amount": str(valid_items[0]["amount"])}}]
+
+        status_code, payload = process_batch_import(
+            raw_items,
+            validate_item=validate_item,
+            persist_valid_items=persist_valid_items,
+            dry_run=False,
+            rollback_on_error=False,
+        )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(len(payload["successful_items"]), 1)
+        self.assertEqual(payload["successful_items"][0]["item"]["code"], "GOOD-1")
+        self.assertEqual(len(payload["failed_items"]), 1)
+        self.assertEqual(payload["failed_items"][0]["item"]["code"], "BAD-1")
+        self.assertEqual(payload["failed_items"][0]["errors"][0]["message"], "amount must be >= 0")
 
     def test_import_invoices_function_covers_name_lookup_and_validation_edges(self):
         Customer.objects.create(name="Lookup Buyer", email="lookup@example.com")
@@ -2202,7 +2282,7 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["imported"], 3)
+        self.assertEqual(payload["imported"], 2)
         messages = {(err["field"], err["message"]) for err in payload["errors"]}
         self.assertIn(("amount", "Invalid amount"), messages)
         self.assertIn(("amount", "amount must be > 0"), messages)
@@ -2213,7 +2293,7 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertTrue(any(flag["status"] == Expense.POLICY_STATUS_REVIEW_REQUIRED for flag in payload["flags"]))
 
         created = Expense.objects.filter(merchant_reference__isnull=False, is_deleted=False).order_by("id")
-        self.assertEqual(created.count(), 3)
+        self.assertEqual(created.count(), 2)
         self.assertTrue(all(exp.created_by == self.user for exp in created))
         approved = created.filter(approval_status=Expense.APPROVAL_STATUS_APPROVED).first()
         self.assertIsNotNone(approved)
