@@ -131,16 +131,28 @@ test("user can update invoice footer in settings", async ({ page }) => {
   await footer.fill(newValue);
 
   await page.getByRole("button", { name: "Save Changes" }).click();
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-
-  await expect(page.getByText("Settings updated.")).toBeVisible();
+  const saveDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Save settings?" }) });
+  await saveDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(saveDialog).toBeHidden({ timeout: 30_000 });
   await expect(footer).toHaveValue(newValue);
   await expect(page.getByText(newValue)).toBeVisible();
 
-  const savedSettings = (await getJson(page.request, session.token, "/settings/me/")) as {
+  await expect
+    .poll(
+      async () =>
+        ((await getJson(page.request, session.token, "/settings/me/")) as {
+          invoice_template: { footer_text?: string | null };
+        }).invoice_template.footer_text ?? null,
+      { timeout: 30_000 }
+    )
+    .toBe(newValue);
+
+  await expect(page.getByText("Settings updated.")).toBeVisible({ timeout: 30_000 });
+
+  const persistedSettings = (await getJson(page.request, session.token, "/settings/me/")) as {
     invoice_template: { footer_text?: string | null };
   };
-  expect(savedSettings.invoice_template.footer_text).toBe(newValue);
+  expect(persistedSettings.invoice_template.footer_text).toBe(newValue);
 
   await page.reload({ waitUntil: "networkidle" });
   await expect(page.getByLabel("Invoice Footer Text")).toHaveValue(newValue);
