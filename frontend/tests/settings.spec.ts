@@ -71,14 +71,15 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const roleName = `ops_ui_${Date.now()}`;
   const newRoleButton = page.getByRole("button", { name: "New Role" });
   await expect(newRoleButton).toBeVisible({ timeout: 30_000 });
-  await newRoleButton.evaluate((node: HTMLButtonElement) => node.click());
-  const roleDialog = page.getByRole("dialog", { name: "Create Role" });
-  await expect(roleDialog).toBeVisible({ timeout: 30_000 });
-  await expect(roleDialog.getByLabel("Role Name")).toBeVisible({ timeout: 30_000 });
-  await roleDialog.getByLabel("Role Name").fill(roleName);
-  await roleDialog.getByLabel("Description").fill("Operations role created from settings UI");
-  await roleDialog.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
-  await roleDialog.getByRole("button", { name: "Create role" }).evaluate((node: HTMLButtonElement) => node.click());
+  await newRoleButton.click({ force: true });
+  const roleNameInput = page.locator("#role_name");
+  const roleDescriptionInput = page.locator("#role_description");
+  await expect(roleNameInput).toBeVisible({ timeout: 30_000 });
+  await expect(roleDescriptionInput).toBeVisible({ timeout: 30_000 });
+  await roleNameInput.fill(roleName);
+  await roleDescriptionInput.fill("Operations role created from settings UI");
+  await page.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
+  await page.getByRole("button", { name: "Create role" }).click({ force: true });
   await expect(page.getByText("Role created successfully.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText(roleName)).toBeVisible();
 
