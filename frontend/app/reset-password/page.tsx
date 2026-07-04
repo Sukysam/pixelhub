@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -19,6 +19,24 @@ function passwordIssues(value: string): string[] {
   if (!/[^A-Za-z0-9]/.test(v)) issues.push("Special character");
   return issues;
 }
+
+// #region debug-point A:report
+function reportResetDebug(hypothesisId: string, msg: string, data: Record<string, unknown>) {
+  fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "webkit-reset-disabled",
+      runId: "pre-fix",
+      hypothesisId,
+      location: "frontend/app/reset-password/page.tsx",
+      msg: `[DEBUG] ${msg}`,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+}
+// #endregion
 
 export default function ResetPasswordPage() {
   return (
@@ -53,12 +71,47 @@ function ResetPasswordInner() {
   const pwMatch = newPassword.length > 0 && newPassword === newPasswordConfirm;
   const canSubmit = uid.length > 0 && token.length > 0 && pwOk && pwMatch && !submitting;
 
+  // #region debug-point B:mount-state
+  useEffect(() => {
+    reportResetDebug("B", "reset form mounted", {
+      hasUid: uid.length > 0,
+      hasToken: token.length > 0,
+      mode,
+    });
+  }, [uid, token, mode]);
+  // #endregion
+
+  // #region debug-point A:submit-state
+  useEffect(() => {
+    reportResetDebug("A", "reset form state updated", {
+      newPasswordLength: newPassword.length,
+      newPasswordConfirmLength: newPasswordConfirm.length,
+      pwIssues,
+      pwOk,
+      pwMatch,
+      hasUid: uid.length > 0,
+      hasToken: token.length > 0,
+      submitting,
+      canSubmit,
+    });
+  }, [newPassword, newPasswordConfirm, pwIssues, pwOk, pwMatch, uid, token, submitting, canSubmit]);
+  // #endregion
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
     try {
       setSubmitting(true);
+      // #region debug-point C:submit-attempt
+      reportResetDebug("C", "reset form submit attempted", {
+        canSubmit,
+        pwOk,
+        pwMatch,
+        hasUid: uid.length > 0,
+        hasToken: token.length > 0,
+      });
+      // #endregion
       const res = await apiRequest<{ reset: boolean; token: string }>("/auth/password-reset-confirm/", {
         method: "POST",
         body: JSON.stringify({ uid, token, new_password: newPassword, new_password_confirm: newPasswordConfirm, remember: rememberMe }),
@@ -98,7 +151,16 @@ function ResetPasswordInner() {
                   id="new_password"
                   type="password"
                   value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setNewPassword(value);
+                    // #region debug-point D:new-password-change
+                    reportResetDebug("D", "new password changed", {
+                      valueLength: value.length,
+                      issues: passwordIssues(value),
+                    });
+                    // #endregion
+                  }}
                   autoComplete="new-password"
                   required
                   aria-invalid={newPassword.length > 0 && !pwOk}
@@ -115,7 +177,17 @@ function ResetPasswordInner() {
                   id="new_password_confirm"
                   type="password"
                   value={newPasswordConfirm}
-                  onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setNewPasswordConfirm(value);
+                    // #region debug-point E:confirm-password-change
+                    reportResetDebug("E", "confirm password changed", {
+                      valueLength: value.length,
+                      matchesNewPassword: value === newPassword,
+                      newPasswordLength: newPassword.length,
+                    });
+                    // #endregion
+                  }}
                   autoComplete="new-password"
                   required
                   aria-invalid={newPasswordConfirm.length > 0 && !pwMatch}

@@ -11,7 +11,6 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 import os
-import secrets
 from pathlib import Path
 from urllib.parse import unquote, urlparse, parse_qs
 from corsheaders.defaults import default_headers
@@ -53,7 +52,11 @@ def _first_env(*keys: str) -> str:
             return value
     return ""
 
-_DEFAULT_INSECURE_SECRET_KEY = secrets.token_urlsafe(64) if DEBUG else ""
+_DEFAULT_INSECURE_SECRET_KEY = (
+    "pixelhub-debug-only-secret-key-change-me-for-shared-environments-2026-07"
+    if DEBUG
+    else ""
+)
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or _DEFAULT_INSECURE_SECRET_KEY
 if not DEBUG and (
     not SECRET_KEY
