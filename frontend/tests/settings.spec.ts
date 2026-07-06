@@ -793,6 +793,8 @@ test("invoice and receipt share and save actions generate links and downloads", 
     (window as any).__downloadObjectUrlCalls = 0;
     (window as any).__savedDocumentStatus = null;
     (window as any).__savedDocumentRequestCount = 0;
+    (window as any).__savedDocumentDownloadStatus = null;
+    (window as any).__savedDocumentDownloadRequestCount = 0;
     (window as any).open = (url: any) => {
       (window as any).__openCalls.push(String(url));
       return {} as any;
@@ -803,10 +805,15 @@ test("invoice and receipt share and save actions generate links and downloads", 
       },
     };
     Object.defineProperty(navigator, "clipboard", { value: clipboard, configurable: true });
+    const origCreateObjectURL = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = ((...args: any[]) => {
+      (window as any).__downloadObjectUrlCalls += 1;
+      return origCreateObjectURL(...(args as [any]));
+    }) as any;
+
     const origAnchorClick = HTMLAnchorElement.prototype.click;
     HTMLAnchorElement.prototype.click = function (...args) {
       if (this.hasAttribute("download") || String(this.href || "").startsWith("blob:")) {
-        (window as any).__downloadObjectUrlCalls += 1;
         return;
       }
       return origAnchorClick.apply(this, args as []);
@@ -819,6 +826,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
       if (url.includes("/api/documents/saved/")) {
         (window as any).__savedDocumentStatus = res.status;
         (window as any).__savedDocumentRequestCount += 1;
+      }
+      if (url.includes("/api/documents/saved/") && url.includes("/download/")) {
+        (window as any).__savedDocumentDownloadStatus = res.status;
+        (window as any).__savedDocumentDownloadRequestCount += 1;
       }
       return res;
     };
@@ -889,6 +900,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const invoiceSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeGreaterThanOrEqual(200);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeLessThan(300);
+  await page.waitForFunction(() => (window as any).__savedDocumentDownloadRequestCount > 0);
+  const invoiceDownloadStatus = await page.evaluate(() => (window as any).__savedDocumentDownloadStatus as number | null);
+  expect(invoiceDownloadStatus, "invoice download request should succeed").toBeGreaterThanOrEqual(200);
+  expect(invoiceDownloadStatus, "invoice download request should succeed").toBeLessThan(300);
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
 
   await page.goto("/receipts");
@@ -910,6 +925,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const receiptSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeGreaterThanOrEqual(200);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeLessThan(300);
+  await page.waitForFunction(() => (window as any).__savedDocumentDownloadRequestCount > 1);
+  const receiptDownloadStatus = await page.evaluate(() => (window as any).__savedDocumentDownloadStatus as number | null);
+  expect(receiptDownloadStatus, "receipt download request should succeed").toBeGreaterThanOrEqual(200);
+  expect(receiptDownloadStatus, "receipt download request should succeed").toBeLessThan(300);
   await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
 });
 
