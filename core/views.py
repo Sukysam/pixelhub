@@ -31,6 +31,7 @@ from django.core.cache import cache
 from django.core.mail import EmailMultiAlternatives, send_mail
 from django.conf import settings
 from django.db import transaction
+from django.db.utils import DatabaseError
 from django.db import models
 from django.db.models import F, Sum, Q, Max
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth
@@ -64,6 +65,7 @@ from .models import (
     EmailVerificationToken,
     AdminUserInvitation,
     AccessToken,
+    AdminMfaDevice,
     Role,
     Permission,
     RolePermission,
@@ -216,6 +218,60 @@ def _log_operation(user, action: str, content_type_model, object_id: str, change
 
 
 SYSTEM_ROLE_NAMES = {"user", "staff", "admin"}
+
+
+def _anonymize_user_artifacts_for_deletion(user) -> None:
+    user_id = getattr(user, "id", None)
+    if not user_id:
+        return
+
+    settings_row = UserSettings.objects.filter(user=user).first()
+    if settings_row is not None:
+        invoice_logo = settings_row.invoice_logo
+        receipt_logo = settings_row.receipt_logo
+        settings_row.invoice_logo = None
+        settings_row.receipt_logo = None
+        settings_row.save(update_fields=["invoice_logo", "receipt_logo", "updated_at"])
+        cleanup_logo_asset_if_unreferenced(invoice_logo)
+        cleanup_logo_asset_if_unreferenced(receipt_logo)
+
+    owned_logos = list(LogoAsset.objects.filter(owner=user))
+    for asset in owned_logos:
+        if asset.file:
+            asset.file.delete(save=False)
+        if asset.thumbnail:
+            asset.thumbnail.delete(save=False)
+        asset.delete()
+
+    for saved_doc in SavedDocument.objects.filter(user=user):
+        if saved_doc.file:
+            saved_doc.file.delete(save=False)
+        saved_doc.delete()
+
+    DocumentDelivery.objects.filter(user=user).delete()
+    SavedInvoiceView.objects.filter(user=user).delete()
+    SocialAuthConnection.objects.filter(user=user).delete()
+    EmailVerificationToken.objects.filter(user=user).delete()
+    AccessToken.objects.filter(user=user).delete()
+    AdminMfaDevice.objects.filter(user=user).delete()
+    UserRole.objects.filter(user=user).delete()
+    AdminUserInvitation.objects.filter(user=user).delete()
+    BusinessMembership.objects.filter(user=user).delete()
+
+    Expense.objects.filter(created_by=user).update(created_by=None)
+    Expense.objects.filter(assigned_to=user).update(assigned_to=None)
+    Expense.objects.filter(approved_by=user).update(approved_by=None)
+    PaymentTransaction.objects.filter(created_by=user).update(created_by=None)
+    BusinessAccount.objects.filter(owner=user).delete()
+
+    login_content_type = ContentType.objects.get_for_model(user.__class__)
+    AuditLog.objects.filter(content_type=login_content_type, object_id=str(user_id), action="security").update(
+        object_id=f"deleted-user:{user_id}",
+        changes={
+            "event": "deleted_user_activity_redacted",
+            "user_id": user_id,
+        },
+    )
 
 
 def _permission_codes_for_user(user) -> list[str]:
@@ -4874,7 +4930,7 @@ class AdminUsersApi(APIView):
         if not user_has_permission(request.user, "admin.users.read"):
             raise PermissionDenied("You do not have permission to view users.")
         User = get_user_model()
-        qs = User.objects.all().order_by("id")
+        qs = User.objects.all().order_by("-id")
         try:
             page = int(request.query_params.get("page", "1"))
         except ValueError:
@@ -5051,6 +5107,73 @@ class AdminUsersApi(APIView):
         if before != after or new_password:
             _log_audit(request.user, "update", u, changes)
         return Response({"updated": True}, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        if not user_has_permission(request.user, "admin.users.write"):
+            raise PermissionDenied("You do not have permission to manage users.")
+
+        user_id = request.data.get("id") or request.query_params.get("id")
+        confirm_keyword = str(request.data.get("confirm_keyword") or request.query_params.get("confirm_keyword") or "").strip()
+        confirm_email = str(request.data.get("confirm_email") or request.query_params.get("confirm_email") or "").strip().lower()
+
+        if user_id is None:
+            raise ValidationError({"id": "id is required"})
+        if confirm_keyword != "DELETE":
+            raise ValidationError({"confirm_keyword": "Type DELETE to confirm permanent removal."})
+
+        User = get_user_model()
+        try:
+            target = User.objects.get(pk=int(user_id))
+        except (User.DoesNotExist, ValueError, TypeError):
+            raise NotFound("User not found")
+
+        if int(request.user.id) == int(target.id):
+            raise ValidationError({"id": "You cannot delete your own account."})
+        if confirm_email != str(target.email or "").strip().lower():
+            raise ValidationError({"confirm_email": "Confirmation email does not match the selected user."})
+
+        target_snapshot = _serialize_admin_user(target, latest_login_at=_latest_login_timestamps_by_user([target.id]).get(target.id))
+        ip = _client_ip(request)
+
+        try:
+            with transaction.atomic():
+                _anonymize_user_artifacts_for_deletion(target)
+                user_content_type = ContentType.objects.get_for_model(User)
+                AuditLog.objects.filter(content_type=user_content_type, object_id=str(target.id)).exclude(action="security").delete()
+                _log_operation(
+                    request.user,
+                    "delete",
+                    User,
+                    f"deleted-user:{target.id}",
+                    {
+                        "deleted_user": {
+                            "id": target.id,
+                            "email": target.email,
+                            "username": target.username,
+                            "primary_role": target_snapshot.get("primary_role"),
+                            "custom_roles": target_snapshot.get("custom_roles", []),
+                        },
+                        "actor_admin_id": request.user.id,
+                        "actor_email": getattr(request.user, "email", None) or getattr(request.user, "username", None),
+                        "ip": ip,
+                        "deleted_at": timezone.now().isoformat(),
+                        "compliance": {
+                            "personal_data": "removed_or_anonymized",
+                            "retained_business_records": ["expenses", "payment_transactions"],
+                        },
+                    },
+                )
+                target.delete()
+        except DatabaseError:
+            return Response(
+                {
+                    "detail": "Unable to delete user due to a database error.",
+                    "code": "user_delete_failed",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response({"deleted": True}, status=status.HTTP_200_OK)
 
 
 class AdminRolesApi(APIView):

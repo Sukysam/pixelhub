@@ -126,7 +126,7 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const newRoleButton = page.getByRole("button", { name: "New Role" });
   await expect(newRoleButton).toBeVisible({ timeout: 30_000 });
   await newRoleButton.click({ force: true });
-  const roleDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create Role" }) });
+  const roleDialog = page.locator('[role="dialog"]').filter({ hasText: "Create Role" }).last();
   await expect(roleDialog).toBeVisible({ timeout: 30_000 });
   await reportSettingsCiDebug("A", "frontend/tests/settings.spec.ts:new-role-click", "[DEBUG] admin settings state after new role click", {
     url: page.url(),
@@ -170,22 +170,60 @@ test("admin can manage roles and users from settings", async ({ page, request })
   expect(createdUsersRes.ok()).toBeTruthy();
   const createdUsers = (await createdUsersRes.json()) as {
     count: number;
-    results: Array<{ email?: string; custom_roles?: string[]; invitation_status?: string; is_active?: boolean }>;
+    results: Array<{ id: number; email?: string; custom_roles?: string[]; invitation_status?: string; is_active?: boolean }>;
   };
   const finalPage = Math.max(1, Math.ceil(createdUsers.count / 25));
-  const pageToInspect =
-    finalPage === 1
-      ? createdUsers
-      : ((await (
-          await request.get(`${API_BASE_URL}/admin/users/?page=${finalPage}`, {
-            headers: { Authorization: `Token ${token}` },
-          })
-        ).json()) as typeof createdUsers);
-  const createdUser = pageToInspect.results.find((row) => row.email === email);
+  let createdUser = createdUsers.results.find((row) => row.email === email);
+  if (!createdUser && finalPage > 1) {
+    const lastPageRes = await request.get(`${API_BASE_URL}/admin/users/?page=${finalPage}`, {
+      headers: { Authorization: `Token ${token}` },
+    });
+    expect(lastPageRes.ok()).toBeTruthy();
+    const pageToInspect = (await lastPageRes.json()) as typeof createdUsers;
+    createdUser = pageToInspect.results.find((row) => row.email === email);
+  }
   expect(createdUser).toBeTruthy();
   expect(createdUser?.custom_roles ?? []).toContain(roleName);
   expect(createdUser?.invitation_status).toBe("pending_acceptance");
   expect(createdUser?.is_active).toBeFalsy();
+
+  const userTable = page
+    .locator("table")
+    .filter({ has: page.getByRole("columnheader", { name: "Last Login" }) })
+    .first();
+  const createdUserRow = userTable.locator("tbody tr").filter({ hasText: email }).first();
+  await expect(createdUserRow).toBeVisible({ timeout: 30_000 });
+  await expect(createdUserRow.getByRole("button", { name: "Remove" })).toBeVisible();
+
+  const selfRow = userTable.locator("tbody tr").filter({ hasText: "pixelhub_e2e_admin" }).first();
+  if (await selfRow.count()) {
+    await expect(selfRow.getByRole("button", { name: "Remove" })).toBeDisabled();
+  }
+
+  await createdUserRow.getByRole("button", { name: "Remove" }).click();
+  const deleteDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Remove User Permanently" }) });
+  await expect(deleteDialog).toBeVisible({ timeout: 30_000 });
+  await expect(deleteDialog).toContainText("this action is permanent");
+  await expect(deleteDialog.getByRole("button", { name: "Permanently remove user" })).toBeDisabled();
+  await deleteDialog.locator('input[type="checkbox"]').check();
+  await deleteDialog.getByLabel("Type the user's email address to confirm").fill(email);
+  const deleteResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${API_BASE_URL}/admin/users/` &&
+      response.request().method() === "DELETE" &&
+      response.status() === 200
+  );
+  await deleteDialog.getByRole("button", { name: "Permanently remove user" }).click();
+  await deleteResponse;
+  await expect(page.getByText("User permanently removed.")).toBeVisible({ timeout: 30_000 });
+  await expect(userTable.locator("tbody tr").filter({ hasText: email })).toHaveCount(0);
+
+  const usersAfterDeleteRes = await request.get(`${API_BASE_URL}/admin/users/?page=1`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(usersAfterDeleteRes.ok()).toBeTruthy();
+  const usersAfterDelete = (await usersAfterDeleteRes.json()) as typeof createdUsers;
+  expect(usersAfterDelete.results.some((row) => row.email === email)).toBeFalsy();
 
   const auditLogsRes = await request.get(`${API_BASE_URL}/admin/audit-logs/?page=1`, {
     headers: { Authorization: `Token ${token}` },
@@ -194,8 +232,14 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const auditLogs = (await auditLogsRes.json()) as {
     results: Array<{ object_id: string; content_type: string | null; action: string; changes: Record<string, unknown> | null }>;
   };
-  const userAudit = auditLogs.results.find((row) => row.action === "create" && row.changes && row.changes.email === email);
-  expect(userAudit).toBeTruthy();
+  const deleteAudit = auditLogs.results.find(
+    (row) => row.action === "delete" && row.object_id === `deleted-user:${createdUser!.id}`
+  );
+  expect(deleteAudit).toBeTruthy();
+  const deleteAuditChanges = (deleteAudit?.changes ?? {}) as {
+    deleted_user?: { email?: string };
+  };
+  expect(String(deleteAuditChanges.deleted_user?.email ?? "")).toBe(email);
 
   const viewports = [
     { width: 1280, height: 720 },
@@ -208,14 +252,16 @@ test("admin can manage roles and users from settings", async ({ page, request })
     await page.goto("/settings");
     await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible({ timeout: 30_000 });
     const auditTable = page.locator("table").filter({ has: page.getByRole("columnheader", { name: "Details" }) }).first();
-    const auditRow = auditTable.locator("tbody tr").filter({ hasText: `${userAudit!.content_type}:${userAudit!.object_id}` }).first();
-    await expect(auditRow).toBeVisible({ timeout: 30_000 });
-    const detailsCell = auditRow.locator("td").nth(4);
+    const deleteAuditRow = auditTable
+      .locator("tbody tr")
+      .filter({ hasText: `deleted-user:${createdUser!.id}` })
+      .first();
+    await expect(deleteAuditRow).toBeVisible({ timeout: 30_000 });
+    const detailsCell = deleteAuditRow.locator("td").nth(4);
+    await expect(detailsCell).toContainText("Deleted User");
     await expect(detailsCell).toContainText(email);
-    await expect(detailsCell).toContainText("Custom Roles");
-    await expect(detailsCell).toContainText(roleName);
     await expect(detailsCell).not.toContainText("{");
-    await expect(detailsCell).not.toContainText(/"email"|"custom_roles"|"primary_role"/);
+    await expect(detailsCell).not.toContainText(/"deleted_user"|"actor_admin_id"|"retained_business_records"/);
   }
 });
 

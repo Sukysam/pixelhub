@@ -9,6 +9,7 @@ import secrets
 import tempfile
 import urllib.parse
 from unittest.mock import patch
+from django.db.utils import DatabaseError
 
 from django.urls import reverse
 from django.contrib.auth.models import User, Permission
@@ -44,6 +45,7 @@ from .models import (
     AccessToken,
     Role,
     UserRole,
+    SavedInvoiceView,
     DocumentDelivery,
     SavedDocument,
     PaymentTransaction,
@@ -74,6 +76,7 @@ from .rendering_service import (
     effective_templates_for_user,
     format_money,
 )
+from .auth_service import role_for_name
 from .views import _rate_limit
 from .documents import RenderedDocument, create_delivery, render_invoice, render_receipt
 
@@ -2909,6 +2912,138 @@ class ApiCoverageTests(APITestCase):
         patched = self.client.patch("/api/admin/users/", {"id": created.data["id"], "primary_role": "staff"}, format="json")
         self.assertEqual(patched.status_code, status.HTTP_200_OK)
         self.assertTrue(AuditLog.objects.filter(action="update", object_id=str(created.data["id"])).exists())
+
+    def test_admin_user_delete_enforces_permissions_and_cleans_personal_artifacts(self):
+        target = User.objects.create_user(
+            username="delete_me",
+            password=_test_secret(),
+            email="delete_me@example.com",
+            is_active=False,
+        )
+        UserProfile.objects.create(
+            user=target,
+            full_name="Delete Me",
+            phone="+2348011111111",
+            company_legal_name="Delete Me Co",
+        )
+        customer = Customer.objects.create(name="Delete User Customer", email="delete-user-customer@example.com")
+        invoice = Invoice.objects.create(
+            invoice_number="INV-DELETE-0001",
+            customer=customer,
+            status="Draft",
+            issue_date=timezone.localdate(),
+            subtotal=Decimal("10.00"),
+            tax_total=Decimal("0.00"),
+            total_amount=Decimal("10.00"),
+        )
+        invitation = AdminUserInvitation.objects.create(
+            user=target,
+            invited_by=self.admin,
+            token_key=secrets.token_urlsafe(16),
+            expires_at=timezone.now() + timedelta(days=1),
+        )
+        SavedInvoiceView.objects.create(user=target, name="Delete View", filters={"status": "Draft"})
+        DocumentDelivery.objects.create(
+            user=target,
+            document_type="invoice",
+            invoice=invoice,
+            channel="share",
+            format="pdf",
+            status="queued",
+        )
+        SavedDocument.objects.create(
+            user=target,
+            document_type="invoice",
+            invoice=invoice,
+            original_filename="delete-me.pdf",
+            file=SimpleUploadedFile("delete-me.pdf", b"%PDF-1.4 test", content_type="application/pdf"),
+            sha256="a" * 64,
+            size_bytes=12,
+            metadata={"ok": True},
+        )
+        SocialAuthConnection.objects.create(user=target, provider="google", provider_user_id="sub-delete-me")
+        EmailVerificationToken.objects.create(user=target, token="verify-delete-me", expires_at=timezone.now() + timedelta(hours=1))
+        role = Role.objects.create(name="ops_delete_test", description="Delete flow role")
+        UserRole.objects.create(user=target, role=role)
+        AccessToken.objects.create(key="tok_delete_me", user=target, role=role_for_name("user"))
+
+        denied_anon = self.client.delete(
+            "/api/admin/users/",
+            {"id": target.id, "confirm_keyword": "DELETE", "confirm_email": target.email},
+            format="json",
+        )
+        self.assertIn(denied_anon.status_code, {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN})
+
+        self.client.force_authenticate(user=self.user)
+        denied_user = self.client.delete(
+            "/api/admin/users/",
+            {"id": target.id, "confirm_keyword": "DELETE", "confirm_email": target.email},
+            format="json",
+        )
+        self.assertEqual(denied_user.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.admin)
+        missing_confirm = self.client.delete(
+            "/api/admin/users/",
+            {"id": target.id, "confirm_keyword": "DELETE", "confirm_email": "wrong@example.com"},
+            format="json",
+        )
+        self.assertEqual(missing_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("confirm_email", missing_confirm.data)
+
+        self_delete = self.client.delete(
+            "/api/admin/users/",
+            {"id": self.admin.id, "confirm_keyword": "DELETE", "confirm_email": self.admin.email},
+            format="json",
+        )
+        self.assertEqual(self_delete.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("id", self_delete.data)
+
+        response = self.client.delete(
+            "/api/admin/users/",
+            {"id": target.id, "confirm_keyword": "DELETE", "confirm_email": target.email},
+            format="json",
+            HTTP_X_FORWARDED_FOR="203.0.113.55",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["deleted"])
+        self.assertFalse(User.objects.filter(pk=target.id).exists())
+        self.assertFalse(UserProfile.objects.filter(user_id=target.id).exists())
+        self.assertFalse(AdminUserInvitation.objects.filter(pk=invitation.pk).exists())
+        self.assertFalse(SavedInvoiceView.objects.filter(user_id=target.id).exists())
+        self.assertFalse(DocumentDelivery.objects.filter(user_id=target.id).exists())
+        self.assertFalse(SavedDocument.objects.filter(user_id=target.id).exists())
+        self.assertFalse(SocialAuthConnection.objects.filter(user_id=target.id).exists())
+        self.assertFalse(EmailVerificationToken.objects.filter(user_id=target.id).exists())
+        self.assertFalse(UserRole.objects.filter(user_id=target.id).exists())
+        self.assertFalse(AccessToken.objects.filter(user_id=target.id).exists())
+
+        delete_log = AuditLog.objects.filter(action="delete", object_id=f"deleted-user:{target.id}").first()
+        self.assertIsNotNone(delete_log)
+        self.assertEqual(delete_log.changes["deleted_user"]["email"], "delete_me@example.com")
+        self.assertEqual(delete_log.changes["actor_admin_id"], self.admin.id)
+        self.assertEqual(delete_log.changes["ip"], "203.0.113.55")
+
+    def test_admin_user_delete_missing_user_and_database_errors_are_structured(self):
+        self.client.force_authenticate(user=self.admin)
+
+        missing = self.client.delete(
+            "/api/admin/users/",
+            {"id": 999999, "confirm_keyword": "DELETE", "confirm_email": "missing@example.com"},
+            format="json",
+        )
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+
+        target = User.objects.create_user(username="delete_db_error", password=_test_secret(), email="delete_db_error@example.com")
+        with patch("core.views._anonymize_user_artifacts_for_deletion", side_effect=DatabaseError("db down")):
+            errored = self.client.delete(
+                "/api/admin/users/",
+                {"id": target.id, "confirm_keyword": "DELETE", "confirm_email": target.email},
+                format="json",
+            )
+        self.assertEqual(errored.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(errored.data["code"], "user_delete_failed")
+        self.assertTrue(User.objects.filter(pk=target.id).exists())
 
     def test_admin_runtime_diagnostics_is_admin_only_and_reports_db_and_cache(self):
         anon = self.client.get("/api/admin/runtime/diagnostics/")

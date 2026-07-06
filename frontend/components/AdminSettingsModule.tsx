@@ -210,8 +210,12 @@ export function AdminSettingsModule() {
   const [newRate, setNewRate] = useState({ base_code: "USD", quote_code: "EUR", rate: "" });
   const [userDialogOpen, setUserDialogOpen] = useState(false);
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+  const [deleteUserDialogOpen, setDeleteUserDialogOpen] = useState(false);
   const [userForm, setUserForm] = useState<UserForm>(EMPTY_USER_FORM);
   const [roleDraft, setRoleDraft] = useState<RoleDraft>(EMPTY_ROLE_DRAFT);
+  const [deleteTargetUser, setDeleteTargetUser] = useState<AdminUser | null>(null);
+  const [deleteConfirmEmail, setDeleteConfirmEmail] = useState("");
+  const [deleteWarningConfirmed, setDeleteWarningConfirmed] = useState(false);
 
   const customRoles = useMemo(() => roleCatalog.filter((role) => !role.is_system), [roleCatalog]);
   const currencyOptions = useMemo(() => currencies.slice().sort((a, b) => a.code.localeCompare(b.code)), [currencies]);
@@ -550,6 +554,48 @@ export function AdminSettingsModule() {
     }
   };
 
+  const openDeleteUser = (user: AdminUser) => {
+    setError(null);
+    setSuccess(null);
+    setDeleteTargetUser(user);
+    setDeleteConfirmEmail("");
+    setDeleteWarningConfirmed(false);
+    setDeleteUserDialogOpen(true);
+  };
+
+  const submitDeleteUser = async () => {
+    if (!deleteTargetUser) return;
+    if (!deleteWarningConfirmed) {
+      setError("Confirm that you understand the deletion is permanent.");
+      return;
+    }
+    if (deleteConfirmEmail.trim().toLowerCase() !== deleteTargetUser.email.trim().toLowerCase()) {
+      setError("Enter the selected user's email address exactly to confirm deletion.");
+      return;
+    }
+    try {
+      setSaving(true);
+      await apiRequest("/admin/users/", {
+        method: "DELETE",
+        body: JSON.stringify({
+          id: deleteTargetUser.id,
+          confirm_keyword: "DELETE",
+          confirm_email: deleteConfirmEmail.trim().toLowerCase(),
+        }),
+      });
+      setSuccess("User permanently removed.");
+      setDeleteUserDialogOpen(false);
+      setDeleteTargetUser(null);
+      setDeleteConfirmEmail("");
+      setDeleteWarningConfirmed(false);
+      await loadAll();
+    } catch (e: unknown) {
+      setError(getErrorMessage(e, "Unable to permanently remove user"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (!isAdmin) return null;
 
   return (
@@ -834,9 +880,19 @@ export function AdminSettingsModule() {
                     </td>
                     <td className="p-2">{user.last_login_at ? new Date(user.last_login_at).toLocaleString() : "—"}</td>
                     <td className="p-2 text-right">
-                      <Button type="button" variant="outline" onClick={() => openEditUser(user)}>
-                        Edit
-                      </Button>
+                      <div className="flex justify-end gap-2">
+                        <Button type="button" variant="outline" onClick={() => openEditUser(user)}>
+                          Edit
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => openDeleteUser(user)}
+                          disabled={authUser?.id === user.id}
+                        >
+                          Remove
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -1048,6 +1104,78 @@ export function AdminSettingsModule() {
               </Button>
               <Button type="button" onClick={() => void submitRole()} disabled={saving}>
                 {saving ? "Saving…" : roleDraft.id ? "Save role" : "Create role"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteUserDialogOpen} onOpenChange={setDeleteUserDialogOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Remove User Permanently</DialogTitle>
+            <DialogDescription>
+              This permanently removes the selected account, deletes direct personal data, anonymizes retained audit/security traces where required, and cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 p-6 pt-0">
+            <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              Warning: this action is permanent. Do not proceed unless you have verified the user should be removed from the system.
+            </div>
+            {deleteTargetUser ? (
+              <div className="rounded-md border border-gray-200 p-3 text-sm text-gray-700">
+                <div><span className="font-medium">Username:</span> {deleteTargetUser.username}</div>
+                <div><span className="font-medium">Email:</span> {deleteTargetUser.email}</div>
+                <div><span className="font-medium">Role:</span> {deleteTargetUser.primary_role}</div>
+              </div>
+            ) : null}
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={deleteWarningConfirmed}
+                onChange={(e) => setDeleteWarningConfirmed(e.target.checked)}
+              />
+              <span>I understand this permanently deletes the selected user account and cannot be reversed.</span>
+            </label>
+            <div>
+              <Label htmlFor="delete_user_confirm_email">Type the user's email address to confirm</Label>
+              <Input
+                id="delete_user_confirm_email"
+                value={deleteConfirmEmail}
+                onChange={(e) => setDeleteConfirmEmail(e.target.value)}
+                placeholder={deleteTargetUser?.email || "user@example.com"}
+              />
+            </div>
+            {deleteTargetUser && authUser?.id === deleteTargetUser.id ? (
+              <div className="text-sm text-red-700">You cannot delete your own account.</div>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setDeleteUserDialogOpen(false);
+                  setDeleteTargetUser(null);
+                  setDeleteConfirmEmail("");
+                  setDeleteWarningConfirmed(false);
+                }}
+                disabled={saving}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void submitDeleteUser()}
+                disabled={
+                  saving ||
+                  !deleteTargetUser ||
+                  authUser?.id === deleteTargetUser.id ||
+                  !deleteWarningConfirmed ||
+                  deleteConfirmEmail.trim().toLowerCase() !== (deleteTargetUser?.email || "").trim().toLowerCase()
+                }
+              >
+                {saving ? "Removing…" : "Permanently remove user"}
               </Button>
             </div>
           </div>
