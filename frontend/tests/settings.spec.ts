@@ -186,6 +186,37 @@ test("admin can manage roles and users from settings", async ({ page, request })
   expect(createdUser?.custom_roles ?? []).toContain(roleName);
   expect(createdUser?.invitation_status).toBe("pending_acceptance");
   expect(createdUser?.is_active).toBeFalsy();
+
+  const auditLogsRes = await request.get(`${API_BASE_URL}/admin/audit-logs/?page=1`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(auditLogsRes.ok()).toBeTruthy();
+  const auditLogs = (await auditLogsRes.json()) as {
+    results: Array<{ object_id: string; content_type: string | null; action: string; changes: Record<string, unknown> | null }>;
+  };
+  const userAudit = auditLogs.results.find((row) => row.action === "create" && row.changes && row.changes.email === email);
+  expect(userAudit).toBeTruthy();
+
+  const viewports = [
+    { width: 1280, height: 720 },
+    { width: 768, height: 1024 },
+    { width: 390, height: 844 },
+  ];
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { name: "Audit Log" })).toBeVisible({ timeout: 30_000 });
+    const auditTable = page.locator("table").filter({ has: page.getByRole("columnheader", { name: "Details" }) }).first();
+    const auditRow = auditTable.locator("tbody tr").filter({ hasText: `${userAudit!.content_type}:${userAudit!.object_id}` }).first();
+    await expect(auditRow).toBeVisible({ timeout: 30_000 });
+    const detailsCell = auditRow.locator("td").nth(4);
+    await expect(detailsCell).toContainText(email);
+    await expect(detailsCell).toContainText("Custom Roles");
+    await expect(detailsCell).toContainText(roleName);
+    await expect(detailsCell).not.toContainText("{");
+    await expect(detailsCell).not.toContainText(/"email"|"custom_roles"|"primary_role"/);
+  }
 });
 
 test("user can update invoice footer in settings", async ({ page }) => {

@@ -75,7 +75,7 @@ type AuditLogRow = {
   action: string;
   object_id: string;
   content_type: string | null;
-  changes: Record<string, unknown>;
+  changes: unknown;
   created_at: string | null;
   actor: string | null;
 };
@@ -130,6 +130,57 @@ function describeUserAccessStatus(user: AdminUser) {
     default:
       return "Inactive";
   }
+}
+
+function auditLabel(key: string) {
+  return key
+    .replace(/[_-]+/g, " ")
+    .replace(/\./g, " / ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function auditPrimitive(value: unknown) {
+  if (value === null || value === undefined || value === "") return "None";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value);
+}
+
+function renderAuditValue(value: unknown, depth = 0): React.ReactNode {
+  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return <span className="text-gray-700">{auditPrimitive(value)}</span>;
+  }
+
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="text-gray-500">No items</span>;
+    return (
+      <ul className="space-y-1">
+        {value.map((item, index) => (
+          <li key={`${depth}-${index}`} className="rounded bg-gray-50 px-2 py-1">
+            {renderAuditValue(item, depth + 1)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (!entries.length) return <span className="text-gray-500">No details</span>;
+    return (
+      <div className={`space-y-2 ${depth > 0 ? "border-l border-gray-200 pl-3" : ""}`}>
+        {entries.map(([key, child]) => (
+          <div key={`${depth}-${key}`} className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{auditLabel(key)}</div>
+            <div className="break-words text-sm">{renderAuditValue(child, depth + 1)}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return <span className="text-gray-700">{String(value)}</span>;
 }
 
 export function AdminSettingsModule() {
@@ -204,6 +255,30 @@ export function AdminSettingsModule() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  // #region debug-point A:details-raw-code
+  useEffect(() => {
+    if (!auditLogs.length) return;
+    void fetch("http://127.0.0.1:7777/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "details-raw-code",
+        runId: "pre-fix",
+        hypothesisId: "A",
+        location: "frontend/components/AdminSettingsModule.tsx:audit-log-render",
+        msg: "[DEBUG] audit log details payload sample",
+        data: {
+          count: auditLogs.length,
+          sampleType: typeof auditLogs[0]?.changes,
+          isArray: Array.isArray(auditLogs[0]?.changes),
+          sampleKeys: auditLogs[0] && auditLogs[0].changes && typeof auditLogs[0].changes === "object" ? Object.keys(auditLogs[0].changes as Record<string, unknown>).slice(0, 8) : [],
+        },
+        ts: Date.now(),
+      }),
+    }).catch(() => undefined);
+  }, [auditLogs]);
+  // #endregion
 
   const onSaveGlobal = async () => {
     if (!globalSettings) return;
@@ -826,7 +901,7 @@ export function AdminSettingsModule() {
                       {row.content_type}:{row.object_id}
                     </td>
                     <td className="p-2">
-                      <pre className="whitespace-pre-wrap text-xs text-gray-600">{JSON.stringify(row.changes, null, 2)}</pre>
+                      <div className="min-w-[220px] max-w-[360px] text-xs leading-5 text-gray-600">{renderAuditValue(row.changes)}</div>
                     </td>
                   </tr>
                 ))}
