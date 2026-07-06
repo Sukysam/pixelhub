@@ -45,6 +45,24 @@ async function reportInvoiceEditDebug(hypothesisId: string, location: string, ms
 }
 // #endregion
 
+// #region debug-point A:settings-ci-failures
+async function reportSettingsCiDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
+  await fetch("http://127.0.0.1:7778/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "settings-ci-failures",
+      runId: "pre-fix",
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => undefined);
+}
+// #endregion
+
 async function getJson(request: any, token: string, apiPath: string) {
   const res = await request.get(`${API_BASE_URL}${apiPath}`, {
     headers: { Authorization: `Token ${token}` },
@@ -108,14 +126,24 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const newRoleButton = page.getByRole("button", { name: "New Role" });
   await expect(newRoleButton).toBeVisible({ timeout: 30_000 });
   await newRoleButton.click({ force: true });
-  const roleNameInput = page.locator("#role_name");
-  const roleDescriptionInput = page.locator("#role_description");
+  const roleDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create Role" }) });
+  await expect(roleDialog).toBeVisible({ timeout: 30_000 });
+  await reportSettingsCiDebug("A", "frontend/tests/settings.spec.ts:new-role-click", "[DEBUG] admin settings state after new role click", {
+    url: page.url(),
+    headings: await page.getByRole("heading").allTextContents(),
+    dialogCount: await page.getByRole("dialog").count(),
+    roleNameCount: await page.locator("#role_name").count(),
+    roleDescriptionCount: await page.locator("#role_description").count(),
+    createRoleButtonCount: await page.getByRole("button", { name: "Create role" }).count(),
+  });
+  const roleNameInput = roleDialog.locator("#role_name");
+  const roleDescriptionInput = roleDialog.locator("#role_description");
   await expect(roleNameInput).toBeVisible({ timeout: 30_000 });
   await expect(roleDescriptionInput).toBeVisible({ timeout: 30_000 });
   await roleNameInput.fill(roleName);
   await roleDescriptionInput.fill("Operations role created from settings UI");
-  await page.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
-  await page.getByRole("button", { name: "Create role" }).last().evaluate((node: HTMLButtonElement) => node.click());
+  await roleDialog.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
+  await roleDialog.getByRole("button", { name: "Create role" }).last().evaluate((node: HTMLButtonElement) => node.click());
   await expect(page.getByText("Role created successfully.")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText(roleName)).toBeVisible();
 
@@ -343,6 +371,13 @@ test("standard business user can persist customer invoice and receipt records", 
     rowButtons: await invoiceRow.getByRole("button").allTextContents(),
   });
   await invoiceRow.getByRole("button", { name: "Edit" }).click();
+  await reportSettingsCiDebug("B", "frontend/tests/settings.spec.ts:invoice-edit-opened", "[DEBUG] invoice edit state before save", {
+    createdInvoiceNumber,
+    rowText: (await invoiceRow.textContent()) ?? "",
+    rowButtons: await invoiceRow.getByRole("button").allTextContents(),
+    rowSelectCount: await invoiceRow.locator("select").count(),
+    rowDateInputCount: await invoiceRow.locator('input[type="date"]').count(),
+  });
   await invoiceRow.locator("select").first().selectOption("Sent");
   await invoiceRow.locator('input[type="date"]').fill("2026-07-31");
   const invoiceUpdateResponse = page.waitForResponse(
@@ -352,7 +387,15 @@ test("standard business user can persist customer invoice and receipt records", 
       response.status() === 200
   );
   await invoiceRow.getByRole("button", { name: "Save" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await reportSettingsCiDebug("C", "frontend/tests/settings.spec.ts:invoice-save-clicked", "[DEBUG] invoice state after save click", {
+    createdInvoiceNumber,
+    dialogCount: await page.getByRole("dialog").count(),
+    confirmButtonCount: await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).count().catch(() => 0),
+    pageButtons: await page.getByRole("button").allTextContents(),
+  });
+  const invoiceConfirmDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Confirm changes" }) });
+  await expect(invoiceConfirmDialog).toBeVisible({ timeout: 30_000 });
+  await invoiceConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
   await invoiceUpdateResponse;
   await expect(invoiceRow).toContainText("Sent", { timeout: 30_000 });
 
