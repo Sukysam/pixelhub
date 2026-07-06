@@ -1139,7 +1139,7 @@ export function AdminSettingsModule() {
               <span>I understand this permanently deletes the selected user account and cannot be reversed.</span>
             </label>
             <div>
-              <Label htmlFor="delete_user_confirm_email">Type the user's email address to confirm</Label>
+              <Label htmlFor="delete_user_confirm_email">Type the user&apos;s email address to confirm</Label>
               <Input
                 id="delete_user_confirm_email"
                 value={deleteConfirmEmail}
