@@ -470,7 +470,7 @@ test("standard business user can persist customer invoice and receipt records", 
     confirmButtonCount: await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).count().catch(() => 0),
     pageButtons: await page.getByRole("button").allTextContents(),
   });
-  const invoiceConfirmDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Confirm changes" }) });
+  const invoiceConfirmDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm changes" }).last();
   await expect(invoiceConfirmDialog).toBeVisible({ timeout: 30_000 });
   await invoiceConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
   await invoiceUpdateResponse;
@@ -1187,7 +1187,7 @@ test("invoice create/manage pages load independently and previews open for invoi
   await page.getByRole("row", { name: new RegExp(String(invoiceDetail.invoice_number)) }).first().getByRole("button", { name: "Preview" }).click();
   const invoicePopup = await invoicePopupPromise;
   await expect(invoicePopup.getByRole("heading", { name: "Invoice Preview" })).toBeVisible();
-  await expect(invoicePopup.getByLabel("Invoice Preview frame")).toBeVisible();
+  await expect(invoicePopup.locator('iframe[title="Invoice Preview"]')).toBeVisible({ timeout: 30_000 });
   await invoicePopup.close();
 
   await page.goto("/receipts");
@@ -1195,7 +1195,7 @@ test("invoice create/manage pages load independently and previews open for invoi
   await page.getByRole("row", { name: new RegExp(ref) }).first().getByRole("button", { name: "Preview" }).click();
   const receiptPopup = await receiptPopupPromise;
   await expect(receiptPopup.getByRole("heading", { name: "Receipt Preview" })).toBeVisible();
-  await expect(receiptPopup.getByLabel("Receipt Preview frame")).toBeVisible();
+  await expect(receiptPopup.locator('iframe[title="Receipt Preview"]')).toBeVisible({ timeout: 30_000 });
   await receiptPopup.close();
 });
 

@@ -484,7 +484,7 @@ export default function ReceiptsPage() {
   };
 
   const openReceiptPreview = (receiptId: number) => {
-    const win = window.open(`/receipts/preview/${receiptId}`, "_blank", "noopener,noreferrer");
+    const win = window.open(`/receipts/preview/${receiptId}`, "_blank", "noopener");
     if (!win) {
       setError("Pop-up blocked. Please allow pop-ups, then try again.");
     }

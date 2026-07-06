@@ -1195,7 +1195,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   );
 
   const openInvoicePreview = (invoiceId: number) => {
-    const win = window.open(`/invoices/preview/${invoiceId}`, "_blank", "noopener,noreferrer");
+    const win = window.open(`/invoices/preview/${invoiceId}`, "_blank", "noopener");
     if (!win) setError("Pop-up blocked. Please allow pop-ups, then try again.");
   };
 
