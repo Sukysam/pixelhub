@@ -3555,6 +3555,31 @@ class DocumentDeliveryAndPaymentsTests(APITestCase):
         self.assertEqual(dl.status_code, status.HTTP_200_OK)
         self.assertTrue(dl["Content-Type"].startswith("application/pdf"))
 
+    def test_save_document_backup_reports_missing_weasyprint_runtime(self):
+        with patch(
+            "core.documents.render_invoice",
+            return_value=RenderedDocument(
+                filename="invoice_INV-2026-DOCPAY.html",
+                content_type="text/html; charset=utf-8",
+                content=b"<html></html>",
+                backend="unavailable",
+            ),
+        ):
+            res = self.client.post(
+                "/api/documents/saved/",
+                {
+                    "document_type": "invoice",
+                    "document_id": self.invoice.id,
+                    "label": self.invoice.invoice_number,
+                },
+                format="json",
+            )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            res.data["detail"],
+            "PDF generation is unavailable on this server because required WeasyPrint system libraries are missing.",
+        )
+
     @override_settings(PAYSTACK_SECRET_KEY=GW_SHARED)
     def test_paystack_webhook_marks_transaction_succeeded_and_creates_receipt(self):
         tx = PaymentTransaction.objects.create(

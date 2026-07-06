@@ -3,9 +3,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
+import os
 import re
 import secrets
+import urllib.request
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -40,6 +43,44 @@ DeliveryChannel = Literal["print", "email", "share"]
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 E164_RE = re.compile(r"^\+[1-9]\d{9,14}$")
 logger = logging.getLogger(__name__)
+
+
+# #region debug-point A:settings-e2e-pdf-render
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: dict[str, Any]) -> None:
+    debug_url = "http://127.0.0.1:7777/event"
+    session_id = "settings-e2e-failures"
+    env_path = os.path.join(getattr(settings, "BASE_DIR", ""), ".dbg", "settings-e2e-failures.env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("DEBUG_SERVER_URL="):
+                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+    except Exception:
+        pass
+    try:
+        payload = {
+            "sessionId": session_id,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "msg": msg,
+            "data": data,
+        }
+        urllib.request.urlopen(
+            urllib.request.Request(
+                debug_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=1,
+        ).read()
+    except Exception:
+        pass
+
+
+# #endregion
 
 
 @dataclass(frozen=True)
@@ -349,7 +390,20 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
 
     try:
         from weasyprint import HTML
-    except (ImportError, OSError):
+    except (ImportError, OSError) as exc:
+        # #region debug-point A:invoice-pdf-import
+        _debug_report(
+            "A",
+            "core/documents.py:render_invoice:import",
+            "[DEBUG] invoice PDF backend unavailable",
+            {
+                "invoice_id": invoice.id,
+                "invoice_number": invoice.invoice_number,
+                "exc_type": type(exc).__name__,
+                "exc": str(exc),
+            },
+        )
+        # #endregion
         return RenderedDocument(
             filename=f"invoice_{invoice.invoice_number}.html",
             content_type="text/html; charset=utf-8",
@@ -358,7 +412,20 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
         )
     try:
         pdf = HTML(string=html, base_url=backend_public_base_url()).write_pdf()
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        # #region debug-point A:invoice-pdf-write
+        _debug_report(
+            "A",
+            "core/documents.py:render_invoice:write_pdf",
+            "[DEBUG] invoice PDF write failed",
+            {
+                "invoice_id": invoice.id,
+                "invoice_number": invoice.invoice_number,
+                "exc_type": type(exc).__name__,
+                "exc": str(exc),
+            },
+        )
+        # #endregion
         return RenderedDocument(
             filename=f"invoice_{invoice.invoice_number}.html",
             content_type="text/html; charset=utf-8",
@@ -445,7 +512,20 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
 
     try:
         from weasyprint import HTML
-    except (ImportError, OSError):
+    except (ImportError, OSError) as exc:
+        # #region debug-point A:receipt-pdf-import
+        _debug_report(
+            "A",
+            "core/documents.py:render_receipt:import",
+            "[DEBUG] receipt PDF backend unavailable",
+            {
+                "receipt_id": receipt.id,
+                "invoice_id": invoice.id,
+                "exc_type": type(exc).__name__,
+                "exc": str(exc),
+            },
+        )
+        # #endregion
         return RenderedDocument(
             filename=f"receipt_{receipt.id}.html",
             content_type="text/html; charset=utf-8",
@@ -454,7 +534,20 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
         )
     try:
         pdf = HTML(string=html, base_url=backend_public_base_url()).write_pdf()
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        # #region debug-point A:receipt-pdf-write
+        _debug_report(
+            "A",
+            "core/documents.py:render_receipt:write_pdf",
+            "[DEBUG] receipt PDF write failed",
+            {
+                "receipt_id": receipt.id,
+                "invoice_id": invoice.id,
+                "exc_type": type(exc).__name__,
+                "exc": str(exc),
+            },
+        )
+        # #endregion
         return RenderedDocument(
             filename=f"receipt_{receipt.id}.html",
             content_type="text/html; charset=utf-8",
@@ -628,6 +721,21 @@ def send_delivery(request, delivery: DocumentDelivery, token: str | None) -> Doc
     raise ValidationError({"channel": "Invalid channel"})
 
 
+def _pdf_generation_validation_error(rendered: RenderedDocument) -> ValidationError:
+    if rendered.backend == "unavailable":
+        return ValidationError(
+            {
+                "detail": (
+                    "PDF generation is unavailable on this server because required "
+                    "WeasyPrint system libraries are missing."
+                )
+            }
+        )
+    if rendered.backend == "failed":
+        return ValidationError({"detail": "PDF generation failed in the rendering engine. Check server logs for details."})
+    return ValidationError({"detail": "PDF generation failed for this document"})
+
+
 def save_document_backup(
     request,
     *,
@@ -651,7 +759,7 @@ def save_document_backup(
     else:
         raise ValidationError({"document_type": "Invalid document_type"})
     if not rendered.content_type.startswith("application/pdf"):
-        raise ValidationError({"detail": "PDF generation failed for this document"})
+        raise _pdf_generation_validation_error(rendered)
 
     saved = SavedDocument(
         user=user,

@@ -11,6 +11,21 @@ python -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
+### Local PDF generation (WeasyPrint)
+- PDF save/share/download flows require WeasyPrint plus native system libraries.
+- On macOS, install the missing runtime dependencies with Homebrew:
+```bash
+brew install glib pango gdk-pixbuf cairo libffi
+```
+- If WeasyPrint still cannot load the libraries, export:
+```bash
+export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix libffi)/lib"
+```
+- Verify the runtime before testing PDF endpoints:
+```bash
+./venv/bin/python -c "import weasyprint; print(weasyprint.__version__)"
+```
+
 ### Registration / Email verification
 Environment variables:
 - `FRONTEND_BASE_URL` (used to generate verify-email links)

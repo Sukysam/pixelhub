@@ -21,7 +21,12 @@
 ## Log Evidence
 - `.dbg/trae-debug-log-settings-e2e-failures.ndjson` recorded `/api/documents/saved/` responses and showed the save flow is better observed via request status than via `URL.createObjectURL`.
 - Repeated local Firefox runs recorded `201` item-create responses with full payloads for the invoice import setup path.
+- Backend renderer instrumentation recorded:
+  - `core/documents.py:render_invoice:import` -> `OSError: cannot load library 'libgobject-2.0-0'`
+  - `core/documents.py:render_receipt:import` -> `OSError: cannot load library 'libgobject-2.0-0'`
+  - direct `manage.py shell` render calls returned `text/html` with backend `unavailable`, matching the API's `PDF generation failed for this document` response.
 
 ## Verification Conclusion
 - Applied a test-side fix to stop asserting browser download internals for invoice/receipt save flows and instead assert stable app-level completion.
 - Kept temporary instrumentation in `frontend/tests/settings.spec.ts` to capture the exact `/api/items/` response if CI reproduces the Firefox-only failure again.
+- Confirmed the local PDF failure is environmental: WeasyPrint is installed, but required native GTK/Pango libraries are missing from the macOS runtime.
