@@ -4,10 +4,11 @@ import hashlib
 import io
 import re
 import uuid
+import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from django.conf import settings
 from django.core.files.base import ContentFile
 from rest_framework.exceptions import ValidationError
@@ -129,6 +130,18 @@ def _settings_max_logo_bytes() -> int:
     return int(getattr(settings, "LOGO_UPLOAD_MAX_BYTES", 5 * 1024 * 1024))
 
 
+def _settings_max_logo_pixels() -> int:
+    return int(getattr(settings, "LOGO_UPLOAD_MAX_PIXELS", 12_000_000))
+
+
+def _settings_max_logo_dimension() -> int:
+    return int(getattr(settings, "LOGO_UPLOAD_MAX_DIMENSION", 4096))
+
+
+def _settings_max_logo_frames() -> int:
+    return int(getattr(settings, "LOGO_UPLOAD_MAX_FRAMES", 1))
+
+
 def normalize_logo_scope(raw_scope: object) -> str:
     scope = str(raw_scope or "").strip().lower()
     if scope not in LOGO_ALLOWED_SCOPES:
@@ -229,17 +242,47 @@ def _sanitize_svg(raw: bytes) -> PreparedLogo:
 
 def _sanitize_raster(raw: bytes) -> PreparedLogo:
     _raise_if_eicar(raw)
+    max_pixels = _settings_max_logo_pixels()
+    max_dimension = _settings_max_logo_dimension()
+    max_frames = _settings_max_logo_frames()
+    previous_max_pixels = getattr(Image, "MAX_IMAGE_PIXELS", None)
+    if max_pixels > 0:
+        Image.MAX_IMAGE_PIXELS = max_pixels
+
     try:
+        with warnings.catch_warnings():
+            bomb_warning = getattr(Image, "DecompressionBombWarning", None)
+            if bomb_warning is not None:
+                warnings.simplefilter("error", bomb_warning)
+            img_probe = Image.open(io.BytesIO(raw))
+            img_probe.verify()
         img = Image.open(io.BytesIO(raw))
+        img = ImageOps.exif_transpose(img)
         img.load()
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise ValidationError({"file": "Invalid image file."}) from exc
+    except Exception as exc:
+        bomb_error = getattr(Image, "DecompressionBombError", None)
+        if bomb_error is not None and isinstance(exc, bomb_error):
+            raise ValidationError({"file": "Image is too large or unsafe to process."}) from exc
+        raise
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous_max_pixels
 
     detected = str(getattr(img, "format", "") or "").upper()
     if detected not in {"PNG", "JPEG", "WEBP"}:
         raise ValidationError({"file": "Unsupported file type. Only JPG, PNG, SVG, and WebP are allowed."})
 
+    if bool(getattr(img, "is_animated", False)):
+        frames = int(getattr(img, "n_frames", 1) or 1)
+        if frames > max_frames:
+            raise ValidationError({"file": "Animated images are not supported for logos."})
+
     width, height = img.size
+    if max_pixels > 0 and (width * height) > max_pixels:
+        raise ValidationError({"file": "Image resolution too large."})
+    if max_dimension > 0 and max(width, height) > max_dimension:
+        raise ValidationError({"file": "Image dimensions too large."})
     if max(width, height) > 1024:
         img.thumbnail((1024, 1024))
         width, height = img.size
@@ -333,4 +376,3 @@ def cleanup_logo_asset_if_unreferenced(asset: LogoAsset | None) -> None:
     if asset.thumbnail:
         asset.thumbnail.delete(save=False)
     asset.delete()
-

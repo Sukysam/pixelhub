@@ -1285,6 +1285,16 @@ class AdminLogoUploadTests(APITestCase):
                 self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
                 self.assertIn("5MB", str(res.data))
 
+    def test_upload_rejects_excessive_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/", LOGO_UPLOAD_MAX_PIXELS=10_000):
+                buf = io.BytesIO()
+                Image.new("RGB", (200, 200), (10, 10, 10)).save(buf, format="PNG")
+                file = SimpleUploadedFile("logo.png", buf.getvalue(), content_type="image/png")
+                self.client.force_authenticate(user=self.admin)
+                res = self.client.post("/api/admin/logo/upload/", {"file": file}, format="multipart")
+                self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
     def test_upload_rejects_svg_with_script(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
