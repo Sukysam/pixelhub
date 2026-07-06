@@ -257,6 +257,9 @@ def _sanitize_raster(raw: bytes) -> PreparedLogo:
             img_probe = Image.open(io.BytesIO(raw))
             img_probe.verify()
         img = Image.open(io.BytesIO(raw))
+        detected = str(getattr(img, "format", "") or "").upper()
+        is_animated = bool(getattr(img, "is_animated", False))
+        frame_count = int(getattr(img, "n_frames", 1) or 1)
         img = ImageOps.exif_transpose(img)
         img.load()
     except (UnidentifiedImageError, OSError, ValueError) as exc:
@@ -269,13 +272,11 @@ def _sanitize_raster(raw: bytes) -> PreparedLogo:
     finally:
         Image.MAX_IMAGE_PIXELS = previous_max_pixels
 
-    detected = str(getattr(img, "format", "") or "").upper()
     if detected not in {"PNG", "JPEG", "WEBP"}:
         raise ValidationError({"file": "Unsupported file type. Only JPG, PNG, SVG, and WebP are allowed."})
 
-    if bool(getattr(img, "is_animated", False)):
-        frames = int(getattr(img, "n_frames", 1) or 1)
-        if frames > max_frames:
+    if is_animated:
+        if frame_count > max_frames:
             raise ValidationError({"file": "Animated images are not supported for logos."})
 
     width, height = img.size
