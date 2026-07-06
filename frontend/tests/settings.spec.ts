@@ -9,6 +9,24 @@ import {
   uniqueNgPhone,
 } from "./helpers/admin";
 
+// #region debug-point A:settings-e2e-failures
+async function reportDebugEvent(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
+  await fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "settings-e2e-failures",
+      runId: "pre-fix",
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => undefined);
+}
+// #endregion
+
 async function getJson(request: any, token: string, apiPath: string) {
   const res = await request.get(`${API_BASE_URL}${apiPath}`, {
     headers: { Authorization: `Token ${token}` },
@@ -788,6 +806,22 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await setSession(page, request, token);
 
   await page.addInitScript(() => {
+    // #region debug-point A:receipt-save-browser-hooks
+    const debugPost = (hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) =>
+      fetch("http://127.0.0.1:7777/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: "settings-e2e-failures",
+          runId: "pre-fix",
+          hypothesisId,
+          location,
+          msg,
+          data,
+          ts: Date.now(),
+        }),
+      }).catch(() => undefined);
+    // #endregion
     (window as any).__openCalls = [];
     (window as any).__copiedText = "";
     (window as any).__downloadObjectUrlCalls = 0;
@@ -806,6 +840,9 @@ test("invoice and receipt share and save actions generate links and downloads", 
     const origCreateObjectURL = URL.createObjectURL.bind(URL);
     URL.createObjectURL = ((...args: any[]) => {
       (window as any).__downloadObjectUrlCalls += 1;
+      void debugPost("A", "frontend/tests/settings.spec.ts:createObjectURL", "[DEBUG] createObjectURL called", {
+        count: (window as any).__downloadObjectUrlCalls,
+      });
       return origCreateObjectURL(...(args as [any]));
     }) as any;
 
@@ -824,6 +861,11 @@ test("invoice and receipt share and save actions generate links and downloads", 
       if (url.includes("/api/documents/saved/")) {
         (window as any).__savedDocumentStatus = res.status;
         (window as any).__savedDocumentRequestCount += 1;
+        void debugPost("A", "frontend/tests/settings.spec.ts:window.fetch", "[DEBUG] saved document response", {
+          url,
+          status: res.status,
+          count: (window as any).__savedDocumentRequestCount,
+        });
       }
       return res;
     };
@@ -894,7 +936,7 @@ test("invoice and receipt share and save actions generate links and downloads", 
   const invoiceSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeGreaterThanOrEqual(200);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeLessThan(300);
-  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
+  await expect(page.getByText(`Invoice ${invoice.invoice_number} saved and backed up.`)).toBeVisible({ timeout: 30_000 });
 
   await page.goto("/receipts");
   const receiptRow = page.getByRole("row", { name: new RegExp(ref) }).first();
@@ -911,11 +953,21 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await expect(receiptShareDialog).toBeHidden();
 
   await receiptRow.getByRole("button", { name: "Save PDF" }).click();
+  await reportDebugEvent("A", "frontend/tests/settings.spec.ts:receipt-save-click", "[DEBUG] clicked receipt save", {
+    ref,
+  });
   await page.waitForFunction(() => (window as any).__savedDocumentRequestCount > 1);
   const receiptSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
+  await reportDebugEvent("A", "frontend/tests/settings.spec.ts:receipt-save-status", "[DEBUG] receipt save status captured", {
+    ref,
+    receiptSaveStatus,
+    requestCount: await page.evaluate(() => (window as any).__savedDocumentRequestCount as number),
+    objectUrlCalls: await page.evaluate(() => (window as any).__downloadObjectUrlCalls as number),
+    successTextVisible: await page.getByText("Receipt saved and backed up.").count(),
+  });
   expect(receiptSaveStatus, "receipt save request should succeed").toBeGreaterThanOrEqual(200);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeLessThan(300);
-  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 1);
+  await expect(page.getByText("Receipt saved and backed up.")).toBeVisible({ timeout: 30_000 });
 });
 
 test("inventory export and import flows work end-to-end", async ({ page, request }) => {
@@ -989,7 +1041,15 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
     headers: { Authorization: `Token ${token}` },
     data: { type: "product", name: `E2E Item ${suffix}`, sku, unit_price: "10.00", tax_rate: "0.00", stock_quantity: 10 },
   });
-  expect(itemRes.ok()).toBeTruthy();
+  const itemResText = await itemRes.text();
+  await reportDebugEvent("C", "frontend/tests/settings.spec.ts:invoice-import-item-create", "[DEBUG] invoice import item create response", {
+    status: itemRes.status(),
+    ok: itemRes.ok(),
+    body: itemResText,
+    sku,
+    suffix,
+  });
+  expect(itemRes.ok(), `invoice import setup item create failed: status=${itemRes.status()} body=${itemResText}`).toBeTruthy();
 
   await page.goto("/invoices");
   await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
