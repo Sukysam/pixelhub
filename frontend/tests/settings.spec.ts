@@ -27,6 +27,24 @@ async function reportDebugEvent(hypothesisId: string, location: string, msg: str
 }
 // #endregion
 
+// #region debug-point A:invoice-edit-timeout
+async function reportInvoiceEditDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
+  await fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "invoice-edit-timeout",
+      runId: "pre-fix",
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => undefined);
+}
+// #endregion
+
 async function getJson(request: any, token: string, apiPath: string) {
   const res = await request.get(`${API_BASE_URL}${apiPath}`, {
     headers: { Authorization: `Token ${token}` },
@@ -266,7 +284,7 @@ test("standard business user can persist customer invoice and receipt records", 
   const item = (await itemRes.json()) as { id: number; name: string };
 
   await page.goto("/invoices");
-  await expect(page.getByRole("heading", { name: "Create Invoice" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Create Invoice" })).toBeVisible({ timeout: 30_000 });
   const invoiceCustomerSelect = page.locator("select").filter({ has: page.locator(`option[value="${createdCustomer!.id}"]`) }).first();
   expect(createdCustomer?.id).toBeTruthy();
   await expect(invoiceCustomerSelect.locator(`option[value="${createdCustomer!.id}"]`)).toHaveCount(1, { timeout: 30_000 });
@@ -305,7 +323,25 @@ test("standard business user can persist customer invoice and receipt records", 
   expect(createdInvoice).toBeTruthy();
   expect(createdInvoice?.status).toBe("Draft");
 
+  await page.goto("/invoices/manage");
+  await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible({ timeout: 30_000 });
+  await reportInvoiceEditDebug("A", "frontend/tests/settings.spec.ts:post-invoice-create", "[DEBUG] invoice page state before edit lookup", {
+    url: page.url(),
+    createdInvoiceNumber,
+    createdInvoiceId: createdInvoice?.id ?? null,
+    headings: await page.getByRole("heading").allTextContents(),
+    manageHeadingCount: await page.getByRole("heading", { name: "Manage Invoices" }).count(),
+    editButtonCount: await page.getByRole("button", { name: "Edit" }).count(),
+    invoiceRowCount: await page.locator("tbody tr", { hasText: createdInvoiceNumber ?? "" }).count(),
+    bodyHasManageHeading: await page.locator("body").textContent(),
+  });
   const invoiceRow = page.locator("tbody tr", { hasText: createdInvoiceNumber ?? "" }).first();
+  await expect(invoiceRow).toBeVisible({ timeout: 30_000 });
+  await reportInvoiceEditDebug("B", "frontend/tests/settings.spec.ts:invoice-row-actions", "[DEBUG] invoice row action snapshot", {
+    createdInvoiceNumber,
+    rowText: (await invoiceRow.textContent()) ?? "",
+    rowButtons: await invoiceRow.getByRole("button").allTextContents(),
+  });
   await invoiceRow.getByRole("button", { name: "Edit" }).click();
   await invoiceRow.locator("select").first().selectOption("Sent");
   await invoiceRow.locator('input[type="date"]').fill("2026-07-31");
