@@ -664,8 +664,8 @@ test("send invoice and receipt inputs allow continuous typing", async ({ page, r
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("heading", { name: "Send Receipt" })).toBeHidden();
 
-  await page.goto("/invoices");
-  await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
+  await page.goto("/invoices/manage");
+  await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) });
   await invRow.getByRole("button", { name: "View Invoice" }).click();
   await expect(page.getByRole("heading", { name: "Invoice Summary" })).toBeVisible();
@@ -726,8 +726,8 @@ test("send invoice and receipt auto-fills customer email and phone when availabl
   await expect(page.getByLabel("To Phone")).toHaveValue("+2348012345678");
   await page.getByRole("button", { name: "Cancel" }).click();
 
-  await page.goto("/invoices");
-  await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
+  await page.goto("/invoices/manage");
+  await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) });
   await invRow.getByRole("button", { name: "View Invoice" }).click();
   await expect(page.getByRole("heading", { name: "Invoice Summary" })).toBeVisible();
@@ -782,8 +782,8 @@ test("sending an invoice via WhatsApp opens a wa.me share link with prefilled te
   });
   expect(payRes.ok()).toBeTruthy();
 
-  await page.goto("/invoices");
-  await expect(page.getByRole("heading", { name: "Invoices" })).toBeVisible();
+  await page.goto("/invoices/manage");
+  await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
   await page.getByRole("button", { name: "Search" }).first().click();
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
   await invRow.getByRole("button", { name: "View Invoice" }).first().click({ force: true });
@@ -911,13 +911,10 @@ test("invoice and receipt share and save actions generate links and downloads", 
   });
   expect(receiptRes.ok()).toBeTruthy();
 
-  await page.goto("/invoices");
+  await page.goto("/invoices/manage");
+  await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
-  await invRow.getByRole("button", { name: "View Invoice" }).click();
-  const invoiceSummaryDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Invoice Summary" }) });
-  await expect(invoiceSummaryDialog).toBeVisible();
-
-  await invoiceSummaryDialog.getByRole("button", { name: "Share" }).click();
+  await invRow.getByRole("button", { name: "Share" }).click();
   const invoiceShareDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Share Invoice" }) });
   await expect(invoiceShareDialog).toBeVisible();
   const invoiceShareLink = invoiceShareDialog.getByLabel("Secure Link");
@@ -927,11 +924,7 @@ test("invoice and receipt share and save actions generate links and downloads", 
   await page.keyboard.press("Escape");
   await expect(invoiceShareDialog).toBeHidden();
 
-  await page.goto("/invoices");
-  const invRowAgain = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
-  await invRowAgain.getByRole("button", { name: "View Invoice" }).click();
-  await expect(invoiceSummaryDialog).toBeVisible();
-  await invoiceSummaryDialog.getByRole("button", { name: "Save PDF" }).click();
+  await invRow.getByRole("button", { name: "Save PDF" }).click();
   await page.waitForFunction(() => (window as any).__savedDocumentRequestCount > 0);
   const invoiceSaveStatus = await page.evaluate(() => (window as any).__savedDocumentStatus as number | null);
   expect(invoiceSaveStatus, "invoice save request should succeed").toBeGreaterThanOrEqual(200);
@@ -968,6 +961,86 @@ test("invoice and receipt share and save actions generate links and downloads", 
   expect(receiptSaveStatus, "receipt save request should succeed").toBeGreaterThanOrEqual(200);
   expect(receiptSaveStatus, "receipt save request should succeed").toBeLessThan(300);
   await expect(page.getByText("Receipt saved and backed up.")).toBeVisible({ timeout: 30_000 });
+});
+
+test("invoice create/manage pages load independently and previews open for invoices and receipts", async ({ page, request }) => {
+  const token = await adminToken(request);
+  await setSession(page, request, token);
+
+  const suffix = `${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
+  const customerRes = await request.post(`${API_BASE_URL}/customers/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { name: `Preview Buyer ${suffix}`, email: `preview_${suffix}@example.com` },
+  });
+  expect(customerRes.ok()).toBeTruthy();
+  const customer = await customerRes.json();
+
+  const itemRes = await request.post(`${API_BASE_URL}/items/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { name: `Preview Item ${suffix}`, unit_price: "10.00", stock_quantity: 10 },
+  });
+  expect(itemRes.ok()).toBeTruthy();
+  const item = await itemRes.json();
+
+  const invRes = await request.post(`${API_BASE_URL}/invoices/`, {
+    headers: { Authorization: `Token ${token}` },
+    data: { customer: customer.id, status: "Sent", items: [{ item: item.id, quantity: 1 }] },
+  });
+  expect(invRes.ok()).toBeTruthy();
+  const invoice = await invRes.json();
+
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
+    headers: { Authorization: `Token ${token}` },
+  });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string; invoice_number: string };
+
+  const ref = `E2E-PREVIEW-${suffix}`;
+  const receiptRes = await request.post(`${API_BASE_URL}/receipts/`, {
+    headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-preview-${suffix}` },
+    data: {
+      invoice: invoice.id,
+      amount_paid: invoiceDetail.total_amount,
+      payment_method: "Cash",
+      reference_number: ref,
+      payment_date: new Date().toISOString().slice(0, 10),
+    },
+  });
+  expect(receiptRes.ok()).toBeTruthy();
+
+  const viewports = [
+    { width: 1280, height: 720 },
+    { width: 768, height: 1024 },
+    { width: 390, height: 844 },
+  ];
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.goto("/invoices");
+    await expect(page.getByRole("heading", { name: "Create Invoice" })).toBeVisible();
+    await page.getByRole("link", { name: "Manage Invoices" }).click();
+    await expect(page).toHaveURL(/\/invoices\/manage$/);
+    await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
+    await page.goto("/receipts");
+    await expect(page.getByRole("heading", { name: "Receipts" })).toBeVisible();
+  }
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/invoices/manage");
+  const invoicePopupPromise = page.waitForEvent("popup");
+  await page.getByRole("row", { name: new RegExp(String(invoiceDetail.invoice_number)) }).first().getByRole("button", { name: "Preview" }).click();
+  const invoicePopup = await invoicePopupPromise;
+  await expect(invoicePopup.getByRole("heading", { name: "Invoice Preview" })).toBeVisible();
+  await expect(invoicePopup.getByLabel("Invoice Preview frame")).toBeVisible();
+  await invoicePopup.close();
+
+  await page.goto("/receipts");
+  const receiptPopupPromise = page.waitForEvent("popup");
+  await page.getByRole("row", { name: new RegExp(ref) }).first().getByRole("button", { name: "Preview" }).click();
+  const receiptPopup = await receiptPopupPromise;
+  await expect(receiptPopup.getByRole("heading", { name: "Receipt Preview" })).toBeVisible();
+  await expect(receiptPopup.getByLabel("Receipt Preview frame")).toBeVisible();
+  await receiptPopup.close();
 });
 
 test("inventory export and import flows work end-to-end", async ({ page, request }) => {
@@ -1051,7 +1124,7 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
   });
   expect(itemRes.ok(), `invoice import setup item create failed: status=${itemRes.status()} body=${itemResText}`).toBeTruthy();
 
-  await page.goto("/invoices");
+  await page.goto("/invoices/manage");
   await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
 
   await page.getByRole("button", { name: "Import" }).click();

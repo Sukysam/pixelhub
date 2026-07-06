@@ -3125,6 +3125,10 @@ class ApiCoverageTests(APITestCase):
             ("application/pdf" in (pdf.get("Content-Type") or "")) or ("text/html" in (pdf.get("Content-Type") or "")),
             msg=f"unexpected content-type: {pdf.get('Content-Type')}",
         )
+        invoice_html = self.client.get(f"/api/invoices/{inv.id}/print_html/")
+        self.assertEqual(invoice_html.status_code, status.HTTP_200_OK)
+        self.assertIn("text/html", invoice_html["Content-Type"])
+        self.assertContains(invoice_html, "AmbienteSoft LTD")
 
         receipt = Receipt.objects.create(invoice=inv, amount_paid=Decimal("10.00"), payment_method="Cash", reference_number="R1")
         rendered_receipt = render_receipt(request_stub, receipt, "html")

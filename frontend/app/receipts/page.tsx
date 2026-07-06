@@ -483,6 +483,13 @@ export default function ReceiptsPage() {
       .join("\n");
   };
 
+  const openReceiptPreview = (receiptId: number) => {
+    const win = window.open(`/receipts/preview/${receiptId}`, "_blank", "noopener,noreferrer");
+    if (!win) {
+      setError("Pop-up blocked. Please allow pop-ups, then try again.");
+    }
+  };
+
   const openShareReceipt = async (receiptId: number) => {
     if (shareLoading) return;
     setError(null);
@@ -908,6 +915,9 @@ export default function ReceiptsPage() {
                         </div>
                       ) : (
                         <div className="flex gap-2">
+                          <Button size="sm" variant="outline" onClick={() => openReceiptPreview(r.id)}>
+                            Preview
+                          </Button>
                           <Button size="sm" variant="outline" onClick={() => startEdit(r)}>
                             {t("edit")}
                           </Button>

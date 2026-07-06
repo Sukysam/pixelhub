@@ -2497,6 +2497,14 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         response["X-PDF-Backend"] = rendered.backend or ("weasyprint" if "application/pdf" in rendered.content_type else "failed")
         return response
 
+    @action(detail=True, methods=["get"])
+    def print_html(self, request, pk=None):
+        invoice = self.get_object()
+        from .documents import render_invoice
+
+        rendered = render_invoice(request, invoice, "html")
+        return HttpResponse(rendered.content, content_type=rendered.content_type)
+
     @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):
         try:
