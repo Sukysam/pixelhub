@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Response } from "@playwright/test";
 import crypto from "crypto";
 import { API_BASE_URL, adminToken, createStandardBusinessUserSession, setSession } from "./helpers/admin";
 
@@ -6,6 +6,24 @@ function buildPreview(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= 50) return normalized;
   return `${normalized.slice(0, 47).trimEnd()}...`;
+}
+
+async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPages = 6) {
+  const row = page.locator("tbody tr", { hasText: customerName }).first();
+  for (let attempt = 0; attempt < maxPages; attempt += 1) {
+    if ((await row.count()) > 0) return row;
+    const loadMoreButton = page.getByRole("button", { name: "Load More" });
+    if ((await loadMoreButton.count()) === 0) break;
+    const customersResponse = page.waitForResponse(
+      (response: Response) =>
+        response.url().includes("/api/customers/?page=") &&
+        response.request().method() === "GET" &&
+        response.status() === 200
+    );
+    await loadMoreButton.click();
+    await customersResponse;
+  }
+  return row;
 }
 
 test("admin can preview internal customer notes from the customers list after pagination", async ({ page, request }) => {
@@ -57,9 +75,7 @@ test("admin can preview internal customer notes from the customers list after pa
   await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("columnheader", { name: "Internal Notes" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Load More" })).toBeVisible({ timeout: 30_000 });
-  await page.getByRole("button", { name: "Load More" }).click();
-
-  const customerRow = page.locator("tbody tr", { hasText: customerName }).first();
+  const customerRow = await loadMoreUntilRowVisible(page, customerName);
   await expect(customerRow).toBeVisible({ timeout: 30_000 });
   const previewButton = customerRow.getByRole("button", { name: `View internal notes for ${customerName}` });
   await expect(previewButton).toContainText(expectedPreview);

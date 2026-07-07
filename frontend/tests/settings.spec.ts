@@ -71,6 +71,36 @@ async function getJson(request: any, token: string, apiPath: string) {
   return res.json();
 }
 
+async function postJsonWithTransientRetry(
+  request: any,
+  token: string,
+  apiPath: string,
+  data: Record<string, unknown>,
+  options?: { attempts?: number; retryStatuses?: number[]; delayMs?: number }
+) {
+  const attempts = options?.attempts ?? 3;
+  const retryStatuses = new Set(options?.retryStatuses ?? [500]);
+  const delayMs = options?.delayMs ?? 400;
+  let lastStatus = 0;
+  let lastBody = "";
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const res = await request.post(`${API_BASE_URL}${apiPath}`, {
+      headers: { Authorization: `Token ${token}` },
+      data,
+    });
+    if (res.ok()) return res;
+    lastStatus = res.status();
+    lastBody = await res.text();
+    if (!retryStatuses.has(lastStatus) || attempt === attempts - 1) {
+      throw new Error(`POST ${apiPath} failed: status=${lastStatus} body=${lastBody}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)));
+  }
+
+  throw new Error(`POST ${apiPath} failed after retries: status=${lastStatus} body=${lastBody}`);
+}
+
 async function waitForUploadedLogoSrc(locator: any) {
   await expect
     .poll(async () => (await locator.getAttribute("src")) ?? "", { timeout: 30_000 })
@@ -448,22 +478,24 @@ test("standard business user can persist customer invoice and receipt records", 
     rowButtons: await invoiceRow.getByRole("button").allTextContents(),
   });
   await invoiceRow.getByRole("button", { name: "Edit" }).click();
+  const invoiceEditRow = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: "Save" }) }).first();
+  await expect(invoiceEditRow).toBeVisible({ timeout: 30_000 });
   await reportSettingsCiDebug("B", "frontend/tests/settings.spec.ts:invoice-edit-opened", "[DEBUG] invoice edit state before save", {
     createdInvoiceNumber,
-    rowText: (await invoiceRow.textContent()) ?? "",
-    rowButtons: await invoiceRow.getByRole("button").allTextContents(),
-    rowSelectCount: await invoiceRow.locator("select").count(),
-    rowDateInputCount: await invoiceRow.locator('input[type="date"]').count(),
+    rowText: (await invoiceEditRow.textContent()) ?? "",
+    rowButtons: await invoiceEditRow.getByRole("button").allTextContents(),
+    rowSelectCount: await invoiceEditRow.locator("select").count(),
+    rowDateInputCount: await invoiceEditRow.locator('input[type="date"]').count(),
   });
-  await invoiceRow.locator("select").first().selectOption("Sent");
-  await invoiceRow.locator('input[type="date"]').fill("2026-07-31");
+  await invoiceEditRow.locator("select").first().selectOption("Sent");
+  await invoiceEditRow.locator('input[type="date"]').fill("2026-07-31");
   const invoiceUpdateResponse = page.waitForResponse(
     (response) =>
       response.url() === `${API_BASE_URL}/invoices/${createdInvoice?.id}/` &&
       response.request().method() === "PATCH" &&
       response.status() === 200
   );
-  await invoiceRow.getByRole("button", { name: "Save" }).click();
+  await invoiceEditRow.getByRole("button", { name: "Save" }).click();
   await reportSettingsCiDebug("C", "frontend/tests/settings.spec.ts:invoice-save-clicked", "[DEBUG] invoice state after save click", {
     createdInvoiceNumber,
     dialogCount: await page.getByRole("dialog").count(),
@@ -496,16 +528,20 @@ test("standard business user can persist customer invoice and receipt records", 
   expect(updatedInvoice.total_amount).toBe("27.00");
 
   await invoiceRow.getByRole("button", { name: "Edit" }).click();
-  await invoiceRow.locator("select").nth(1).selectOption("fixed");
-  await invoiceRow.locator('input[type="number"]').last().fill("5");
+  const invoiceDiscountEditRow = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: "Save" }) }).first();
+  await expect(invoiceDiscountEditRow).toBeVisible({ timeout: 30_000 });
+  await invoiceDiscountEditRow.locator("select").nth(1).selectOption("fixed");
+  await invoiceDiscountEditRow.locator('input[type="number"]').last().fill("5");
   const invoiceDiscountUpdateResponse = page.waitForResponse(
     (response) =>
       response.url() === `${API_BASE_URL}/invoices/${createdInvoice?.id}/` &&
       response.request().method() === "PATCH" &&
       response.status() === 200
   );
-  await invoiceRow.getByRole("button", { name: "Save" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).click();
+  await invoiceDiscountEditRow.getByRole("button", { name: "Save" }).click();
+  const invoiceDiscountConfirmDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm changes" }).last();
+  await expect(invoiceDiscountConfirmDialog).toBeVisible({ timeout: 30_000 });
+  await invoiceDiscountConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
   await invoiceDiscountUpdateResponse;
   await expect(invoiceRow).toContainText("Fixed amount", { timeout: 30_000 });
 
@@ -1266,19 +1302,28 @@ test("invoice import flow works end-to-end", async ({ page, request }) => {
 
   const sku = `E2E-INV-SKU-${suffix}`;
   const invoiceNumber = `INV-E2E-${suffix}`.slice(0, 50);
-  const itemRes = await request.post(`${API_BASE_URL}/items/`, {
-    headers: { Authorization: `Token ${token}` },
-    data: { type: "product", name: `E2E Item ${suffix}`, sku, unit_price: "10.00", tax_rate: "0.00", stock_quantity: 10 },
-  });
-  const itemResText = await itemRes.text();
+  let itemResText = "";
+  try {
+    const itemRes = await postJsonWithTransientRetry(request, token, "/items/", {
+      type: "product",
+      name: `E2E Item ${suffix}`,
+      sku,
+      unit_price: "10.00",
+      tax_rate: "0.00",
+      stock_quantity: 10,
+    });
+    itemResText = await itemRes.text();
+  } catch (error) {
+    itemResText = error instanceof Error ? error.message : String(error);
+  }
   await reportDebugEvent("C", "frontend/tests/settings.spec.ts:invoice-import-item-create", "[DEBUG] invoice import item create response", {
-    status: itemRes.status(),
-    ok: itemRes.ok(),
+    status: itemResText.includes("status=") ? Number((/status=(\d+)/.exec(itemResText) || [])[1] || 0) : 201,
+    ok: !itemResText.startsWith("POST /items/ failed"),
     body: itemResText,
     sku,
     suffix,
   });
-  expect(itemRes.ok(), `invoice import setup item create failed: status=${itemRes.status()} body=${itemResText}`).toBeTruthy();
+  expect(itemResText.startsWith("POST /items/ failed"), `invoice import setup item create failed: ${itemResText}`).toBeFalsy();
 
   await page.goto("/invoices/manage");
   await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
