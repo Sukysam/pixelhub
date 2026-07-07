@@ -73,7 +73,7 @@ Expected columns:
 - Open **Inventory**.
 - Click **Export**.
 - Choose a format: CSV, Excel (.xlsx), or PDF.
-- Optionally set **Created From/To** and choose which fields to include.
+- Optionally set **Created From/To** and choose which fields to include, including the inventory `category` column.
 
 ### Import
 - Open **Inventory**.
@@ -84,7 +84,7 @@ Expected columns:
 
 Expected columns (CSV/XLSX):
 - Required: `name`, `unit_price`
-- Optional: `type`, `sku`, `description`, `tax_rate`, `tax_category`, `unit_of_measure`, `stock_quantity`
+- Optional: `type`, `sku`, `category`, `description`, `tax_rate`, `tax_category`, `unit_of_measure`, `stock_quantity`
 
 ## Invoices: Export / Import
 ### Export

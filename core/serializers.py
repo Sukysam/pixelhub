@@ -250,6 +250,7 @@ class ItemSerializer(serializers.ModelSerializer):
             "type",
             "sku",
             "name",
+            "category",
             "description",
             "unit_price",
             "tax_rate",
@@ -273,6 +274,12 @@ class ItemSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("unit_price must be >= 0")
         return value
+
+    def validate_category(self, value):
+        normalized = re.sub(r"\s+", " ", str(value or "").strip())
+        if not normalized:
+            raise serializers.ValidationError("category is required")
+        return normalized
 
     def validate_stock_quantity(self, value):
         if value is None:
@@ -301,6 +308,7 @@ class ItemSerializer(serializers.ModelSerializer):
     def get_specifications(self, obj):
         return {
             "type": obj.type,
+            "category": obj.category,
             "description": obj.description,
             "tax_category": obj.tax_category,
             "tax_rate": str(obj.tax_rate),

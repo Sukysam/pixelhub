@@ -1834,7 +1834,7 @@ class ItemViewSet(SoftDeleteModelViewSet):
 
         q = str(p.get("q") or "").strip()
         if q:
-            qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q))
+            qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q) | Q(category__icontains=q))
 
         type_val = str(p.get("type") or "").strip()
         if type_val:
@@ -1842,6 +1842,10 @@ class ItemViewSet(SoftDeleteModelViewSet):
             if type_val not in allowed:
                 raise ValidationError({"type": "Invalid type"})
             qs = qs.filter(type=type_val)
+
+        category = str(p.get("category") or "").strip()
+        if category:
+            qs = qs.filter(category__icontains=category)
 
         warehouse_location = str(p.get("warehouse_location") or "").strip()
         if warehouse_location:
@@ -1894,6 +1898,7 @@ class ItemViewSet(SoftDeleteModelViewSet):
                 "type": "type",
                 "sku": "sku",
                 "name": "name",
+                "category": "category",
                 "unit_price": "unit_price",
                 "tax_rate": "tax_rate",
                 "stock_quantity": "stock_quantity",
@@ -1995,6 +2000,7 @@ class ItemViewSet(SoftDeleteModelViewSet):
             "type",
             "sku",
             "name",
+            "category",
             "description",
             "unit_price",
             "tax_rate",
@@ -2006,13 +2012,13 @@ class ItemViewSet(SoftDeleteModelViewSet):
         ]
         fields_raw = request.query_params.get("fields")
         if fields_raw in (None, ""):
-            fields = ["type", "sku", "name", "unit_price", "tax_rate", "stock_quantity", "updated_at"]
+            fields = ["type", "sku", "name", "category", "unit_price", "tax_rate", "stock_quantity", "updated_at"]
         else:
             parts = [p.strip() for p in str(fields_raw).split(",") if p.strip()]
             invalid = [p for p in parts if p not in allowed_fields]
             if invalid:
                 raise ValidationError({"fields": f"Invalid fields: {', '.join(invalid)}"})
-            fields = parts or ["type", "sku", "name", "unit_price", "tax_rate", "stock_quantity", "updated_at"]
+            fields = parts or ["type", "sku", "name", "category", "unit_price", "tax_rate", "stock_quantity", "updated_at"]
 
         rows_limit = 50000 if fmt in ("csv", "xlsx") else 2000
         try:
@@ -2112,6 +2118,7 @@ class ItemViewSet(SoftDeleteModelViewSet):
             "type",
             "sku",
             "name",
+            "category",
             "description",
             "unit_price",
             "tax_rate",
@@ -2119,7 +2126,7 @@ class ItemViewSet(SoftDeleteModelViewSet):
             "unit_of_measure",
             "stock_quantity",
         ]
-        example = ["product", "SKU-001", "Example Item", "Optional description", "10.00", "0", "standard", "pcs", "5"]
+        example = ["product", "SKU-001", "Example Item", "General", "Optional description", "10.00", "0", "standard", "pcs", "5"]
         filename_base = "inventory_import_template"
 
         if fmt == "csv":

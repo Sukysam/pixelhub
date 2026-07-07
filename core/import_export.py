@@ -4,6 +4,7 @@ import csv
 import io
 import logging
 import os
+import re
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -186,6 +187,7 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
         row_num = int(r.get("_row") or 0)
         raw_type = str(r.get("type") or "product").strip() or "product"
         raw_name = str(r.get("name") or "").strip()
+        raw_category = re.sub(r"\s+", " ", str(r.get("category") or "General").strip()) or "General"
         raw_sku = str(r.get("sku") or "").strip() or None
         raw_desc = r.get("description")
         desc = str(raw_desc).strip() if raw_desc not in (None, "") else None
@@ -197,6 +199,8 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
             row_errors.append({"row": row_num, "field": "type", "message": "Invalid type"})
         if not raw_name:
             row_errors.append({"row": row_num, "field": "name", "message": "Name is required"})
+        if not raw_category:
+            row_errors.append({"row": row_num, "field": "category", "message": "category is required"})
 
         if raw_sku:
             if raw_sku in seen_skus:
@@ -247,6 +251,7 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
                 type=raw_type,
                 sku=raw_sku,
                 name=raw_name,
+                category=raw_category,
                 description=desc,
                 unit_price=unit_price,
                 tax_rate=tax_rate,

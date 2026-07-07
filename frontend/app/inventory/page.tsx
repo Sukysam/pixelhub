@@ -17,6 +17,7 @@ interface Item {
   id: number;
   type: ItemType;
   name: string;
+  category: string;
   sku: string | null;
   description: string | null;
   unit_price: number;
@@ -49,6 +50,7 @@ export default function InventoryPage() {
   const [editDraft, setEditDraft] = useState<{
     type: ItemType;
     name: string;
+    category: string;
     sku: string | null;
     description: string | null;
     unit_price: string;
@@ -56,6 +58,7 @@ export default function InventoryPage() {
   }>({
     type: "product",
     name: "",
+    category: "General",
     sku: null,
     description: null,
     unit_price: "0",
@@ -72,6 +75,7 @@ export default function InventoryPage() {
       "type",
       "sku",
       "name",
+      "category",
       "description",
       "unit_price",
       "tax_rate",
@@ -88,7 +92,7 @@ export default function InventoryPage() {
   const [exportCreatedFrom, setExportCreatedFrom] = useState("");
   const [exportCreatedTo, setExportCreatedTo] = useState("");
   const [exportFieldSelection, setExportFieldSelection] = useState<Record<string, boolean>>(() => {
-    const defaults = new Set(["type", "sku", "name", "unit_price", "tax_rate", "stock_quantity", "updated_at"]);
+    const defaults = new Set(["type", "sku", "name", "category", "unit_price", "tax_rate", "stock_quantity", "updated_at"]);
     const next: Record<string, boolean> = {};
     for (const f of exportableFields) next[f] = defaults.has(f);
     return next;
@@ -137,6 +141,7 @@ export default function InventoryPage() {
   const [newItem, setNewItem] = useState<{
     type: ItemType;
     name: string;
+    category: string;
     sku: string;
     description: string;
     unit_price: string;
@@ -144,6 +149,7 @@ export default function InventoryPage() {
   }>({
     type: "product",
     name: "",
+    category: "General",
     sku: "",
     description: "",
     unit_price: "",
@@ -206,6 +212,10 @@ export default function InventoryPage() {
       setError("Unit price must be a valid number >= 0");
       return;
     }
+    if (!newItem.category.trim()) {
+      setError("Category is required");
+      return;
+    }
     if (!Number.isFinite(stockQuantity) || stockQuantity < 0) {
       setError("Stock quantity must be a valid number >= 0");
       return;
@@ -219,6 +229,7 @@ export default function InventoryPage() {
         body: JSON.stringify({
           type: newItem.type,
           name: newItem.name.trim(),
+          category: newItem.category.trim(),
           sku: newItem.sku.trim() || null,
           description: newItem.description.trim() || null,
           unit_price: unitPrice,
@@ -229,6 +240,7 @@ export default function InventoryPage() {
       setNewItem({
         type: "product",
         name: "",
+        category: "General",
         sku: "",
         description: "",
         unit_price: "",
@@ -248,6 +260,7 @@ export default function InventoryPage() {
     setEditDraft({
       type: it.type,
       name: it.name,
+      category: it.category,
       sku: it.sku,
       description: it.description,
       unit_price: String(it.unit_price),
@@ -264,6 +277,10 @@ export default function InventoryPage() {
     const unitPrice = Number(editDraft.unit_price);
     if (!Number.isFinite(unitPrice) || unitPrice < 0) {
       setError(t("unitPriceInvalid"));
+      return;
+    }
+    if (!editDraft.category.trim()) {
+      setError("Category is required");
       return;
     }
     const stockQuantity = editDraft.type === "service" ? 0 : Number(editDraft.stock_quantity);
@@ -288,6 +305,7 @@ export default function InventoryPage() {
         body: JSON.stringify({
           type: editDraft.type,
           name: editDraft.name.trim(),
+          category: editDraft.category.trim(),
           sku: (editDraft.sku ?? "").trim() || null,
           description: (editDraft.description ?? "").trim() || null,
           unit_price: unitPrice,
@@ -592,6 +610,9 @@ export default function InventoryPage() {
                   SKU
                 </th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Category
+                </th>
+                <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Description
                 </th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -608,13 +629,13 @@ export default function InventoryPage() {
             <tbody className="divide-y divide-gray-200">
               {loading ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={8}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
                     Loading...
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={8}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
                     No items yet.
                   </td>
                 </tr>
@@ -663,6 +684,13 @@ export default function InventoryPage() {
                         <Input value={editDraft.sku ?? ""} onChange={(e) => setEditDraft((p) => ({ ...p, sku: e.target.value || null }))} />
                       ) : (
                         item.sku || "-"
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {editingId === item.id ? (
+                        <Input value={editDraft.category} onChange={(e) => setEditDraft((p) => ({ ...p, category: e.target.value }))} />
+                      ) : (
+                        item.category
                       )}
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
@@ -781,6 +809,16 @@ export default function InventoryPage() {
                 id="name"
                 value={newItem.name}
                 onChange={(e) => setNewItem((prev) => ({ ...prev, name: e.target.value }))}
+                required
+              />
+            </div>
+
+            <div>
+              <Label htmlFor="category">Category</Label>
+              <Input
+                id="category"
+                value={newItem.category}
+                onChange={(e) => setNewItem((prev) => ({ ...prev, category: e.target.value }))}
                 required
               />
             </div>

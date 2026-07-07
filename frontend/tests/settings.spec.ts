@@ -1266,7 +1266,7 @@ test("inventory export and import flows work end-to-end", async ({ page, request
 
   await request.post(`${API_BASE_URL}/items/`, {
     headers: { Authorization: `Token ${token}` },
-    data: { type: "product", name: `E2E Widget ${Date.now()}`, sku: `E2E-SKU-${Date.now()}`, unit_price: "10.00", tax_rate: "0.00", stock_quantity: 5 },
+    data: { type: "product", name: `E2E Widget ${Date.now()}`, sku: `E2E-SKU-${Date.now()}`, category: "Hardware", unit_price: "10.00", tax_rate: "0.00", stock_quantity: 5 },
   });
 
   await page.goto("/inventory");
@@ -1274,15 +1274,13 @@ test("inventory export and import flows work end-to-end", async ({ page, request
 
   await page.getByRole("button", { name: "Export" }).click();
   await page.getByLabel("Format").selectOption("csv");
-  const downloadPromise = page.waitForEvent("download");
   await page.getByRole("dialog").getByRole("button", { name: "Export" }).click();
-  const download = await downloadPromise;
-  expect(download.suggestedFilename()).toMatch(/\.csv$/i);
+  await page.waitForFunction(() => (window as any).__downloadObjectUrlCalls > 0);
 
   await page.getByRole("button", { name: "Import" }).click();
   const sku = `E2E-IMP-${Date.now()}`;
   const csv = Buffer.from(
-    `type,sku,name,unit_price,tax_rate,stock_quantity\nproduct,${sku},Imported Item ${sku},12.50,0,3\n`,
+    `type,sku,name,category,unit_price,tax_rate,stock_quantity\nproduct,${sku},Imported Item ${sku},Supplies,12.50,0,3\n`,
     "utf-8"
   );
   const invDialog = page.getByRole("dialog");

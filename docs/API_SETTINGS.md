@@ -130,16 +130,18 @@ Lists inventory items with stock/specification metadata.
 
 Query params:
 - `page`: page number
-- `q`: search across `name` and `sku`
+- `q`: search across `name`, `sku`, and `category`
 - `type`: `product` | `service`
+- `category`: partial category match
 - `warehouse_location`
 - `created_from`, `created_to`: `YYYY-MM-DD`
 - `last_restock_from`, `last_restock_to`: `YYYY-MM-DD`
 - `stock_min`, `stock_max`: integer stock bounds
-- `ordering` or `sort`: `id`, `type`, `sku`, `name`, `unit_price`, `tax_rate`, `stock_quantity`, `warehouse_location`, `last_restock_date`, `created_at`, `updated_at`
+- `ordering` or `sort`: `id`, `type`, `sku`, `name`, `category`, `unit_price`, `tax_rate`, `stock_quantity`, `warehouse_location`, `last_restock_date`, `created_at`, `updated_at`
 
 List/detail response fields include:
 - core inventory fields
+- `category`
 - `warehouse_location`
 - `last_restock_date`
 - `specifications`
@@ -154,7 +156,7 @@ Exports inventory items.
 
 Query params:
 - `file_format`: `csv` | `xlsx` | `pdf` (default: `csv`)
-- `fields`: comma-separated allowed fields (default: `type,sku,name,unit_price,tax_rate,stock_quantity,updated_at`)
+- `fields`: comma-separated allowed fields (default: `type,sku,name,category,unit_price,tax_rate,stock_quantity,updated_at`)
 - `created_from`, `created_to`: `YYYY-MM-DD` (filters by `created_at` date)
 - `q`: search by `name`/`sku`
 - `type`: `product` | `service`
@@ -177,7 +179,7 @@ Form fields:
 
 CSV/XLSX columns:
 - Required: `name`, `unit_price`
-- Optional: `type` (`product|service`, default `product`), `sku`, `description`, `tax_rate`, `tax_category`, `unit_of_measure`, `stock_quantity`
+- Optional: `type` (`product|service`, default `product`), `sku`, `category` (default `General`), `description`, `tax_rate`, `tax_category`, `unit_of_measure`, `stock_quantity`
 
 Response (200):
 ```json

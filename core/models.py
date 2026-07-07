@@ -126,6 +126,7 @@ class Item(SoftDeleteModel):
     type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="product")
     sku = models.CharField(max_length=100, blank=True, null=True, unique=True)
     name = models.CharField(max_length=255)
+    category = models.CharField(max_length=255, default="General")
     description = models.TextField(blank=True, null=True)
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -141,6 +142,7 @@ class Item(SoftDeleteModel):
             models.Index(fields=["is_deleted", "sku"]),
             models.Index(fields=["is_deleted", "name"]),
             models.Index(fields=["is_deleted", "type"]),
+            models.Index(fields=["is_deleted", "category"]),
             models.Index(fields=["is_deleted", "stock_quantity"]),
             models.Index(fields=["is_deleted", "last_restock_date"]),
         ]

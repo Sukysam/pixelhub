@@ -401,6 +401,7 @@ class PersistenceTests(APITestCase):
             {
                 "name": "Warehouse Widget",
                 "sku": "WH-001",
+                "category": "Hardware",
                 "description": "Detailed spec",
                 "unit_price": "8.00",
                 "tax_rate": "5",
@@ -422,11 +423,17 @@ class PersistenceTests(APITestCase):
         self.assertEqual(list_res.status_code, status.HTTP_200_OK)
         self.assertEqual(list_res.data["results"][0]["warehouse_location"], "Rack-22")
         self.assertEqual(list_res.data["results"][0]["stock_status"], "in_stock")
+        self.assertEqual(list_res.data["results"][0]["category"], "Hardware")
 
         detail_res = self.client.get(reverse("item-detail", args=[item["id"]]))
         self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_res.data["specifications"]["unit_of_measure"], "box")
+        self.assertEqual(detail_res.data["specifications"]["category"], "Hardware")
         self.assertEqual(detail_res.data["recent_invoice_usage"][0]["invoice_status"], "Draft")
+
+        category_list_res = self.client.get(f"{reverse('item-list')}?category=Hard&q=Hardware")
+        self.assertEqual(category_list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(category_list_res.data["results"][0]["id"], item["id"])
 
     def test_invoice_detail_and_list_support_payment_filters_sorting_and_customer_context(self):
         customer = self.client.post(reverse("customer-list"), {"name": "Invoice Buyer", "email": "invoice@example.com"}, format="json").data
@@ -895,6 +902,23 @@ class PersistenceTests(APITestCase):
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_item_category_defaults_and_blank_category_is_rejected(self):
+        created = self.client.post(
+            reverse("item-list"),
+            {"name": "Default Category Item", "unit_price": "1.00", "stock_quantity": 1},
+            format="json",
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(created.data["category"], "General")
+
+        denied = self.client.post(
+            reverse("item-list"),
+            {"name": "Blank Category Item", "category": "   ", "unit_price": "1.00", "stock_quantity": 1},
+            format="json",
+        )
+        self.assertEqual(denied.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("category", denied.data)
 
     def test_service_cannot_have_stock(self):
         res = self.client.post(
@@ -1932,6 +1956,7 @@ class ImportExportTests(APITestCase):
         self.assertIn("text/csv", csv_res.get("Content-Type", ""))
         self.assertIn("inventory_import_template.csv", csv_res.get("Content-Disposition", ""))
         self.assertIn("unit_price", csv_res.content.decode("utf-8", errors="ignore"))
+        self.assertIn("category", csv_res.content.decode("utf-8", errors="ignore"))
 
         xlsx_res = self.client.get("/api/items/import_template/?file_format=xlsx")
         self.assertEqual(xlsx_res.status_code, status.HTTP_200_OK)
@@ -1953,15 +1978,16 @@ class ImportExportTests(APITestCase):
         self.assertIn("sku already exists", dl.content.decode("utf-8", errors="ignore"))
 
     def test_inventory_import_success(self):
-        csv_body = "type,sku,name,unit_price,tax_rate,stock_quantity\nproduct,SKU-100,Imported,12.50,5,10\n"
+        csv_body = "type,sku,name,category,unit_price,tax_rate,stock_quantity\nproduct,SKU-100,Imported,Hardware,12.50,5,10\n"
         up = SimpleUploadedFile("items.csv", csv_body.encode("utf-8"), content_type="text/csv")
         res = self.client.post("/api/items/import/", {"file": up, "rollback_on_error": "true"}, format="multipart")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data["imported"], 1)
         self.assertTrue(Item.objects.filter(sku="SKU-100", is_deleted=False).exists())
+        self.assertEqual(Item.objects.get(sku="SKU-100", is_deleted=False).category, "Hardware")
 
     def test_inventory_import_dry_run(self):
-        csv_body = "type,sku,name,unit_price,tax_rate,stock_quantity\nproduct,SKU-DRY,DryRun,1.00,0,1\n"
+        csv_body = "type,sku,name,category,unit_price,tax_rate,stock_quantity\nproduct,SKU-DRY,DryRun,General,1.00,0,1\n"
         up = SimpleUploadedFile("items.csv", csv_body.encode("utf-8"), content_type="text/csv")
         res = self.client.post("/api/items/import/", {"file": up, "dry_run": "true", "rollback_on_error": "true"}, format="multipart")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -1972,8 +1998,8 @@ class ImportExportTests(APITestCase):
     def test_inventory_import_xlsx_success(self):
         wb = Workbook()
         ws = wb.active
-        ws.append(["type", "sku", "name", "unit_price", "tax_rate", "stock_quantity"])
-        ws.append(["product", "SKU-XLSX", "FromXLSX", "2.50", "0", 4])
+        ws.append(["type", "sku", "name", "category", "unit_price", "tax_rate", "stock_quantity"])
+        ws.append(["product", "SKU-XLSX", "FromXLSX", "Supplies", "2.50", "0", 4])
         out = io.BytesIO()
         wb.save(out)
         up = SimpleUploadedFile(
@@ -1984,6 +2010,7 @@ class ImportExportTests(APITestCase):
         res = self.client.post("/api/items/import/", {"file": up}, format="multipart")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertTrue(Item.objects.filter(sku="SKU-XLSX", is_deleted=False).exists())
+        self.assertEqual(Item.objects.get(sku="SKU-XLSX", is_deleted=False).category, "Supplies")
 
     def test_invoice_import_groups_rows_and_deducts_inventory(self):
         customer = Customer.objects.create(name="Buyer", email="buyer@example.com")
