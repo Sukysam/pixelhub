@@ -5,7 +5,7 @@ import io
 import logging
 import os
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
 
@@ -110,6 +110,22 @@ def process_batch_import(
             }
         )
 
+    if dry_run:
+        logger.info(
+            "batch_import.dry_run rows=%s planned=%s failed_items=%s",
+            len(raw_items),
+            len(valid_items),
+            len(failed_items),
+        )
+        return 200, {
+            "dry_run": True,
+            "rows": len(raw_items),
+            planned_key: len(valid_items),
+            "errors": errors,
+            "successful_items": successful_items,
+            "failed_items": failed_items,
+        }
+
     if errors and rollback_on_error:
         token = _cache_error_log(errors)
         logger.info(
@@ -126,22 +142,6 @@ def process_batch_import(
             "failed_items": failed_items[:200],
             "error_log_token": token,
             "rolled_back": True,
-        }
-
-    if dry_run:
-        logger.info(
-            "batch_import.dry_run rows=%s planned=%s failed_items=%s",
-            len(raw_items),
-            len(valid_items),
-            len(failed_items),
-        )
-        return 200, {
-            "dry_run": True,
-            "rows": len(raw_items),
-            planned_key: len(valid_items),
-            "errors": errors,
-            "successful_items": successful_items,
-            "failed_items": failed_items,
         }
 
     created_count, persisted_items = persist_valid_items(valid_items)
