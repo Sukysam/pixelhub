@@ -111,12 +111,19 @@ Query params:
 
 List response fields include:
 - core customer fields
+- `internal_remarks_preview` and `has_internal_remarks` only when the caller has `data.customers.remarks.read`
 - `invoice_count`
 - `lifetime_value`
 - `last_invoice_date`
 
+Notes:
+- Full `internal_remarks` content is intentionally omitted from the list response to keep the customer list lightweight and internal-note content lazy-loaded.
+
 ### GET /customers/<id>/
 Returns a single customer plus `order_history` entries containing invoice number, issue date, due date, status, and total amount.
+
+Notes:
+- `internal_remarks` is included only for callers with `data.customers.remarks.read`.
 
 ### GET /items/
 Lists inventory items with stock/specification metadata.

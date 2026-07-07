@@ -40,6 +40,15 @@ Customize your receipts:
 - Changes apply immediately to future invoice PDFs and receipt prints.
 
 ## Customers: Export / Import
+### Internal Notes Preview
+- Open **Customers** to review the internal notes preview column when your role includes `data.customers.remarks.read`.
+- The list shows a compact preview capped at 50 characters with `...` added for longer notes.
+- Select the preview chip in the **Internal Notes** column to open the full note in a dialog.
+- The full note loads on demand when the dialog opens so the initial customer list stays lightweight.
+- Users with `data.customers.remarks.write` can update the note from the same dialog.
+- Users without internal-notes access do not see the column or any preview triggers.
+- Internal notes remain internal-only and are never included on invoices or receipts.
+
 ### Export
 - Open **Customers**.
 - Click **Export**.

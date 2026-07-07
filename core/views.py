@@ -107,6 +107,7 @@ from .rendering_service import (
     get_user_settings as _get_user_settings,
 )
 from .serializers import (
+    CustomerListSerializer,
     CustomerSerializer,
     CustomerDetailSerializer,
     ItemSerializer,
@@ -1477,6 +1478,8 @@ class CustomerViewSet(SoftDeleteModelViewSet):
     def get_serializer_class(self):
         if getattr(self, "action", None) == "retrieve":
             return CustomerDetailSerializer
+        if getattr(self, "action", None) == "list":
+            return CustomerListSerializer
         return CustomerSerializer
 
     def get_queryset(self):

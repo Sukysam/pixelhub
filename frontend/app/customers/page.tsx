@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Plus } from "lucide-react";
+import { FileText, Plus } from "lucide-react";
 import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getAuthUser, getErrorMessage } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -17,6 +17,8 @@ interface Customer {
   phone: string | null;
   billing_address: string | null;
   internal_remarks?: string | null;
+  internal_remarks_preview?: string;
+  has_internal_remarks?: boolean;
   updated_at: string;
 }
 
@@ -38,6 +40,10 @@ const CUSTOMER_EXPORT_FIELDS = [
   "updated_at",
 ];
 
+function previewLabel(customer: Customer) {
+  return customer.has_internal_remarks ? "View internal notes" : "Add internal notes";
+}
+
 export default function CustomersPage() {
   const { t } = useI18n();
   const authUser = getAuthUser();
@@ -53,6 +59,7 @@ export default function CustomersPage() {
   const [internalRemarksOpen, setInternalRemarksOpen] = useState(false);
   const [internalRemarksTarget, setInternalRemarksTarget] = useState<Customer | null>(null);
   const [internalRemarksDraft, setInternalRemarksDraft] = useState("");
+  const [internalRemarksLoading, setInternalRemarksLoading] = useState(false);
   const [internalRemarksSaving, setInternalRemarksSaving] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<Pick<Customer, "name" | "email" | "phone" | "billing_address">>({
@@ -207,8 +214,26 @@ export default function CustomersPage() {
     setError(null);
     setSuccess(null);
     setInternalRemarksTarget(customer);
-    setInternalRemarksDraft(customer.internal_remarks ?? "");
     setInternalRemarksOpen(true);
+    setInternalRemarksDraft(customer.internal_remarks ?? "");
+    if (customer.internal_remarks !== undefined) return;
+
+    void (async () => {
+      try {
+        setInternalRemarksLoading(true);
+        const detail = await apiRequest<Customer>(`/customers/${customer.id}/`);
+        setCustomers((prev) => prev.map((row) => (row.id === detail.id ? { ...row, ...detail } : row)));
+        setInternalRemarksTarget(detail);
+        setInternalRemarksDraft(detail.internal_remarks ?? "");
+      } catch (e: unknown) {
+        setInternalRemarksOpen(false);
+        setInternalRemarksTarget(null);
+        setInternalRemarksDraft("");
+        setError(toUserMessage(e, "Failed to load internal remarks"));
+      } finally {
+        setInternalRemarksLoading(false);
+      }
+    })();
   };
 
   const saveInternalRemarks = async () => {
@@ -309,6 +334,7 @@ export default function CustomersPage() {
   const selectedList = Object.entries(selectedIds)
     .filter(([, v]) => v)
     .map(([k]) => Number(k));
+  const customerTableColumnCount = canReadInternalRemarks ? 7 : 6;
 
   const confirmBulkDelete = async () => {
     if (selectedList.length === 0) return;
@@ -448,6 +474,14 @@ export default function CustomersPage() {
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Address
                 </th>
+                {canReadInternalRemarks ? (
+                  <th className="px-6 py-3 text-xs font-medium uppercase tracking-wider text-gray-500">
+                    <span className="inline-flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-amber-600" aria-hidden="true" />
+                      <span>Internal Notes</span>
+                    </span>
+                  </th>
+                ) : null}
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Actions
                 </th>
@@ -456,13 +490,13 @@ export default function CustomersPage() {
             <tbody className="divide-y divide-gray-200">
               {loading ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={6}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={customerTableColumnCount}>
                     Loading...
                   </td>
                 </tr>
               ) : customers.length === 0 ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={6}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={customerTableColumnCount}>
                     No customers yet.
                   </td>
                 </tr>
@@ -517,6 +551,33 @@ export default function CustomersPage() {
                       customer.billing_address || "-"
                     )}
                   </td>
+                  {canReadInternalRemarks ? (
+                    <td className="px-6 py-4 text-sm text-gray-500">
+                      <div className="max-w-xs">
+                        {customer.has_internal_remarks || canWriteInternalRemarks ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-auto max-w-full justify-start gap-2 px-3 py-2 text-left whitespace-normal"
+                            onClick={() => openInternalRemarks(customer)}
+                            aria-haspopup="dialog"
+                            aria-label={`${previewLabel(customer)} for ${customer.name}`}
+                          >
+                            <FileText className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+                            <span className="block truncate text-sm text-gray-700">
+                              {customer.has_internal_remarks ? customer.internal_remarks_preview : "No notes"}
+                            </span>
+                          </Button>
+                        ) : (
+                          <span className="inline-flex items-center gap-2 text-gray-400">
+                            <FileText className="h-4 w-4" aria-hidden="true" />
+                            <span>No notes</span>
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  ) : null}
                   <td className="px-6 py-4 whitespace-nowrap text-sm">
                     {editingId === customer.id ? (
                       <div className="flex gap-2">
@@ -532,11 +593,6 @@ export default function CustomersPage() {
                         <Button size="sm" variant="outline" onClick={() => startEdit(customer)}>
                           {t("edit")}
                         </Button>
-                        {canReadInternalRemarks ? (
-                          <Button size="sm" variant="outline" onClick={() => openInternalRemarks(customer)}>
-                            Internal Notes
-                          </Button>
-                        ) : null}
                         <Button size="sm" variant="destructive" onClick={() => requestDelete(customer.id)}>
                           {t("delete")}
                         </Button>
@@ -627,32 +683,50 @@ export default function CustomersPage() {
           if (!open) {
             setInternalRemarksTarget(null);
             setInternalRemarksDraft("");
+            setInternalRemarksLoading(false);
           }
         }}
       >
         <DialogContent className="max-w-xl">
           <DialogHeader>
-            <DialogTitle>Internal Customer Notes</DialogTitle>
+            <DialogTitle>Internal Customer Notes{internalRemarksTarget ? `: ${internalRemarksTarget.name}` : ""}</DialogTitle>
           </DialogHeader>
           <div className="p-6 pt-0 space-y-4">
             <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               Visible to internal team only. These notes are not included on invoices or receipts.
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="customer_internal_notes_text">Notes</Label>
-              <textarea
-                id="customer_internal_notes_text"
-                className="min-h-[140px] w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                value={internalRemarksDraft}
-                onChange={(e) => setInternalRemarksDraft(e.target.value)}
-                disabled={!canWriteInternalRemarks}
-              />
-            </div>
+            {internalRemarksLoading ? (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600" aria-live="polite">
+                Loading internal notes...
+              </div>
+            ) : canWriteInternalRemarks ? (
+              <div className="space-y-2">
+                <Label htmlFor="customer_internal_notes_text">Notes</Label>
+                <textarea
+                  id="customer_internal_notes_text"
+                  className="min-h-[140px] w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  value={internalRemarksDraft}
+                  onChange={(e) => setInternalRemarksDraft(e.target.value)}
+                  disabled={internalRemarksLoading}
+                />
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Label htmlFor="customer_internal_notes_preview">Notes</Label>
+                <div
+                  id="customer_internal_notes_preview"
+                  className="min-h-[140px] whitespace-pre-wrap rounded-md border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700"
+                  tabIndex={0}
+                >
+                  {internalRemarksDraft || "No internal notes have been recorded for this customer."}
+                </div>
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setInternalRemarksOpen(false)}>
                 Cancel
               </Button>
-              <Button onClick={saveInternalRemarks} disabled={internalRemarksSaving || !canWriteInternalRemarks}>
+              <Button onClick={saveInternalRemarks} disabled={internalRemarksLoading || internalRemarksSaving || !canWriteInternalRemarks}>
                 {internalRemarksSaving ? "Saving..." : "Save Notes"}
               </Button>
             </div>

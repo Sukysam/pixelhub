@@ -70,6 +70,7 @@ from .finance_services import (
     sync_invoice_status_with_payments,
     invoice_discount_context,
 )
+from .serializers import build_internal_remarks_preview
 from .rendering_service import (
     detect_country,
     effective_company_identity_for_user,
@@ -218,13 +219,27 @@ class PersistenceTests(APITestCase):
 
         staff = User.objects.create_user(username="staff_notes", password=_test_secret(), is_staff=True)
         self.client.force_authenticate(user=staff)
+        notes = "  TOPSECRET internal note with enough detail to exceed the fifty character preview limit.  "
         staff_patch = self.client.patch(
             detail_url,
-            {"internal_remarks": "TOPSECRET", "updated_at": customer["updated_at"]},
+            {"internal_remarks": notes, "updated_at": customer["updated_at"]},
             format="json",
         )
         self.assertEqual(staff_patch.status_code, status.HTTP_200_OK)
-        self.assertEqual(staff_patch.data["internal_remarks"], "TOPSECRET")
+        self.assertEqual(staff_patch.data["internal_remarks"], notes.strip())
+        self.assertEqual(staff_patch.data["internal_remarks_preview"], build_internal_remarks_preview(notes))
+        self.assertTrue(staff_patch.data["has_internal_remarks"])
+
+        staff_list = self.client.get(create_url)
+        self.assertEqual(staff_list.status_code, status.HTTP_200_OK)
+        staff_row = next(row for row in staff_list.data["results"] if row["id"] == customer["id"])
+        self.assertEqual(staff_row["internal_remarks_preview"], build_internal_remarks_preview(notes))
+        self.assertTrue(staff_row["has_internal_remarks"])
+        self.assertNotIn("internal_remarks", staff_row)
+
+        staff_detail = self.client.get(detail_url)
+        self.assertEqual(staff_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(staff_detail.data["internal_remarks"], notes.strip())
 
         item = self.client.post(
             reverse("item-list"),
@@ -252,6 +267,21 @@ class PersistenceTests(APITestCase):
         receipt_html = self.client.get(f"/api/receipts/{receipt_id}/print_html/")
         self.assertEqual(receipt_html.status_code, status.HTTP_200_OK)
         self.assertNotIn("TOPSECRET", receipt_html.content.decode("utf-8", errors="ignore"))
+
+        self.client.force_authenticate(user=self.user)
+        unreadable_list = self.client.get(create_url)
+        self.assertEqual(unreadable_list.status_code, status.HTTP_200_OK)
+        unreadable_row = next(row for row in unreadable_list.data["results"] if row["id"] == customer["id"])
+        self.assertNotIn("internal_remarks", unreadable_row)
+        self.assertNotIn("internal_remarks_preview", unreadable_row)
+        self.assertNotIn("has_internal_remarks", unreadable_row)
+
+    def test_internal_remarks_preview_helper_truncates_to_fifty_characters(self):
+        original = "First line with extra spacing\nand additional detail for preview rendering."
+        preview = build_internal_remarks_preview(original)
+        self.assertLessEqual(len(preview), 50)
+        self.assertTrue(preview.endswith("..."))
+        self.assertEqual(preview, "First line with extra spacing and additional de...")
 
     def test_inventory_invoice_and_receipt_flow(self):
         customer = self.client.post(

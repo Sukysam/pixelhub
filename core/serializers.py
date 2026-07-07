@@ -66,6 +66,7 @@ BUSINESS_INDUSTRY_CHOICES = [
 
 NIGERIA_COUNTRY_NAME = "Nigeria"
 DEFAULT_COUNTRY_CODE = "+234"
+INTERNAL_REMARKS_PREVIEW_LIMIT = 50
 
 
 def validate_application_password(value: str, *, min_length: int = 6) -> str:
@@ -99,7 +100,20 @@ def normalize_signup_phone(country_code: str, phone_number: str) -> str:
     return f"+{cc_digits}{phone_digits}"
 
 
+def build_internal_remarks_preview(value, *, max_length: int = INTERNAL_REMARKS_PREVIEW_LIMIT) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip())
+    if not normalized:
+        return ""
+    if len(normalized) <= max_length:
+        return normalized
+    if max_length <= 3:
+        return "." * max_length
+    return f"{normalized[: max_length - 3].rstrip()}..."
+
+
 class CustomerSerializer(serializers.ModelSerializer):
+    internal_remarks_preview = serializers.SerializerMethodField()
+    has_internal_remarks = serializers.SerializerMethodField()
     invoice_count = serializers.SerializerMethodField()
     lifetime_value = serializers.SerializerMethodField()
     last_invoice_date = serializers.SerializerMethodField()
@@ -116,6 +130,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             "phone",
             "billing_address",
             "internal_remarks",
+            "internal_remarks_preview",
+            "has_internal_remarks",
             "created_at",
             "updated_at",
             "is_deleted",
@@ -143,12 +159,24 @@ class CustomerSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         if not self._can_read_internal_remarks():
             data.pop("internal_remarks", None)
+            data.pop("internal_remarks_preview", None)
+            data.pop("has_internal_remarks", None)
         return data
 
     def validate(self, attrs):
         if "internal_remarks" in attrs and not self._can_write_internal_remarks():
             raise PermissionDenied("You do not have permission to manage internal customer remarks.")
         return attrs
+
+    def get_internal_remarks_preview(self, obj):
+        if not self._can_read_internal_remarks():
+            return ""
+        return build_internal_remarks_preview(getattr(obj, "internal_remarks", None))
+
+    def get_has_internal_remarks(self, obj):
+        if not self._can_read_internal_remarks():
+            return False
+        return bool(str(getattr(obj, "internal_remarks", "") or "").strip())
 
     def get_invoice_count(self, obj):
         return int(getattr(obj, "invoice_count", 0) or 0)
@@ -199,6 +227,16 @@ class CustomerDetailSerializer(CustomerSerializer):
             .order_by("-issue_date", "-id")
         )
         return CustomerOrderHistorySerializer(invoices, many=True).data
+
+
+class CustomerListSerializer(CustomerSerializer):
+    class Meta(CustomerSerializer.Meta):
+        fields = tuple(field for field in CustomerSerializer.Meta.fields if field != "internal_remarks")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data.pop("internal_remarks", None)
+        return data
 
 
 class ItemSerializer(serializers.ModelSerializer):
