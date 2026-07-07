@@ -54,6 +54,7 @@ from .models import (
     InvoiceItem,
     Receipt,
     Expense,
+    SourceAccount,
     AuditLog,
     Currency,
     ExchangeRate,
@@ -115,6 +116,7 @@ from .serializers import (
     ReceiptSerializer,
     ReceiptDetailSerializer,
     ExpenseSerializer,
+    SourceAccountSerializer,
     CurrencySerializer,
     ExchangeRateSerializer,
     GlobalSettingsSerializer,
@@ -955,6 +957,8 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
             prefix = "data.receipts"
         elif mn == "expense":
             prefix = "data.expenses"
+        elif mn == "sourceaccount":
+            prefix = "data.source_accounts"
 
         if prefix:
             code = f"{prefix}.read" if action == "view" else f"{prefix}.write"
@@ -990,6 +994,8 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
             prefix = "data.receipts"
         elif mn == "expense":
             prefix = "data.expenses"
+        elif mn == "sourceaccount":
+            prefix = "data.source_accounts"
 
         if prefix:
             for action in actions:
@@ -3315,14 +3321,79 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
         return HttpResponse(rendered.content, content_type=rendered.content_type)
 
 
+class SourceAccountViewSet(SoftDeleteModelViewSet):
+    queryset = SourceAccount.objects.all().select_related("currency").order_by("name", "id")
+    serializer_class = SourceAccountSerializer
+    pagination_class = None
+    parser_classes = [parsers.JSONParser, parsers.FormParser]
+
+    def get_queryset(self):
+        qs = (
+            super()
+            .get_queryset()
+            .select_related("currency")
+            .annotate(active_expense_count=Count("expenses", filter=Q(expenses__is_deleted=False)))
+        )
+        params = self.request.query_params
+        q = str(params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(Q(name__icontains=q) | Q(account_type__icontains=q) | Q(currency__code__icontains=q))
+        status_value = str(params.get("status") or "").strip().lower()
+        if status_value:
+            qs = qs.filter(status=status_value)
+        return _apply_ordering_query(
+            qs,
+            params=params,
+            allowed_fields={
+                "id": "id",
+                "name": "name",
+                "account_type": "account_type",
+                "initial_balance": "initial_balance",
+                "currency": "currency__code",
+                "status": "status",
+                "created_at": "created_at",
+                "updated_at": "updated_at",
+            },
+            default=("name", "id"),
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        self._require_model_perm("delete")
+        confirm_keyword = str(request.data.get("confirm_keyword") or request.query_params.get("confirm_keyword") or "").strip()
+        if confirm_keyword != "DELETE":
+            raise ValidationError({"confirm_keyword": "Type DELETE to confirm removal."})
+
+        with transaction.atomic():
+            instance = SourceAccount.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
+            _check_concurrency(request, instance)
+            dependency_count = Expense.objects.filter(source_account=instance, is_deleted=False).count()
+            previous_status = instance.status
+            instance.status = SourceAccount.STATUS_CLOSED
+            instance.is_deleted = True
+            instance.deleted_at = timezone.now()
+            instance.save(update_fields=["status", "is_deleted", "deleted_at", "updated_at"])
+            _log_audit(
+                request.user,
+                "delete",
+                instance,
+                {
+                    "name": instance.name,
+                    "status": {"from": previous_status, "to": instance.status},
+                    "active_expense_count": dependency_count,
+                    "dependency_handling": "historical expenses retained with deleted source account reference",
+                },
+            )
+        return self._disable_response_cache(Response({"deleted": True, "active_expense_count": dependency_count}, status=status.HTTP_200_OK))
+
+
 class ExpenseViewSet(SoftDeleteModelViewSet):
-    queryset = Expense.objects.all().select_related("assigned_to", "created_by").order_by("-expense_date", "-id")
+    queryset = Expense.objects.all().select_related("assigned_to", "created_by", "source_account", "source_account__currency").order_by("-expense_date", "-id")
     serializer_class = ExpenseSerializer
     pagination_class = OptionalPageNumberPagination
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related("assigned_to", "created_by")
+        qs = super().get_queryset().select_related("assigned_to", "created_by", "source_account", "source_account__currency")
         p = self.request.query_params
 
         q = str(p.get("q") or "").strip()
@@ -3352,7 +3423,10 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
 
         source_account = str(p.get("source_account") or "").strip()
         if source_account:
-            qs = qs.filter(source_account__icontains=source_account)
+            try:
+                qs = qs.filter(source_account_id=int(source_account))
+            except ValueError:
+                qs = qs.filter(source_account__name__icontains=source_account)
 
         project_code = str(p.get("project_code") or "").strip()
         if project_code:
@@ -3413,7 +3487,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 "expense_date": "expense_date",
                 "category": "category",
                 "vendor": "vendor",
-                "source_account": "source_account",
+                "source_account": "source_account__name",
                 "assigned_to": "assigned_to__username",
                 "project_code": "project_code",
                 "cost_center": "cost_center",
@@ -3488,6 +3562,8 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 return str(getattr(getattr(expense, "assigned_to", None), "username", "") or "")
             if field == "created_by":
                 return str(getattr(getattr(expense, "created_by", None), "username", "") or "")
+            if field == "source_account":
+                return str(getattr(getattr(expense, "source_account", None), "name", "") or "")
             if field in ("description", "merchant_reference"):
                 return str(decrypt_expense_text(getattr(expense, field, None)) or "")
             if field in ("expense_date",):

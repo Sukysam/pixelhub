@@ -7,6 +7,7 @@ from .views import (
     InvoiceItemViewSet,
     ReceiptViewSet,
     ExpenseViewSet,
+    SourceAccountViewSet,
     CurrencyViewSet,
     ExchangeRateViewSet,
     DashboardViewSet,
@@ -65,6 +66,7 @@ router.register(r'invoices', InvoiceViewSet)
 router.register(r'invoice-items', InvoiceItemViewSet)
 router.register(r'receipts', ReceiptViewSet)
 router.register(r'expenses', ExpenseViewSet)
+router.register(r'source-accounts', SourceAccountViewSet)
 router.register(r'currencies', CurrencyViewSet)
 router.register(r'exchange-rates', ExchangeRateViewSet)
 router.register(r'dashboard', DashboardViewSet, basename='dashboard')

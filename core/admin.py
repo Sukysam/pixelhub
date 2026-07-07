@@ -6,6 +6,7 @@ from .models import (
     InvoiceItem,
     Receipt,
     Expense,
+    SourceAccount,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -54,6 +55,13 @@ class ExpenseAdmin(admin.ModelAdmin):
     list_display = ('amount', 'expense_date', 'category', 'vendor', 'source_account')
     list_filter = ('expense_date', 'category', 'source_account')
     search_fields = ('description', 'vendor', 'category')
+
+
+@admin.register(SourceAccount)
+class SourceAccountAdmin(admin.ModelAdmin):
+    list_display = ("name", "account_type", "initial_balance", "currency", "status", "created_at")
+    list_filter = ("account_type", "status", "currency")
+    search_fields = ("name",)
 
 
 @admin.register(Currency)

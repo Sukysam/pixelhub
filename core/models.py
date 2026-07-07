@@ -295,7 +295,13 @@ class Expense(SoftDeleteModel):
     merchant_reference = models.TextField(blank=True, null=True)
     project_code = models.CharField(max_length=120, blank=True, null=True)
     cost_center = models.CharField(max_length=120, blank=True, null=True)
-    source_account = models.CharField(max_length=255, blank=True, null=True)
+    source_account = models.ForeignKey(
+        "SourceAccount",
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="expenses",
+    )
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -320,7 +326,6 @@ class Expense(SoftDeleteModel):
             models.Index(fields=["is_deleted", "project_code"]),
             models.Index(fields=["is_deleted", "cost_center"]),
             models.Index(fields=["is_deleted", "created_at"]),
-            models.Index(fields=["is_deleted", "source_account"], name="core_expens_is_dele_source_idx"),
         ]
 
     def __str__(self):
@@ -369,6 +374,45 @@ class Currency(models.Model):
 
     def __str__(self):
         return self.code
+
+
+class SourceAccount(SoftDeleteModel):
+    TYPE_PETTY_CASH = "petty_cash"
+    TYPE_BANK = "bank"
+    TYPE_MOBILE_MONEY = "mobile_money"
+    TYPE_OTHER = "other"
+    TYPE_CHOICES = [
+        (TYPE_PETTY_CASH, "Petty Cash"),
+        (TYPE_BANK, "Bank"),
+        (TYPE_MOBILE_MONEY, "Mobile Money"),
+        (TYPE_OTHER, "Other"),
+    ]
+
+    STATUS_ACTIVE = "active"
+    STATUS_INACTIVE = "inactive"
+    STATUS_CLOSED = "closed"
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_INACTIVE, "Inactive"),
+        (STATUS_CLOSED, "Closed"),
+    ]
+
+    name = models.CharField(max_length=120, unique=True)
+    account_type = models.CharField(max_length=20, choices=TYPE_CHOICES, default=TYPE_PETTY_CASH)
+    initial_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    currency = models.ForeignKey(Currency, on_delete=models.PROTECT, related_name="source_accounts")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_deleted", "name"]),
+            models.Index(fields=["is_deleted", "status"]),
+            models.Index(fields=["currency", "name"]),
+        ]
+
+    def __str__(self):
+        return self.name
 
 
 class ExchangeRate(models.Model):

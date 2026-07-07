@@ -35,6 +35,7 @@ from .models import (
     InvoiceItem,
     AuditLog,
     Expense,
+    SourceAccount,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -2030,6 +2031,24 @@ class CustomerExpenseImportExportTests(APITestCase):
         super().setUp()
         self.user = User.objects.create_superuser(username="ops_admin", email="ops@example.com", password=_test_secret())
         self.client.force_authenticate(user=self.user)
+        self.usd, _ = Currency.objects.get_or_create(
+            code="USD",
+            defaults={"name": "US Dollar", "symbol": "$", "decimal_places": 2},
+        )
+        self.petty1 = SourceAccount.objects.create(
+            name="petty1",
+            account_type=SourceAccount.TYPE_PETTY_CASH,
+            initial_balance=Decimal("100.00"),
+            currency=self.usd,
+            status=SourceAccount.STATUS_ACTIVE,
+        )
+        self.petty2 = SourceAccount.objects.create(
+            name="petty2",
+            account_type=SourceAccount.TYPE_PETTY_CASH,
+            initial_balance=Decimal("200.00"),
+            currency=self.usd,
+            status=SourceAccount.STATUS_ACTIVE,
+        )
 
     def test_customer_export_and_import_support_transaction_fields(self):
         customer = Customer.objects.create(name="Export Buyer", email="buyer@example.com", phone="+2348012345678")
@@ -2113,6 +2132,137 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
         self.assertFalse(Customer.objects.filter(email="valid@example.com", is_deleted=False).exists())
 
+    def test_source_account_crud_delete_dependencies_and_permissions(self):
+        list_url = "/api/source-accounts/"
+        create_res = self.client.post(
+            list_url,
+            {
+                "name": "Operations Wallet",
+                "account_type": "mobile_money",
+                "initial_balance": "500.00",
+                "currency": self.usd.id,
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        account_id = create_res.data["id"]
+        self.assertEqual(create_res.data["currency_code"], "USD")
+
+        patch_res = self.client.patch(
+            f"{list_url}{account_id}/",
+            {
+                "name": "Operations Wallet Updated",
+                "status": "inactive",
+                "updated_at": create_res.data["updated_at"],
+            },
+            format="json",
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(patch_res.data["name"], "Operations Wallet Updated")
+
+        linked_expense = Expense.objects.create(
+            amount=Decimal("25.00"),
+            expense_date=timezone.localdate(),
+            category="Travel",
+            description="Ride",
+            vendor="Vendor",
+            merchant_reference="SRC-DEL-1",
+            project_code="PRJ-SA",
+            source_account=SourceAccount.objects.get(pk=account_id),
+            assigned_to=self.user,
+            created_by=self.user,
+        )
+        delete_res = self.client.delete(
+            f"{list_url}{account_id}/",
+            {"confirm_keyword": "DELETE", "updated_at": patch_res.data["updated_at"]},
+            format="json",
+        )
+        self.assertEqual(delete_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(delete_res.data["active_expense_count"], 1)
+        deleted = SourceAccount.objects.get(pk=account_id)
+        self.assertTrue(deleted.is_deleted)
+        self.assertEqual(deleted.status, SourceAccount.STATUS_CLOSED)
+        linked_expense.refresh_from_db()
+        self.assertEqual(linked_expense.source_account_id, account_id)
+
+        create_audit = AuditLog.objects.filter(action="create", object_id=str(account_id)).exists()
+        update_audit = AuditLog.objects.filter(action="update", object_id=str(account_id)).exists()
+        delete_audit = AuditLog.objects.filter(action="delete", object_id=str(account_id)).first()
+        self.assertTrue(create_audit)
+        self.assertTrue(update_audit)
+        self.assertIsNotNone(delete_audit)
+        self.assertEqual(delete_audit.changes["active_expense_count"], 1)
+
+        no_role_user = User.objects.create_user(username="readonly_source_account", password=_test_secret())
+        UserRole.objects.filter(user=no_role_user).delete()
+        self.client.force_authenticate(user=no_role_user)
+        denied = self.client.post(
+            list_url,
+            {
+                "name": "Denied Account",
+                "account_type": "other",
+                "initial_balance": "10.00",
+                "currency": self.usd.id,
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(denied.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(user=self.user)
+
+    def test_source_account_list_filters_and_validation_edges(self):
+        Expense.objects.create(
+            amount=Decimal("15.00"),
+            expense_date=timezone.localdate(),
+            category="Office",
+            description="Pens",
+            vendor="Stationery Hub",
+            merchant_reference="SRC-LIST-1",
+            project_code="PRJ-LIST",
+            source_account=self.petty1,
+            assigned_to=self.user,
+            created_by=self.user,
+        )
+
+        list_res = self.client.get("/api/source-accounts/?q=petty&status=active")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(list_res.data), 2)
+        petty1_row = next(row for row in list_res.data if row["id"] == self.petty1.id)
+        self.assertEqual(petty1_row["active_expense_count"], 1)
+
+        missing_confirm = self.client.delete(f"/api/source-accounts/{self.petty1.id}/", {}, format="json")
+        self.assertEqual(missing_confirm.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("confirm_keyword", missing_confirm.data)
+
+        blank_name = self.client.post(
+            "/api/source-accounts/",
+            {
+                "name": "   ",
+                "account_type": "other",
+                "initial_balance": "5.00",
+                "currency": self.usd.id,
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(blank_name.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("name", blank_name.data)
+
+        negative_balance = self.client.post(
+            "/api/source-accounts/",
+            {
+                "name": "Negative Balance Account",
+                "account_type": "bank",
+                "initial_balance": "-1.00",
+                "currency": self.usd.id,
+                "status": "active",
+            },
+            format="json",
+        )
+        self.assertEqual(negative_balance.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("initial_balance", negative_balance.data)
+
     def test_expense_crud_source_account_filters_export_and_removed_endpoints(self):
         create_res = self.client.post(
             "/api/expenses/",
@@ -2124,7 +2274,7 @@ class CustomerExpenseImportExportTests(APITestCase):
                 "vendor": "Ride Co",
                 "merchant_reference": "TRAVEL-1",
                 "project_code": "PROJECT-ALPHA",
-                "source_account": "petty1",
+                "source_account": self.petty1.id,
             },
             format="json",
         )
@@ -2132,9 +2282,10 @@ class CustomerExpenseImportExportTests(APITestCase):
         expense_id = create_res.data["id"]
         self.assertEqual(create_res.data["created_by"], self.user.id)
         self.assertEqual(create_res.data["assigned_to"], self.user.id)
-        self.assertEqual(create_res.data["source_account"], "petty1")
+        self.assertEqual(create_res.data["source_account"], self.petty1.id)
+        self.assertEqual(create_res.data["source_account_name"], "petty1")
 
-        filtered = self.client.get("/api/expenses/?source_account=petty1&category=Travel")
+        filtered = self.client.get(f"/api/expenses/?source_account={self.petty1.id}&category=Travel")
         self.assertEqual(filtered.status_code, status.HTTP_200_OK)
         self.assertEqual(filtered.data["count"], 1)
 
@@ -2161,7 +2312,7 @@ class CustomerExpenseImportExportTests(APITestCase):
                 "vendor": "Secure Vendor",
                 "merchant_reference": "SEC-42",
                 "project_code": "PROJECT-GAMMA",
-                "source_account": "petty2",
+                "source_account": self.petty2.id,
             },
             format="json",
         )
@@ -2437,7 +2588,7 @@ class CustomerExpenseImportExportTests(APITestCase):
         created = Expense.objects.filter(merchant_reference__isnull=False, is_deleted=False).order_by("id")
         self.assertEqual(created.count(), 1)
         self.assertTrue(all(exp.created_by == self.user for exp in created))
-        self.assertEqual(created.first().source_account, "petty2")
+        self.assertEqual(created.first().source_account_id, self.petty2.id)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")

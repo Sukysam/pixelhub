@@ -17,7 +17,7 @@ from django.db import transaction
 from django.utils import timezone
 from openpyxl import load_workbook
 
-from .models import Customer, Expense, Invoice, InvoiceItem, Item
+from .models import Customer, Expense, Invoice, InvoiceItem, Item, SourceAccount
 
 CENTS = Decimal("0.01")
 logger = logging.getLogger(__name__)
@@ -610,6 +610,13 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
 
     usernames = {str(r.get("assigned_to") or "").strip() for r in rows if str(r.get("assigned_to") or "").strip()}
     users_by_name = {u.username: u for u in User.objects.filter(username__in=list(usernames))}
+    source_account_names = {str(r.get("source_account") or "").strip().lower() for r in rows if str(r.get("source_account") or "").strip()}
+    source_accounts_by_name = {}
+    if source_account_names:
+        for account in SourceAccount.objects.filter(is_deleted=False):
+            lowered = str(account.name or "").strip().lower()
+            if lowered in source_account_names:
+                source_accounts_by_name[lowered] = account
 
     def _clean(value) -> str:
         return str(value or "").strip()
@@ -657,7 +664,14 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         if assigned_to_name and assigned_to is None:
             row_errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
 
-        source_account = _clean(r.get("source_account")) or None
+        source_account_name = _clean(r.get("source_account")) or None
+        source_account = None
+        if source_account_name:
+            source_account = source_accounts_by_name.get(source_account_name.lower())
+            if source_account is None:
+                row_errors.append({"row": row_num, "field": "source_account", "message": "Source account not found"})
+            elif source_account.status != SourceAccount.STATUS_ACTIVE:
+                row_errors.append({"row": row_num, "field": "source_account", "message": "Source account must be active"})
 
         if row_errors:
             return None, row_errors

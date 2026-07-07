@@ -13,6 +13,7 @@ from .models import (
     InvoiceItem,
     Receipt,
     Expense,
+    SourceAccount,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -563,6 +564,13 @@ class ReceiptDetailSerializer(ReceiptSerializer):
 class ExpenseSerializer(serializers.ModelSerializer):
     assigned_to_name = serializers.CharField(source="assigned_to.username", read_only=True)
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    source_account_name = serializers.CharField(source="source_account.name", read_only=True)
+    source_account_status = serializers.CharField(source="source_account.status", read_only=True)
+    source_account = serializers.PrimaryKeyRelatedField(
+        queryset=SourceAccount.objects.filter(is_deleted=False),
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model = Expense
@@ -577,6 +585,8 @@ class ExpenseSerializer(serializers.ModelSerializer):
             "project_code",
             "cost_center",
             "source_account",
+            "source_account_name",
+            "source_account_status",
             "assigned_to",
             "assigned_to_name",
             "created_by",
@@ -618,12 +628,15 @@ class ExpenseSerializer(serializers.ModelSerializer):
         cost_center = str(
             attrs.get("cost_center") if "cost_center" in attrs else getattr(self.instance, "cost_center", "") or ""
         ).strip()
+        chosen_source_account = attrs.get("source_account") if "source_account" in attrs else getattr(self.instance, "source_account", None)
         if not category:
             raise serializers.ValidationError({"category": "category is required"})
         if not project_code and not cost_center:
             raise serializers.ValidationError({"detail": "Either project_code or cost_center is required"})
         if expense_date and expense_date > timezone.localdate() + timedelta(days=1):
             raise serializers.ValidationError({"expense_date": "expense_date cannot be more than one day in the future"})
+        if chosen_source_account is not None and chosen_source_account.status != SourceAccount.STATUS_ACTIVE:
+            raise serializers.ValidationError({"source_account": "Select an active source account."})
         return attrs
 
     def create(self, validated_data):
@@ -642,6 +655,45 @@ class CurrencySerializer(serializers.ModelSerializer):
         model = Currency
         fields = "__all__"
         read_only_fields = ("id",)
+
+
+class SourceAccountSerializer(serializers.ModelSerializer):
+    currency_code = serializers.CharField(source="currency.code", read_only=True)
+    active_expense_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SourceAccount
+        fields = (
+            "id",
+            "name",
+            "account_type",
+            "initial_balance",
+            "currency",
+            "currency_code",
+            "status",
+            "active_expense_count",
+            "created_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+        )
+        read_only_fields = ("id", "currency_code", "active_expense_count", "created_at", "updated_at", "is_deleted", "deleted_at")
+
+    def validate_name(self, value):
+        normalized = re.sub(r"\s+", " ", str(value or "").strip())
+        if not normalized:
+            raise serializers.ValidationError("name is required")
+        return normalized
+
+    def validate_initial_balance(self, value):
+        if value < 0:
+            raise serializers.ValidationError("initial_balance must be >= 0")
+        return value
+
+    def get_active_expense_count(self, obj):
+        if hasattr(obj, "active_expense_count"):
+            return int(obj.active_expense_count or 0)
+        return int(obj.expenses.filter(is_deleted=False).count())
 
 
 class ExchangeRateSerializer(serializers.ModelSerializer):
