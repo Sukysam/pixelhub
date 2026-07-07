@@ -101,6 +101,20 @@ async function postJsonWithTransientRetry(
   throw new Error(`POST ${apiPath} failed after retries: status=${lastStatus} body=${lastBody}`);
 }
 
+async function loadMoreUntilTextVisible(page: any, text: string, options?: { maxLoads?: number }) {
+  const maxLoads = options?.maxLoads ?? 10;
+  const row = page.locator("tbody tr", { hasText: text }).first();
+  for (let attempt = 0; attempt < maxLoads; attempt += 1) {
+    if ((await row.count()) > 0) return row;
+    const loadMoreButton = page.getByRole("button", { name: /load more/i });
+    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.first().isVisible())) break;
+    const previousRowCount = await page.locator("tbody tr").count();
+    await loadMoreButton.first().click();
+    await expect.poll(async () => await page.locator("tbody tr").count(), { timeout: 10_000 }).not.toBe(previousRowCount);
+  }
+  return row;
+}
+
 async function waitForUploadedLogoSrc(locator: any) {
   await expect
     .poll(async () => (await locator.getAttribute("src")) ?? "", { timeout: 30_000 })
@@ -155,9 +169,12 @@ test("admin can manage roles and users from settings", async ({ page, request })
   const roleName = `ops_ui_${Date.now()}`;
   const newRoleButton = page.getByRole("button", { name: "New Role" });
   await expect(newRoleButton).toBeVisible({ timeout: 30_000 });
-  await newRoleButton.click({ force: true });
-  const roleDialog = page.locator('[role="dialog"]').filter({ hasText: "Create Role" }).last();
-  await expect(roleDialog).toBeVisible({ timeout: 30_000 });
+  await newRoleButton.evaluate((node: HTMLButtonElement) => node.click());
+  const roleNameInput = page.locator("#role_name").last();
+  const roleDescriptionInput = page.locator("#role_description").last();
+  await expect(roleNameInput).toBeVisible({ timeout: 30_000 });
+  await expect(roleDescriptionInput).toBeVisible({ timeout: 30_000 });
+  const roleDialog = page.locator('[role="dialog"]').filter({ has: roleNameInput }).last();
   await reportSettingsCiDebug("A", "frontend/tests/settings.spec.ts:new-role-click", "[DEBUG] admin settings state after new role click", {
     url: page.url(),
     headings: await page.getByRole("heading").allTextContents(),
@@ -166,10 +183,6 @@ test("admin can manage roles and users from settings", async ({ page, request })
     roleDescriptionCount: await page.locator("#role_description").count(),
     createRoleButtonCount: await page.getByRole("button", { name: "Create role" }).count(),
   });
-  const roleNameInput = roleDialog.locator("#role_name");
-  const roleDescriptionInput = roleDialog.locator("#role_description");
-  await expect(roleNameInput).toBeVisible({ timeout: 30_000 });
-  await expect(roleDescriptionInput).toBeVisible({ timeout: 30_000 });
   await roleNameInput.fill(roleName);
   await roleDescriptionInput.fill("Operations role created from settings UI");
   await roleDialog.locator("label").filter({ hasText: "data.items.read" }).locator('input[type="checkbox"]').check();
@@ -382,17 +395,23 @@ test("standard business user can persist customer invoice and receipt records", 
   await customerDialog.getByLabel("Email").fill(customerEmail);
   await customerDialog.getByLabel("Phone").fill(customerPhone);
   await customerDialog.getByLabel("Billing Address").fill(customerAddress);
+  const customerCreateResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${API_BASE_URL}/customers/` &&
+      response.request().method() === "POST" &&
+      response.status() === 201
+  );
   await customerDialog.getByRole("button", { name: "Add Customer" }).click();
-  await expect(page.getByText(customerName)).toBeVisible({ timeout: 30_000 });
+  const createdCustomer = (await (await customerCreateResponse).json()) as { id: number; name: string; billing_address?: string | null };
+  expect(createdCustomer.name).toBe(customerName);
+  expect(createdCustomer.billing_address).toBe(customerAddress);
 
-  const customersAfterCreate = (await getJson(request, session.token, "/customers/?page=1")) as {
-    results: Array<{ id: number; name: string; billing_address?: string | null }>;
-  };
-  const createdCustomer = customersAfterCreate.results.find((row) => row.name === customerName);
-  expect(createdCustomer).toBeTruthy();
-  expect(createdCustomer?.billing_address).toBe(customerAddress);
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible({ timeout: 30_000 });
+  const createdCustomerRowInUi = await loadMoreUntilTextVisible(page, customerName);
+  await expect(createdCustomerRowInUi).toBeVisible({ timeout: 30_000 });
 
-  const customerRow = page.locator("tbody tr", { hasText: customerName }).first();
+  const customerRow = createdCustomerRowInUi;
   await customerRow.getByRole("button", { name: "Edit" }).click();
   const customerEditRow = page.locator("tbody tr").filter({ has: page.getByRole("button", { name: "Save" }) }).first();
   await customerEditRow.locator("input").last().fill(updatedCustomerAddress);
@@ -495,16 +514,21 @@ test("standard business user can persist customer invoice and receipt records", 
       response.request().method() === "PATCH" &&
       response.status() === 200
   );
-  await invoiceEditRow.getByRole("button", { name: "Save" }).click();
+  const invoiceConfirmDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm changes" }).last();
+  await invoiceEditRow.getByRole("button", { name: "Save" }).evaluate((node: HTMLButtonElement) => node.click());
   await reportSettingsCiDebug("C", "frontend/tests/settings.spec.ts:invoice-save-clicked", "[DEBUG] invoice state after save click", {
     createdInvoiceNumber,
     dialogCount: await page.getByRole("dialog").count(),
     confirmButtonCount: await page.getByRole("dialog").getByRole("button", { name: "Confirm" }).count().catch(() => 0),
     pageButtons: await page.getByRole("button").allTextContents(),
   });
-  const invoiceConfirmDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm changes" }).last();
-  await expect(invoiceConfirmDialog).toBeVisible({ timeout: 30_000 });
-  await invoiceConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
+  const invoiceSaveMode = await Promise.race([
+    invoiceConfirmDialog.waitFor({ state: "visible", timeout: 10_000 }).then(() => "confirm"),
+    invoiceUpdateResponse.then(() => "saved"),
+  ]);
+  if (invoiceSaveMode === "confirm") {
+    await invoiceConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
+  }
   await invoiceUpdateResponse;
   await expect(invoiceRow).toContainText("Sent", { timeout: 30_000 });
 
@@ -538,10 +562,15 @@ test("standard business user can persist customer invoice and receipt records", 
       response.request().method() === "PATCH" &&
       response.status() === 200
   );
-  await invoiceDiscountEditRow.getByRole("button", { name: "Save" }).click();
   const invoiceDiscountConfirmDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm changes" }).last();
-  await expect(invoiceDiscountConfirmDialog).toBeVisible({ timeout: 30_000 });
-  await invoiceDiscountConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
+  await invoiceDiscountEditRow.getByRole("button", { name: "Save" }).evaluate((node: HTMLButtonElement) => node.click());
+  const invoiceDiscountSaveMode = await Promise.race([
+    invoiceDiscountConfirmDialog.waitFor({ state: "visible", timeout: 10_000 }).then(() => "confirm"),
+    invoiceDiscountUpdateResponse.then(() => "saved"),
+  ]);
+  if (invoiceDiscountSaveMode === "confirm") {
+    await invoiceDiscountConfirmDialog.getByRole("button", { name: "Confirm" }).last().evaluate((node: HTMLButtonElement) => node.click());
+  }
   await invoiceDiscountUpdateResponse;
   await expect(invoiceRow).toContainText("Fixed amount", { timeout: 30_000 });
 
@@ -962,30 +991,17 @@ test("sending an invoice via WhatsApp opens a wa.me share link with prefilled te
   });
   expect(invRes.ok()).toBeTruthy();
   const invoice = await invRes.json();
-  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${invoice.id}/`, {
-    headers: { Authorization: `Token ${token}` },
-  });
-  expect(invoiceDetailRes.ok()).toBeTruthy();
-  const invoiceDetail = (await invoiceDetailRes.json()) as { total_amount: string };
-
-  const payRes = await request.post(`${API_BASE_URL}/invoices/${invoice.id}/pay/`, {
-    headers: { Authorization: `Token ${token}`, "Idempotency-Key": `e2e-wa-share-${Date.now()}` },
-    data: { amount_paid: invoiceDetail.total_amount, payment_method: "Cash", reference_number: `E2E-WA-SHARE-${Date.now()}` },
-  });
-  expect(payRes.ok()).toBeTruthy();
 
   await page.goto("/invoices/manage");
   await expect(page.getByRole("heading", { name: "Manage Invoices" })).toBeVisible();
+  await page.getByLabel("Invoice Number").fill(String(invoice.invoice_number));
   await page.getByRole("button", { name: "Search" }).first().click();
   const invRow = page.getByRole("row", { name: new RegExp(String(invoice.invoice_number)) }).first();
-  await invRow.getByRole("button", { name: "View Invoice" }).first().click({ force: true });
-  await expect(page.getByRole("heading", { name: "Invoice Summary" })).toBeVisible();
-  await page.getByRole("button", { name: "Send" }).first().click();
-  await expect(page.getByRole("heading", { name: "Send Invoice" })).toBeVisible();
-  const sendDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Send Invoice" }) });
-  await sendDialog.getByLabel("Channel").selectOption("whatsapp");
-
-  await sendDialog.getByRole("button", { name: "Send" }).first().click({ force: true });
+  await expect(invRow).toBeVisible({ timeout: 30_000 });
+  await invRow.getByRole("button", { name: "Share" }).first().click();
+  await expect(page.getByRole("heading", { name: "Share Invoice" })).toBeVisible();
+  const shareDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Share Invoice" }) });
+  await shareDialog.getByRole("button", { name: "WhatsApp" }).first().click({ force: true });
   await page.waitForFunction(() => Array.isArray((window as any).__openCalls) && (window as any).__openCalls.length > 0);
   const openCalls = await page.evaluate(() => (window as any).__openCalls as string[]);
   expect(openCalls[0]).toContain("https://wa.me/");

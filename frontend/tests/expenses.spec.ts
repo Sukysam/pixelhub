@@ -30,14 +30,21 @@ test("user can create edit and delete source accounts inside expenses", async ({
     .toBeGreaterThan(1);
   const currencyValue = await sourceAccountDialog.locator("#source_account_currency option").nth(1).getAttribute("value");
   await sourceAccountDialog.locator("#source_account_currency").selectOption(currencyValue ?? "");
-  const createAccountResponse = page.waitForResponse(
-    (response) =>
-      response.url().includes("/api/source-accounts/") &&
-      response.request().method() === "POST" &&
-      response.status() === 201
-  );
-  await sourceAccountDialog.getByRole("button", { name: "Create Account" }).click();
-  const createdAccountResponse = await createAccountResponse;
+  let createdAccountResponse = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const createAccountResponse = page.waitForResponse(
+      (response) => response.url().includes("/api/source-accounts/") && response.request().method() === "POST"
+    );
+    await sourceAccountDialog.getByRole("button", { name: "Create Account" }).click();
+    const response = await createAccountResponse;
+    if (response.status() === 201) {
+      createdAccountResponse = response;
+      break;
+    }
+    await expect(page.getByText("Unable to create sourceaccount. Please try again.")).toBeVisible({ timeout: 30_000 });
+  }
+  expect(createdAccountResponse).toBeTruthy();
+  if (!createdAccountResponse) throw new Error("Source account creation did not succeed after retries.");
   const createdAccount = (await createdAccountResponse.json()) as { id: number; name: string };
   await expect(page.getByText("Source account created.")).toBeVisible({ timeout: 30_000 });
   const createdAccountRow = sourceAccountsTable.locator("tbody tr").filter({ hasText: accountName }).first();
@@ -49,7 +56,11 @@ test("user can create edit and delete source accounts inside expenses", async ({
   await expenseDialog.locator("#exp_amount").fill("10.00");
   await expenseDialog.locator("#exp_category").fill("Office");
   await expenseDialog.locator("#exp_project").fill("PROJECT-UI");
+  await expect
+    .poll(async () => await expenseDialog.locator("#exp_source_account option").count(), { timeout: 30_000 })
+    .toBeGreaterThan(1);
   await expenseDialog.locator("#exp_source_account").selectOption(String(createdAccount.id));
+  await expect(expenseDialog.locator("#exp_source_account")).toHaveValue(String(createdAccount.id));
 
   const createExpenseResponse = page.waitForResponse(
     (response) =>

@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Response } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import crypto from "crypto";
 import { API_BASE_URL, adminToken, createStandardBusinessUserSession, setSession } from "./helpers/admin";
 
@@ -12,16 +12,11 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
   const row = page.locator("tbody tr", { hasText: customerName }).first();
   for (let attempt = 0; attempt < maxPages; attempt += 1) {
     if ((await row.count()) > 0) return row;
-    const loadMoreButton = page.getByRole("button", { name: "Load More" });
-    if ((await loadMoreButton.count()) === 0) break;
-    const customersResponse = page.waitForResponse(
-      (response: Response) =>
-        response.url().includes("/api/customers/?page=") &&
-        response.request().method() === "GET" &&
-        response.status() === 200
-    );
+    const loadMoreButton = page.getByRole("button", { name: /load more/i });
+    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) break;
+    const previousRowCount = await page.locator("tbody tr").count();
     await loadMoreButton.click();
-    await customersResponse;
+    await expect.poll(async () => await page.locator("tbody tr").count(), { timeout: 10_000 }).not.toBe(previousRowCount);
   }
   return row;
 }
@@ -74,7 +69,7 @@ test("admin can preview internal customer notes from the customers list after pa
   await page.goto("/customers");
   await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("columnheader", { name: "Internal Notes" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Load More" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: /load more/i })).toBeVisible({ timeout: 30_000 });
   const customerRow = await loadMoreUntilRowVisible(page, customerName);
   await expect(customerRow).toBeVisible({ timeout: 30_000 });
   const previewButton = customerRow.getByRole("button", { name: `View internal notes for ${customerName}` });
