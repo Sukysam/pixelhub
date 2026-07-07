@@ -606,7 +606,6 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
 
 def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: bool, actor=None) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
-    flags: list[dict] = []
     User = get_user_model()
 
     usernames = {str(r.get("assigned_to") or "").strip() for r in rows if str(r.get("assigned_to") or "").strip()}
@@ -635,8 +634,6 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
             row_errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
             return None
 
-    allowed_statuses = {s for s, _ in Expense.APPROVAL_STATUS_CHOICES}
-
     def _validate_row(r: dict) -> tuple[Expense | None, list[dict]]:
         row_num = int(r.get("_row") or 0)
         row_errors: list[dict] = []
@@ -645,6 +642,8 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
             row_errors.append({"row": row_num, "field": "amount", "message": "amount must be > 0"})
 
         expense_date = _parse_date(r.get("expense_date"), "expense_date", row_num, row_errors) or timezone.localdate()
+        if expense_date and expense_date > timezone.localdate() + timedelta(days=1):
+            row_errors.append({"row": row_num, "field": "expense_date", "message": "expense_date cannot be more than one day in the future"})
         category = _clean(r.get("category"))
         if not category:
             row_errors.append({"row": row_num, "field": "category", "message": "category is required"})
@@ -653,25 +652,12 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         if not project_code and not cost_center:
             row_errors.append({"row": row_num, "field": "project_code", "message": "project_code or cost_center is required"})
 
-        approval_status = _clean(r.get("approval_status") or Expense.APPROVAL_STATUS_SUBMITTED) or Expense.APPROVAL_STATUS_SUBMITTED
-        if approval_status not in allowed_statuses:
-            row_errors.append({"row": row_num, "field": "approval_status", "message": "Invalid approval_status"})
-
         assigned_to_name = _clean(r.get("assigned_to")) or None
         assigned_to = users_by_name.get(assigned_to_name) if assigned_to_name else actor
         if assigned_to_name and assigned_to is None:
             row_errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
 
-        policy_status = Expense.POLICY_STATUS_COMPLIANT
-        policy_notes: list[str] = []
-        if amount is not None and amount >= Decimal("1000.00"):
-            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
-            policy_notes.append("Receipt upload required after import for expenses >= 1000.00")
-        if expense_date > timezone.localdate():
-            policy_status = Expense.POLICY_STATUS_REVIEW_REQUIRED
-            policy_notes.append("Future-dated expense requires review")
-        if policy_status != Expense.POLICY_STATUS_COMPLIANT:
-            flags.append({"row": row_num, "status": policy_status, "notes": "; ".join(policy_notes)})
+        source_account = _clean(r.get("source_account")) or None
 
         if row_errors:
             return None, row_errors
@@ -686,13 +672,9 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
                 merchant_reference=_clean(r.get("merchant_reference")) or None,
                 project_code=project_code,
                 cost_center=cost_center,
-                approval_status=approval_status,
-                policy_status=policy_status,
-                policy_notes="; ".join(policy_notes) or None,
+                source_account=source_account,
                 assigned_to=assigned_to,
                 created_by=actor if getattr(actor, "is_authenticated", False) else None,
-                approved_by=(actor if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
-                approved_at=(timezone.now() if getattr(actor, "is_authenticated", False) and approval_status == Expense.APPROVAL_STATUS_APPROVED else None),
             ),
             [],
         )
@@ -713,5 +695,4 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         dry_run=dry_run,
         rollback_on_error=rollback_on_error,
     )
-    payload["flags"] = flags[:200] if status_code >= 400 else flags
     return status_code, payload

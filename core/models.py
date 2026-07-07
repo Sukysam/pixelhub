@@ -103,6 +103,7 @@ class Customer(SoftDeleteModel):
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     billing_address = models.TextField(blank=True, null=True)
+    internal_remarks = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -286,25 +287,6 @@ class Receipt(SoftDeleteModel):
 
 
 class Expense(SoftDeleteModel):
-    APPROVAL_STATUS_DRAFT = "draft"
-    APPROVAL_STATUS_SUBMITTED = "submitted"
-    APPROVAL_STATUS_APPROVED = "approved"
-    APPROVAL_STATUS_REJECTED = "rejected"
-    APPROVAL_STATUS_CHOICES = [
-        (APPROVAL_STATUS_DRAFT, "Draft"),
-        (APPROVAL_STATUS_SUBMITTED, "Submitted"),
-        (APPROVAL_STATUS_APPROVED, "Approved"),
-        (APPROVAL_STATUS_REJECTED, "Rejected"),
-    ]
-    POLICY_STATUS_COMPLIANT = "compliant"
-    POLICY_STATUS_REVIEW_REQUIRED = "review_required"
-    POLICY_STATUS_NON_COMPLIANT = "non_compliant"
-    POLICY_STATUS_CHOICES = [
-        (POLICY_STATUS_COMPLIANT, "Compliant"),
-        (POLICY_STATUS_REVIEW_REQUIRED, "Review required"),
-        (POLICY_STATUS_NON_COMPLIANT, "Non-compliant"),
-    ]
-
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     expense_date = models.DateField(default=timezone.localdate)
     category = models.CharField(max_length=100, blank=True, null=True)
@@ -313,12 +295,7 @@ class Expense(SoftDeleteModel):
     merchant_reference = models.TextField(blank=True, null=True)
     project_code = models.CharField(max_length=120, blank=True, null=True)
     cost_center = models.CharField(max_length=120, blank=True, null=True)
-    receipt_file = models.FileField(upload_to="uploads/expenses/receipts/", blank=True, null=True)
-    receipt_original_name = models.CharField(max_length=255, blank=True, null=True)
-    receipt_content_type = models.CharField(max_length=120, blank=True, null=True)
-    approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default=APPROVAL_STATUS_DRAFT)
-    policy_status = models.CharField(max_length=20, choices=POLICY_STATUS_CHOICES, default=POLICY_STATUS_COMPLIANT)
-    policy_notes = models.TextField(blank=True, null=True)
+    source_account = models.CharField(max_length=255, blank=True, null=True)
     assigned_to = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         blank=True,
@@ -333,33 +310,24 @@ class Expense(SoftDeleteModel):
         on_delete=models.SET_NULL,
         related_name="created_expenses",
     )
-    approved_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        blank=True,
-        null=True,
-        on_delete=models.SET_NULL,
-        related_name="approved_expenses",
-    )
-    approved_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         indexes = [
             models.Index(fields=["is_deleted", "expense_date"]),
             models.Index(fields=["is_deleted", "category"]),
-            models.Index(fields=["is_deleted", "approval_status"]),
-            models.Index(fields=["is_deleted", "policy_status"]),
             models.Index(fields=["is_deleted", "assigned_to"]),
             models.Index(fields=["is_deleted", "project_code"]),
             models.Index(fields=["is_deleted", "cost_center"]),
             models.Index(fields=["is_deleted", "created_at"]),
+            models.Index(fields=["is_deleted", "source_account"], name="core_expens_is_dele_source_idx"),
         ]
 
     def __str__(self):
         return f"Expense {self.amount} on {self.expense_date}"
 
     def save(self, *args, **kwargs):
-        for field_name in ("description", "merchant_reference", "policy_notes"):
+        for field_name in ("description", "merchant_reference"):
             value = getattr(self, field_name, None)
             setattr(self, field_name, encrypt_expense_text(value))
         super().save(*args, **kwargs)

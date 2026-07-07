@@ -51,8 +51,8 @@ class ReceiptAdmin(admin.ModelAdmin):
 
 @admin.register(Expense)
 class ExpenseAdmin(admin.ModelAdmin):
-    list_display = ('amount', 'expense_date', 'category', 'vendor')
-    list_filter = ('expense_date', 'category')
+    list_display = ('amount', 'expense_date', 'category', 'vendor', 'source_account')
+    list_filter = ('expense_date', 'category', 'source_account')
     search_fields = ('description', 'vendor', 'category')
 
 

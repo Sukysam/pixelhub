@@ -88,7 +88,7 @@ from .logo_uploads import (
     create_logo_asset,
     normalize_logo_scope,
 )
-from .expense_security import decrypt_expense_text, decrypt_receipt_bytes
+from .expense_security import decrypt_expense_text
 from .finance_services import (
     CENTS,
     outstanding_invoice_amount,
@@ -260,7 +260,6 @@ def _anonymize_user_artifacts_for_deletion(user) -> None:
 
     Expense.objects.filter(created_by=user).update(created_by=None)
     Expense.objects.filter(assigned_to=user).update(assigned_to=None)
-    Expense.objects.filter(approved_by=user).update(approved_by=None)
     PaymentTransaction.objects.filter(created_by=user).update(created_by=None)
     BusinessAccount.objects.filter(owner=user).delete()
 
@@ -3317,13 +3316,13 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
 
 
 class ExpenseViewSet(SoftDeleteModelViewSet):
-    queryset = Expense.objects.all().select_related("assigned_to", "created_by", "approved_by").order_by("-expense_date", "-id")
+    queryset = Expense.objects.all().select_related("assigned_to", "created_by").order_by("-expense_date", "-id")
     serializer_class = ExpenseSerializer
     pagination_class = OptionalPageNumberPagination
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related("assigned_to", "created_by", "approved_by")
+        qs = super().get_queryset().select_related("assigned_to", "created_by")
         p = self.request.query_params
 
         q = str(p.get("q") or "").strip()
@@ -3351,19 +3350,9 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
         if category:
             qs = qs.filter(category__icontains=category)
 
-        approval_status = str(p.get("approval_status") or "").strip()
-        if approval_status:
-            allowed = {code for code, _ in Expense.APPROVAL_STATUS_CHOICES}
-            if approval_status not in allowed:
-                raise ValidationError({"approval_status": "Invalid approval_status"})
-            qs = qs.filter(approval_status=approval_status)
-
-        policy_status = str(p.get("policy_status") or "").strip()
-        if policy_status:
-            allowed = {code for code, _ in Expense.POLICY_STATUS_CHOICES}
-            if policy_status not in allowed:
-                raise ValidationError({"policy_status": "Invalid policy_status"})
-            qs = qs.filter(policy_status=policy_status)
+        source_account = str(p.get("source_account") or "").strip()
+        if source_account:
+            qs = qs.filter(source_account__icontains=source_account)
 
         project_code = str(p.get("project_code") or "").strip()
         if project_code:
@@ -3424,8 +3413,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 "expense_date": "expense_date",
                 "category": "category",
                 "vendor": "vendor",
-                "approval_status": "approval_status",
-                "policy_status": "policy_status",
+                "source_account": "source_account",
                 "assigned_to": "assigned_to__username",
                 "project_code": "project_code",
                 "cost_center": "cost_center",
@@ -3434,61 +3422,6 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             },
             default=("-expense_date", "-id"),
         )
-
-    @action(detail=True, methods=["post"], url_path="approve")
-    def approve(self, request, pk=None):
-        self._require_model_perm("change")
-        expense = self.get_object()
-        approval_status = str(request.data.get("approval_status") or "").strip() or Expense.APPROVAL_STATUS_APPROVED
-        if approval_status not in (Expense.APPROVAL_STATUS_APPROVED, Expense.APPROVAL_STATUS_REJECTED):
-            raise ValidationError({"approval_status": "approval_status must be approved or rejected"})
-        with transaction.atomic():
-            locked = Expense.objects.select_for_update().get(pk=expense.pk, is_deleted=False)
-            before_status = locked.approval_status
-            serializer = self.get_serializer(
-                locked,
-                data={
-                    "approval_status": approval_status,
-                    "updated_at": locked.updated_at.isoformat(),
-                    "policy_notes": request.data.get("policy_notes"),
-                },
-                partial=True,
-            )
-            serializer.is_valid(raise_exception=True)
-            updated = serializer.save()
-            _log_audit(
-                request.user,
-                "update",
-                updated,
-                {"approval_status": {"from": before_status, "to": updated.approval_status}, "approved_by": request.user.username},
-            )
-        return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=["get"], url_path="receipt")
-    def receipt(self, request, pk=None):
-        self._require_model_perm("view")
-        expense = self.get_object()
-        receipt_file = getattr(expense, "receipt_file", None)
-        if not receipt_file:
-            raise NotFound("Receipt file not found")
-        try:
-            with receipt_file.open("rb") as stored_file:
-                payload = decrypt_receipt_bytes(stored_file.read())
-        except FileNotFoundError:
-            raise NotFound("Receipt file not found")
-        except Exception as exc:
-            logger.exception("expense.receipt_decrypt_failed expense_id=%s error=%s", expense.id, exc)
-            raise APIException("Receipt file is unavailable")
-
-        filename = (
-            getattr(expense, "receipt_original_name", None)
-            or os.path.basename(getattr(receipt_file, "name", "")).removesuffix(".enc")
-            or f"expense-receipt-{expense.id}.bin"
-        )
-        response = HttpResponse(payload, content_type=getattr(expense, "receipt_content_type", None) or "application/octet-stream")
-        response["Content-Disposition"] = f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"
-        response["Cache-Control"] = "no-store"
-        return response
 
     @action(detail=False, methods=["get"], url_path="export")
     def export(self, request):
@@ -3508,14 +3441,9 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             "merchant_reference",
             "project_code",
             "cost_center",
-            "approval_status",
-            "policy_status",
-            "policy_notes",
+            "source_account",
             "assigned_to",
             "created_by",
-            "approved_by",
-            "approved_at",
-            "receipt_url",
             "created_at",
             "updated_at",
         ]
@@ -3528,8 +3456,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 "vendor",
                 "project_code",
                 "cost_center",
-                "approval_status",
-                "policy_status",
+                "source_account",
                 "assigned_to",
             ]
         else:
@@ -3561,17 +3488,13 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 return str(getattr(getattr(expense, "assigned_to", None), "username", "") or "")
             if field == "created_by":
                 return str(getattr(getattr(expense, "created_by", None), "username", "") or "")
-            if field == "approved_by":
-                return str(getattr(getattr(expense, "approved_by", None), "username", "") or "")
-            if field == "receipt_url":
-                return request.build_absolute_uri(f"/api/expenses/{expense.id}/receipt/") if getattr(expense, "receipt_file", None) else ""
-            if field in ("description", "merchant_reference", "policy_notes"):
+            if field in ("description", "merchant_reference"):
                 return str(decrypt_expense_text(getattr(expense, field, None)) or "")
             if field in ("expense_date",):
                 return str(getattr(expense, field, "") or "")
             if field in ("amount",):
                 return str(getattr(expense, field, "") or "")
-            if field in ("created_at", "updated_at", "approved_at"):
+            if field in ("created_at", "updated_at"):
                 dt = getattr(expense, field, None)
                 return dt.isoformat() if dt else ""
             return str(getattr(expense, field, "") or "")
@@ -3649,8 +3572,8 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             "merchant_reference",
             "project_code",
             "cost_center",
+            "source_account",
             "assigned_to",
-            "approval_status",
         ]
         example = [
             "250.00",
@@ -3661,8 +3584,8 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             "TRIP-1001",
             "PROJECT-ALPHA",
             "",
+            "petty1",
             getattr(request.user, "username", ""),
-            Expense.APPROVAL_STATUS_SUBMITTED,
         ]
         filename_base = "expense_import_template"
 

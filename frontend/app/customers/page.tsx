@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Plus } from "lucide-react";
-import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getErrorMessage } from "@/lib/api";
+import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getAuthUser, getErrorMessage } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
 interface Customer {
@@ -16,6 +16,7 @@ interface Customer {
   email: string | null;
   phone: string | null;
   billing_address: string | null;
+  internal_remarks?: string | null;
   updated_at: string;
 }
 
@@ -39,12 +40,20 @@ const CUSTOMER_EXPORT_FIELDS = [
 
 export default function CustomersPage() {
   const { t } = useI18n();
+  const authUser = getAuthUser();
+  const permissions = new Set(authUser?.permissions ?? []);
+  const canReadInternalRemarks = permissions.has("data.customers.remarks.read");
+  const canWriteInternalRemarks = permissions.has("data.customers.remarks.write");
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [nextUrl, setNextUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [internalRemarksOpen, setInternalRemarksOpen] = useState(false);
+  const [internalRemarksTarget, setInternalRemarksTarget] = useState<Customer | null>(null);
+  const [internalRemarksDraft, setInternalRemarksDraft] = useState("");
+  const [internalRemarksSaving, setInternalRemarksSaving] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<Pick<Customer, "name" | "email" | "phone" | "billing_address">>({
     name: "",
@@ -81,11 +90,13 @@ export default function CustomersPage() {
     email: string;
     phone: string;
     billing_address: string;
+    internal_remarks: string;
   }>({
     name: "",
     email: "",
     phone: "",
     billing_address: "",
+    internal_remarks: "",
   });
 
   const toUserMessage = useCallback((e: unknown, fallback: string) => {
@@ -165,10 +176,13 @@ export default function CustomersPage() {
           email: newCustomer.email || null,
           phone: newCustomer.phone || null,
           billing_address: newCustomer.billing_address || null,
+          ...(canWriteInternalRemarks && newCustomer.internal_remarks.trim()
+            ? { internal_remarks: newCustomer.internal_remarks.trim() }
+            : {}),
         }),
       });
       setCustomers((prev) => [created, ...prev]);
-      setNewCustomer({ name: "", email: "", phone: "", billing_address: "" });
+      setNewCustomer({ name: "", email: "", phone: "", billing_address: "", internal_remarks: "" });
       setIsModalOpen(false);
       setSuccess(t("saved"));
     } catch (e: unknown) {
@@ -186,6 +200,45 @@ export default function CustomersPage() {
       phone: c.phone,
       billing_address: c.billing_address,
     });
+  };
+
+  const openInternalRemarks = (customer: Customer) => {
+    if (!canReadInternalRemarks) return;
+    setError(null);
+    setSuccess(null);
+    setInternalRemarksTarget(customer);
+    setInternalRemarksDraft(customer.internal_remarks ?? "");
+    setInternalRemarksOpen(true);
+  };
+
+  const saveInternalRemarks = async () => {
+    const target = internalRemarksTarget;
+    if (!target) return;
+    if (!canWriteInternalRemarks) {
+      setError("You do not have permission to edit internal remarks.");
+      return;
+    }
+    try {
+      setInternalRemarksSaving(true);
+      setError(null);
+      setSuccess(null);
+      const updated = await apiRequest<Customer>(`/customers/${target.id}/`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          internal_remarks: internalRemarksDraft.trim() || null,
+          updated_at: target.updated_at,
+        }),
+      });
+      setCustomers((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      setInternalRemarksOpen(false);
+      setInternalRemarksTarget(null);
+      setInternalRemarksDraft("");
+      setSuccess(t("saved"));
+    } catch (e: unknown) {
+      setError(toUserMessage(e, "Failed to save internal remarks"));
+    } finally {
+      setInternalRemarksSaving(false);
+    }
   };
 
   const requestSave = () => {
@@ -479,6 +532,11 @@ export default function CustomersPage() {
                         <Button size="sm" variant="outline" onClick={() => startEdit(customer)}>
                           {t("edit")}
                         </Button>
+                        {canReadInternalRemarks ? (
+                          <Button size="sm" variant="outline" onClick={() => openInternalRemarks(customer)}>
+                            Internal Notes
+                          </Button>
+                        ) : null}
                         <Button size="sm" variant="destructive" onClick={() => requestDelete(customer.id)}>
                           {t("delete")}
                         </Button>
@@ -541,6 +599,17 @@ export default function CustomersPage() {
                 onChange={(e) => setNewCustomer({ ...newCustomer, billing_address: e.target.value })}
               />
             </div>
+            {canWriteInternalRemarks ? (
+              <div>
+                <Label htmlFor="customer_internal_remarks">Internal Notes</Label>
+                <textarea
+                  id="customer_internal_remarks"
+                  className="min-h-[90px] w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  value={newCustomer.internal_remarks}
+                  onChange={(e) => setNewCustomer({ ...newCustomer, internal_remarks: e.target.value })}
+                />
+              </div>
+            ) : null}
             <div className="flex justify-end space-x-2">
               <Button type="button" variant="outline" onClick={() => setIsModalOpen(false)}>
                 Cancel
@@ -548,6 +617,46 @@ export default function CustomersPage() {
               <Button type="submit">Add Customer</Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={internalRemarksOpen}
+        onOpenChange={(open) => {
+          setInternalRemarksOpen(open);
+          if (!open) {
+            setInternalRemarksTarget(null);
+            setInternalRemarksDraft("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Internal Customer Notes</DialogTitle>
+          </DialogHeader>
+          <div className="p-6 pt-0 space-y-4">
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              Visible to internal team only. These notes are not included on invoices or receipts.
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="customer_internal_notes_text">Notes</Label>
+              <textarea
+                id="customer_internal_notes_text"
+                className="min-h-[140px] w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                value={internalRemarksDraft}
+                onChange={(e) => setInternalRemarksDraft(e.target.value)}
+                disabled={!canWriteInternalRemarks}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setInternalRemarksOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={saveInternalRemarks} disabled={internalRemarksSaving || !canWriteInternalRemarks}>
+                {internalRemarksSaving ? "Saving..." : "Save Notes"}
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -20,17 +20,11 @@ type Expense = {
   merchant_reference: string | null;
   project_code: string | null;
   cost_center: string | null;
-  approval_status: "draft" | "submitted" | "approved" | "rejected";
-  policy_status: "compliant" | "review_required" | "non_compliant";
-  policy_notes: string | null;
+  source_account: string | null;
   assigned_to: number | null;
   assigned_to_name: string | null;
   created_by: number | null;
   created_by_name: string | null;
-  approved_by: number | null;
-  approved_by_name: string | null;
-  approved_at: string | null;
-  receipt_url: string | null;
   updated_at: string;
 };
 
@@ -45,7 +39,7 @@ type ExpenseForm = {
   merchant_reference: string;
   project_code: string;
   cost_center: string;
-  approval_status: Expense["approval_status"];
+  source_account: string;
 };
 
 const EMPTY_FORM: ExpenseForm = {
@@ -57,7 +51,7 @@ const EMPTY_FORM: ExpenseForm = {
   merchant_reference: "",
   project_code: "",
   cost_center: "",
-  approval_status: "submitted",
+  source_account: "",
 };
 
 export default function ExpensesPage() {
@@ -68,12 +62,11 @@ export default function ExpensesPage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
-  const [approvalFilter, setApprovalFilter] = useState("");
+  const [sourceAccountFilter, setSourceAccountFilter] = useState("");
   const [mineOnly, setMineOnly] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
   const [form, setForm] = useState<ExpenseForm>(EMPTY_FORM);
-  const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<"csv" | "xlsx" | "pdf">("csv");
@@ -86,8 +79,7 @@ export default function ExpensesPage() {
     vendor: true,
     project_code: true,
     cost_center: true,
-    approval_status: true,
-    policy_status: true,
+    source_account: true,
     assigned_to: true,
   });
   const [importOpen, setImportOpen] = useState(false);
@@ -100,7 +92,6 @@ export default function ExpensesPage() {
     rows?: number;
     would_create?: number;
     errors?: unknown[];
-    flags?: unknown[];
     error_log_token?: string;
   } | null>(null);
 
@@ -114,14 +105,9 @@ export default function ExpensesPage() {
       "merchant_reference",
       "project_code",
       "cost_center",
-      "approval_status",
-      "policy_status",
-      "policy_notes",
+      "source_account",
       "assigned_to",
       "created_by",
-      "approved_by",
-      "approved_at",
-      "receipt_url",
       "created_at",
       "updated_at",
     ],
@@ -141,10 +127,10 @@ export default function ExpensesPage() {
     params.set("page", "1");
     if (query.trim()) params.set("q", query.trim());
     if (categoryFilter.trim()) params.set("category", categoryFilter.trim());
-    if (approvalFilter.trim()) params.set("approval_status", approvalFilter.trim());
+    if (sourceAccountFilter.trim()) params.set("source_account", sourceAccountFilter.trim());
     if (mineOnly) params.set("assigned_to", "me");
     return `/expenses/?${params.toString()}`;
-  }, [approvalFilter, categoryFilter, mineOnly, query]);
+  }, [categoryFilter, mineOnly, query, sourceAccountFilter]);
 
   const loadExpenses = useCallback(async (path?: string) => {
     try {
@@ -180,7 +166,6 @@ export default function ExpensesPage() {
 
   const resetForm = () => {
     setForm(EMPTY_FORM);
-    setReceiptFile(null);
     setEditingExpense(null);
   };
 
@@ -197,9 +182,8 @@ export default function ExpensesPage() {
       merchant_reference: expense.merchant_reference ?? "",
       project_code: expense.project_code ?? "",
       cost_center: expense.cost_center ?? "",
-      approval_status: expense.approval_status,
+      source_account: expense.source_account ?? "",
     });
-    setReceiptFile(null);
     setIsAddOpen(true);
   };
 
@@ -226,8 +210,7 @@ export default function ExpensesPage() {
       body.append("merchant_reference", form.merchant_reference.trim());
       body.append("project_code", form.project_code.trim());
       body.append("cost_center", form.cost_center.trim());
-      body.append("approval_status", form.approval_status);
-      if (receiptFile) body.append("receipt_file", receiptFile, receiptFile.name);
+      body.append("source_account", form.source_account.trim());
       if (editingExpense) body.append("updated_at", editingExpense.updated_at);
 
       const path = editingExpense ? `/expenses/${editingExpense.id}/` : "/expenses/";
@@ -258,21 +241,6 @@ export default function ExpensesPage() {
       setSuccess("Expense deleted.");
     } catch (e: unknown) {
       setError(toUserMessage(e, "Failed to delete expense"));
-    }
-  };
-
-  const setApproval = async (expense: Expense, approvalStatus: "approved" | "rejected") => {
-    try {
-      setError(null);
-      setSuccess(null);
-      const updated = await apiRequest<Expense>(`/expenses/${expense.id}/approve/`, {
-        method: "POST",
-        body: JSON.stringify({ approval_status: approvalStatus }),
-      });
-      setExpenses((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
-      setSuccess(`Expense ${approvalStatus}.`);
-    } catch (e: unknown) {
-      setError(toUserMessage(e, `Failed to mark expense as ${approvalStatus}`));
     }
   };
 
@@ -307,7 +275,7 @@ export default function ExpensesPage() {
       if (exportDateFrom) params.set("expense_date_from", exportDateFrom);
       if (exportDateTo) params.set("expense_date_to", exportDateTo);
       if (categoryFilter.trim()) params.set("category", categoryFilter.trim());
-      if (approvalFilter.trim()) params.set("approval_status", approvalFilter.trim());
+      if (sourceAccountFilter.trim()) params.set("source_account", sourceAccountFilter.trim());
       if (mineOnly) params.set("assigned_to", "me");
       await downloadWithAuth(`/expenses/export/?${params.toString()}`);
       setExportOpen(false);
@@ -334,7 +302,6 @@ export default function ExpensesPage() {
         rows?: number;
         would_create?: number;
         errors?: unknown[];
-        flags?: unknown[];
         error_log_token?: string;
       }>("/expenses/import/", { method: "POST", body });
       setImportResult(result);
@@ -358,7 +325,7 @@ export default function ExpensesPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">Expenses</h1>
-            <p className="text-sm text-gray-500">Create, approve, import, and export operational spending records.</p>
+            <p className="text-sm text-gray-500">Create, import, and export operational spending records.</p>
           </div>
           <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => setExportOpen(true)}>
@@ -386,13 +353,7 @@ export default function ExpensesPage() {
         <div className="grid gap-3 rounded-lg border bg-white p-4 md:grid-cols-5">
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search vendor, category, project..." />
           <Input value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} placeholder="Category" />
-          <Select value={approvalFilter} onChange={(e) => setApprovalFilter(e.target.value)}>
-            <option value="">All approval states</option>
-            <option value="draft">Draft</option>
-            <option value="submitted">Submitted</option>
-            <option value="approved">Approved</option>
-            <option value="rejected">Rejected</option>
-          </Select>
+          <Input value={sourceAccountFilter} onChange={(e) => setSourceAccountFilter(e.target.value)} placeholder="Source account" />
           <label className="flex items-center gap-2 text-sm text-gray-700">
             <input type="checkbox" checked={mineOnly} onChange={(e) => setMineOnly(e.target.checked)} />
             Assigned to me
@@ -411,20 +372,18 @@ export default function ExpensesPage() {
                 <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3">Vendor</th>
                 <th className="px-4 py-3">Project / Cost Center</th>
-                <th className="px-4 py-3">Approval</th>
-                <th className="px-4 py-3">Policy</th>
-                <th className="px-4 py-3">Receipt</th>
-                <th className="px-4 py-3">Actions</th>
+                <th className="px-4 py-3">Source Account</th>
+                <th className="px-4 py-3">Manage</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-6 text-gray-500" colSpan={9}>Loading...</td>
+                  <td className="px-4 py-6 text-gray-500" colSpan={7}>Loading...</td>
                 </tr>
               ) : expenses.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-gray-500" colSpan={9}>No expenses found.</td>
+                  <td className="px-4 py-6 text-gray-500" colSpan={7}>No expenses found.</td>
                 </tr>
               ) : (
                 expenses.map((expense) => (
@@ -444,31 +403,11 @@ export default function ExpensesPage() {
                       <div className="text-xs text-gray-500">{expense.cost_center || "-"}</div>
                     </td>
                     <td className="px-4 py-4">
-                      <div className="capitalize">{expense.approval_status.replace("_", " ")}</div>
-                      <div className="text-xs text-gray-500">{expense.approved_by_name || ""}</div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="capitalize">{expense.policy_status.replace("_", " ")}</div>
-                      <div className="max-w-xs text-xs text-gray-500">{expense.policy_notes || ""}</div>
-                    </td>
-                    <td className="px-4 py-4">
-                      {expense.receipt_url ? (
-                        <a className="text-blue-600 hover:underline" href={expense.receipt_url} target="_blank" rel="noreferrer">
-                          View Receipt
-                        </a>
-                      ) : (
-                        <span className="text-gray-400">None</span>
-                      )}
+                      <div>{expense.source_account || "-"}</div>
                     </td>
                     <td className="px-4 py-4">
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" variant="outline" onClick={() => openEdit(expense)}>Edit</Button>
-                        {expense.approval_status !== "approved" ? (
-                          <Button type="button" variant="outline" onClick={() => void setApproval(expense, "approved")}>Approve</Button>
-                        ) : null}
-                        {expense.approval_status !== "rejected" ? (
-                          <Button type="button" variant="outline" onClick={() => void setApproval(expense, "rejected")}>Reject</Button>
-                        ) : null}
                         <Button type="button" variant="destructive" onClick={() => void deleteExpense(expense)}>Delete</Button>
                       </div>
                     </td>
@@ -523,13 +462,18 @@ export default function ExpensesPage() {
                 <Input id="exp_reference" value={form.merchant_reference} onChange={(e) => setForm((prev) => ({ ...prev, merchant_reference: e.target.value }))} />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="exp_status">Approval Status</Label>
-                <Select id="exp_status" value={form.approval_status} onChange={(e) => setForm((prev) => ({ ...prev, approval_status: e.target.value as Expense["approval_status"] }))}>
-                  <option value="draft">Draft</option>
-                  <option value="submitted">Submitted</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                </Select>
+                <Label htmlFor="exp_source_account">Source Account</Label>
+                <Input
+                  id="exp_source_account"
+                  list="expense_source_accounts"
+                  value={form.source_account}
+                  onChange={(e) => setForm((prev) => ({ ...prev, source_account: e.target.value }))}
+                  placeholder="petty1"
+                />
+                <datalist id="expense_source_accounts">
+                  <option value="petty1" />
+                  <option value="petty2" />
+                </datalist>
               </div>
               <div className="space-y-2 md:col-span-2">
                 <Label htmlFor="exp_desc">Description</Label>
@@ -539,10 +483,6 @@ export default function ExpensesPage() {
                   value={form.description}
                   onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
                 />
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <Label htmlFor="exp_receipt">Receipt File</Label>
-                <Input id="exp_receipt" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={(e) => setReceiptFile(e.target.files?.[0] ?? null)} />
               </div>
               <div className="flex justify-end gap-2 md:col-span-2">
                 <Button type="button" variant="outline" onClick={() => setIsAddOpen(false)}>Cancel</Button>
@@ -615,7 +555,6 @@ export default function ExpensesPage() {
                   <div>Rows: {importResult.rows ?? 0}</div>
                   <div>Created / Planned: {importResult.imported ?? importResult.would_create ?? 0}</div>
                   <div>Errors: {importResult.errors?.length ?? 0}</div>
-                  <div>Flags: {importResult.flags?.length ?? 0}</div>
                   {importResult.error_log_token ? (
                     <button
                       type="button"

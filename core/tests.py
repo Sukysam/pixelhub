@@ -62,7 +62,7 @@ from .import_export import (
     import_invoices_from_upload,
     import_items_from_upload,
 )
-from .expense_security import decrypt_expense_text, decrypt_receipt_bytes, is_encrypted_expense_value
+from .expense_security import decrypt_expense_text, is_encrypted_expense_value
 from .finance_services import (
     outstanding_invoice_amount,
     resolve_invoice_discount,
@@ -187,6 +187,70 @@ class PersistenceTests(APITestCase):
         res = self.client.delete(f"{detail_url}?updated_at={updated_at}")
         self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
         self.assertTrue(AuditLog.objects.filter(action="delete", object_id=str(customer_id)).exists())
+
+    def test_customer_internal_remarks_are_permission_gated_and_never_render_on_documents(self):
+        create_url = reverse("customer-list")
+        denied_create = self.client.post(
+            create_url,
+            {"name": "Internal Buyer", "email": "internal@example.com", "internal_remarks": "TOPSECRET"},
+            format="json",
+        )
+        self.assertEqual(denied_create.status_code, status.HTTP_403_FORBIDDEN)
+
+        customer = self.client.post(
+            create_url,
+            {"name": "Buyer", "email": "buyer_notes@example.com"},
+            format="json",
+        ).data
+        detail_url = reverse("customer-detail", args=[customer["id"]])
+
+        denied_patch = self.client.patch(
+            detail_url,
+            {"internal_remarks": "TOPSECRET", "updated_at": customer["updated_at"]},
+            format="json",
+        )
+        self.assertEqual(denied_patch.status_code, status.HTTP_403_FORBIDDEN)
+
+        read_res = self.client.get(detail_url)
+        self.assertEqual(read_res.status_code, status.HTTP_200_OK)
+        self.assertNotIn("internal_remarks", read_res.data)
+
+        staff = User.objects.create_user(username="staff_notes", password=_test_secret(), is_staff=True)
+        self.client.force_authenticate(user=staff)
+        staff_patch = self.client.patch(
+            detail_url,
+            {"internal_remarks": "TOPSECRET", "updated_at": customer["updated_at"]},
+            format="json",
+        )
+        self.assertEqual(staff_patch.status_code, status.HTTP_200_OK)
+        self.assertEqual(staff_patch.data["internal_remarks"], "TOPSECRET")
+
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Widget", "sku": "W-002", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        ).data
+        invoice_res = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 1}]},
+            format="json",
+        )
+        self.assertEqual(invoice_res.status_code, status.HTTP_201_CREATED)
+        invoice_id = invoice_res.data["id"]
+        invoice_html = self.client.get(f"/api/invoices/{invoice_id}/print_html/")
+        self.assertEqual(invoice_html.status_code, status.HTTP_200_OK)
+        self.assertNotIn("TOPSECRET", invoice_html.content.decode("utf-8", errors="ignore"))
+
+        receipt_res = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice_id, "amount_paid": "10.00", "payment_method": "Cash", "reference_number": "R-2"},
+            format="json",
+        )
+        self.assertEqual(receipt_res.status_code, status.HTTP_201_CREATED)
+        receipt_id = receipt_res.data["id"]
+        receipt_html = self.client.get(f"/api/receipts/{receipt_id}/print_html/")
+        self.assertEqual(receipt_html.status_code, status.HTTP_200_OK)
+        self.assertNotIn("TOPSECRET", receipt_html.content.decode("utf-8", errors="ignore"))
 
     def test_inventory_invoice_and_receipt_flow(self):
         customer = self.client.post(
@@ -2049,123 +2113,98 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
         self.assertFalse(Customer.objects.filter(email="valid@example.com", is_deleted=False).exists())
 
-    def test_expense_crud_approval_filters_and_export(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
-                create_res = self.client.post(
-                    "/api/expenses/",
-                    {
-                        "amount": "250.00",
-                        "expense_date": str(timezone.localdate()),
-                        "category": "Travel",
-                        "description": "Airport taxi",
-                        "vendor": "Ride Co",
-                        "merchant_reference": "TRAVEL-1",
-                        "project_code": "PROJECT-ALPHA",
-                        "approval_status": "submitted",
-                        "receipt_file": _pdf_upload_file(),
-                    },
-                    format="multipart",
-                )
-                self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
-                expense_id = create_res.data["id"]
-                self.assertEqual(create_res.data["created_by"], self.user.id)
-                self.assertEqual(create_res.data["assigned_to"], self.user.id)
-                self.assertTrue(str(create_res.data.get("receipt_url") or "").endswith(f"/api/expenses/{expense_id}/receipt/"))
+    def test_expense_crud_source_account_filters_export_and_removed_endpoints(self):
+        create_res = self.client.post(
+            "/api/expenses/",
+            {
+                "amount": "250.00",
+                "expense_date": str(timezone.localdate()),
+                "category": "Travel",
+                "description": "Airport taxi",
+                "vendor": "Ride Co",
+                "merchant_reference": "TRAVEL-1",
+                "project_code": "PROJECT-ALPHA",
+                "source_account": "petty1",
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        expense_id = create_res.data["id"]
+        self.assertEqual(create_res.data["created_by"], self.user.id)
+        self.assertEqual(create_res.data["assigned_to"], self.user.id)
+        self.assertEqual(create_res.data["source_account"], "petty1")
 
-                approve_res = self.client.post(
-                    f"/api/expenses/{expense_id}/approve/",
-                    {"approval_status": "approved", "policy_notes": "Reviewed and accepted"},
-                    format="json",
-                )
-                self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
-                self.assertEqual(approve_res.data["approval_status"], "approved")
-                self.assertEqual(approve_res.data["approved_by"], self.user.id)
+        filtered = self.client.get("/api/expenses/?source_account=petty1&category=Travel")
+        self.assertEqual(filtered.status_code, status.HTTP_200_OK)
+        self.assertEqual(filtered.data["count"], 1)
 
-                filtered = self.client.get("/api/expenses/?approval_status=approved&category=Travel")
-                self.assertEqual(filtered.status_code, status.HTTP_200_OK)
-                self.assertEqual(filtered.data["count"], 1)
+        export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=expense_date,amount,category,source_account,assigned_to")
+        self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+        body = b"".join(export_res.streaming_content).decode("utf-8")
+        self.assertIn("Travel", body)
+        self.assertIn("petty1", body)
+        self.assertIn(self.user.username, body)
 
-                export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=expense_date,amount,category,approval_status,assigned_to")
-                self.assertEqual(export_res.status_code, status.HTTP_200_OK)
-                body = b"".join(export_res.streaming_content).decode("utf-8")
-                self.assertIn("Travel", body)
-                self.assertIn("approved", body)
-                self.assertIn(self.user.username, body)
+        approve_res = self.client.post(f"/api/expenses/{expense_id}/approve/", {"approval_status": "approved"}, format="json")
+        self.assertEqual(approve_res.status_code, status.HTTP_404_NOT_FOUND)
+        receipt_res = self.client.get(f"/api/expenses/{expense_id}/receipt/")
+        self.assertEqual(receipt_res.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_expense_storage_is_encrypted_at_rest_and_receipt_download_is_decrypted(self):
-        original_receipt = b"%PDF-1.4\nEncrypted expense receipt payload\n%%EOF"
-        with tempfile.TemporaryDirectory() as tmp:
-            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
-                upload = SimpleUploadedFile("secure-receipt.pdf", original_receipt, content_type="application/pdf")
-                create_res = self.client.post(
-                    "/api/expenses/",
-                    {
-                        "amount": "1500.00",
-                        "expense_date": str(timezone.localdate()),
-                        "category": "Compliance",
-                        "description": "Background verification",
-                        "vendor": "Secure Vendor",
-                        "merchant_reference": "SEC-42",
-                        "project_code": "PROJECT-GAMMA",
-                        "receipt_file": upload,
-                    },
-                    format="multipart",
-                )
-                self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
-                expense = Expense.objects.get(pk=create_res.data["id"])
-                self.assertTrue(is_encrypted_expense_value(expense.description))
-                self.assertTrue(is_encrypted_expense_value(expense.merchant_reference))
-                self.assertEqual(decrypt_expense_text(expense.description), "Background verification")
-                self.assertEqual(decrypt_expense_text(expense.merchant_reference), "SEC-42")
-                self.assertEqual(expense.receipt_original_name, "secure-receipt.pdf")
-                self.assertEqual(expense.receipt_content_type, "application/pdf")
-                self.assertTrue(str(expense.receipt_file.name).endswith(".enc"))
+    def test_expense_storage_is_encrypted_at_rest_and_decrypted_in_api_and_export(self):
+        create_res = self.client.post(
+            "/api/expenses/",
+            {
+                "amount": "1500.00",
+                "expense_date": str(timezone.localdate()),
+                "category": "Compliance",
+                "description": "Background verification",
+                "vendor": "Secure Vendor",
+                "merchant_reference": "SEC-42",
+                "project_code": "PROJECT-GAMMA",
+                "source_account": "petty2",
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        expense = Expense.objects.get(pk=create_res.data["id"])
+        self.assertTrue(is_encrypted_expense_value(expense.description))
+        self.assertTrue(is_encrypted_expense_value(expense.merchant_reference))
+        self.assertEqual(decrypt_expense_text(expense.description), "Background verification")
+        self.assertEqual(decrypt_expense_text(expense.merchant_reference), "SEC-42")
 
-                with expense.receipt_file.open("rb") as stored_file:
-                    encrypted_bytes = stored_file.read()
-                self.assertNotEqual(encrypted_bytes, original_receipt)
-                self.assertEqual(decrypt_receipt_bytes(encrypted_bytes), original_receipt)
+        detail_res = self.client.get("/api/expenses/?q=verification")
+        self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail_res.data["count"], 1)
+        self.assertEqual(detail_res.data["results"][0]["description"], "Background verification")
+        self.assertEqual(detail_res.data["results"][0]["merchant_reference"], "SEC-42")
 
-                detail_res = self.client.get(f"/api/expenses/?q=verification")
-                self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
-                self.assertEqual(detail_res.data["count"], 1)
-                self.assertEqual(detail_res.data["results"][0]["description"], "Background verification")
-                self.assertEqual(detail_res.data["results"][0]["merchant_reference"], "SEC-42")
+        export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=description,merchant_reference,source_account")
+        self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+        export_body = b"".join(export_res.streaming_content).decode("utf-8")
+        self.assertIn("Background verification", export_body)
+        self.assertIn("SEC-42", export_body)
+        self.assertIn("petty2", export_body)
 
-                export_res = self.client.get(
-                    "/api/expenses/export/?file_format=csv&fields=description,merchant_reference,policy_notes,receipt_url"
-                )
-                self.assertEqual(export_res.status_code, status.HTTP_200_OK)
-                export_body = b"".join(export_res.streaming_content).decode("utf-8")
-                self.assertIn("Background verification", export_body)
-                self.assertIn("SEC-42", export_body)
-                self.assertIn(f"http://testserver/api/expenses/{expense.id}/receipt/", export_body)
-
-                receipt_res = self.client.get(f"/api/expenses/{expense.id}/receipt/")
-                self.assertEqual(receipt_res.status_code, status.HTTP_200_OK)
-                self.assertEqual(receipt_res.content, original_receipt)
-                self.assertEqual(receipt_res["Content-Type"], "application/pdf")
-                self.assertIn("secure-receipt.pdf", receipt_res["Content-Disposition"])
-
-    def test_expense_import_flags_and_error_log(self):
+    def test_expense_import_error_log_without_approval_or_policy(self):
         dry_run_csv = (
-            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
-            f"1250.00,{timezone.localdate()},Software,Annual license,Vendor Ltd,SOFT-1,PROJECT-BETA,,{self.user.username},submitted\n"
+            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,source_account,assigned_to\n"
+            f"1250.00,{timezone.localdate()},Software,Annual license,Vendor Ltd,SOFT-1,PROJECT-BETA,,petty1,{self.user.username}\n"
         )
         dry_run_upload = SimpleUploadedFile("expenses.csv", dry_run_csv.encode("utf-8"), content_type="text/csv")
         dry_run_res = self.client.post("/api/expenses/import/", {"file": dry_run_upload, "dry_run": "true"}, format="multipart")
         self.assertEqual(dry_run_res.status_code, status.HTTP_200_OK)
         self.assertTrue(dry_run_res.data["dry_run"])
-        self.assertEqual(len(dry_run_res.data.get("flags", [])), 1)
-        self.assertEqual(dry_run_res.data["flags"][0]["status"], "review_required")
+        self.assertNotIn("flags", dry_run_res.data)
 
-        bad_csv = "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n12.00,2026-01-01,,Bad Row,Vendor Ltd,REF-1,,,unknown-user,submitted\n"
+        bad_csv = (
+            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,source_account,assigned_to\n"
+            "12.00,2026-01-01,,Bad Row,Vendor Ltd,REF-1,,,petty2,unknown-user\n"
+        )
         bad_upload = SimpleUploadedFile("expenses.csv", bad_csv.encode("utf-8"), content_type="text/csv")
         bad_res = self.client.post("/api/expenses/import/", {"file": bad_upload, "rollback_on_error": "true"}, format="multipart")
         self.assertEqual(bad_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("error_log_token", bad_res.data)
-        self.assertFalse(Expense.objects.filter(vendor="Vendor Ltd", description="Bad Row", is_deleted=False).exists())
+        self.assertFalse(Expense.objects.filter(vendor="Vendor Ltd", is_deleted=False).exists())
 
     def test_import_items_function_covers_validation_edges(self):
         upload = _csv_upload_file(
@@ -2352,8 +2391,8 @@ class CustomerExpenseImportExportTests(APITestCase):
     def test_import_expenses_function_covers_validation_and_success_creation(self):
         missing_amount = _csv_upload_file(
             "expenses.csv",
-            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
-            ",,,Missing everything,Vendor,REF-0,,,,\n",
+            "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,source_account,assigned_to\n"
+            ",,,Missing everything,Vendor,REF-0,,,,,\n",
         )
         status_code, payload = import_expenses_from_upload(
             missing_amount,
@@ -2367,15 +2406,14 @@ class CustomerExpenseImportExportTests(APITestCase):
         upload = _csv_upload_file(
             "expenses.csv",
             (
-                "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,assigned_to,approval_status\n"
-                "oops,2026-05-01,Office,Bad amount,Vendor,REF-1,PRJ-1,,,submitted\n"
-                "-5.00,2026-05-01,Office,Negative amount,Vendor,REF-2,PRJ-1,,,submitted\n"
-                "10.00,not-a-date,Office,Bad date,Vendor,REF-3,PRJ-1,,,submitted\n"
-                "15.00,2026-05-01,Office,Missing cost refs,Vendor,REF-4,,,,submitted\n"
-                "20.00,2026-05-01,Office,Bad status,Vendor,REF-5,PRJ-1,,,not-valid\n"
-                "25.00,2026-05-01,Office,Unknown assignee,Vendor,REF-6,PRJ-1,,ghost-user,submitted\n"
-                f"1500.00,{timezone.localdate() + timedelta(days=2)},Travel,Future approved,Vendor,REF-7,PRJ-2,,{self.user.username},approved\n"
-                f"35.00,{timezone.localdate()},Meals,Created expense,Vendor,REF-8,PRJ-3,,{self.user.username},approved\n"
+                "amount,expense_date,category,description,vendor,merchant_reference,project_code,cost_center,source_account,assigned_to\n"
+                "oops,2026-05-01,Office,Bad amount,Vendor,REF-1,PRJ-1,,,petty1,\n"
+                "-5.00,2026-05-01,Office,Negative amount,Vendor,REF-2,PRJ-1,,,petty1,\n"
+                "10.00,not-a-date,Office,Bad date,Vendor,REF-3,PRJ-1,,,petty1,\n"
+                "15.00,2026-05-01,Office,Missing cost refs,Vendor,REF-4,,,,petty1,\n"
+                "25.00,2026-05-01,Office,Unknown assignee,Vendor,REF-6,PRJ-1,,petty1,ghost-user\n"
+                f"1500.00,{timezone.localdate() + timedelta(days=2)},Travel,Future expense,Vendor,REF-7,PRJ-2,,petty2,{self.user.username}\n"
+                f"35.00,{timezone.localdate()},Meals,Created expense,Vendor,REF-8,PRJ-3,,petty2,{self.user.username}\n"
             ),
         )
 
@@ -2387,23 +2425,19 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["imported"], 2)
+        self.assertEqual(payload["imported"], 1)
         messages = {(err["field"], err["message"]) for err in payload["errors"]}
         self.assertIn(("amount", "Invalid amount"), messages)
         self.assertIn(("amount", "amount must be > 0"), messages)
         self.assertIn(("expense_date", "Invalid date. Use YYYY-MM-DD"), messages)
         self.assertIn(("project_code", "project_code or cost_center is required"), messages)
-        self.assertIn(("approval_status", "Invalid approval_status"), messages)
+        self.assertIn(("expense_date", "expense_date cannot be more than one day in the future"), messages)
         self.assertIn(("assigned_to", "Assigned user not found"), messages)
-        self.assertTrue(any(flag["status"] == Expense.POLICY_STATUS_REVIEW_REQUIRED for flag in payload["flags"]))
 
         created = Expense.objects.filter(merchant_reference__isnull=False, is_deleted=False).order_by("id")
-        self.assertEqual(created.count(), 2)
+        self.assertEqual(created.count(), 1)
         self.assertTrue(all(exp.created_by == self.user for exp in created))
-        approved = created.filter(approval_status=Expense.APPROVAL_STATUS_APPROVED).first()
-        self.assertIsNotNone(approved)
-        self.assertEqual(approved.approved_by, self.user)
-        self.assertIsNotNone(approved.approved_at)
+        self.assertEqual(created.first().source_account, "petty2")
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")

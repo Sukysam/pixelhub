@@ -3,12 +3,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import uuid
-from typing import Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
-from django.core.files.base import ContentFile
 
 
 EXPENSE_ENCRYPTION_PREFIX = "encv1:"
@@ -55,19 +52,3 @@ def decrypt_expense_text(value: str | None) -> str | None:
         return _fernet().decrypt(token.encode("utf-8")).decode("utf-8")
     except InvalidToken:
         return None
-
-
-def encrypt_uploaded_receipt(upload) -> Tuple[ContentFile, str, str | None]:
-    raw = upload.read()
-    upload.seek(0)
-    encrypted = _fernet().encrypt(raw)
-    original_name = os.path.basename(getattr(upload, "name", "") or "receipt.bin")
-    content_type = getattr(upload, "content_type", None)
-    ext = os.path.splitext(original_name)[1].lower() or ".bin"
-    stored_name = f"{uuid.uuid4().hex}{ext}.enc"
-    content = ContentFile(encrypted, name=stored_name)
-    return content, original_name, content_type
-
-
-def decrypt_receipt_bytes(data: bytes) -> bytes:
-    return _fernet().decrypt(data)
