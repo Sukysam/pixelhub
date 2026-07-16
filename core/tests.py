@@ -1766,6 +1766,62 @@ class InvoiceDiscountTests(APITestCase):
         self.assertEqual(negative_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("unit_price", str(negative_res.data).lower())
 
+    def test_invoice_create_persists_description_overrides_and_blank_values(self):
+        product = Item.objects.create(
+            type="product",
+            name="Override Product",
+            sku="DESC-001",
+            description="Catalog product description",
+            unit_price=Decimal("12.00"),
+            tax_rate=Decimal("5.00"),
+            stock_quantity=10,
+        )
+        service = Item.objects.create(
+            type="service",
+            name="Override Service",
+            sku="DESC-002",
+            description="Catalog service description",
+            unit_price=Decimal("8.00"),
+            tax_rate=Decimal("0.00"),
+            stock_quantity=0,
+        )
+
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [
+                    {"item": product.id, "quantity": 1, "description": "Custom product description"},
+                    {"item": service.id, "quantity": 1, "description": ""},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        invoice_items = res.data["invoice_items"]
+        self.assertEqual(invoice_items[0]["description"], "Custom product description")
+        self.assertIsNone(invoice_items[1]["description"])
+
+        persisted_items = list(InvoiceItem.objects.filter(invoice_id=res.data["id"], is_deleted=False).order_by("id"))
+        self.assertEqual(persisted_items[0].description, "Custom product description")
+        self.assertIsNone(persisted_items[1].description)
+
+    def test_invoice_create_rejects_description_longer_than_500_characters(self):
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 1, "description": "x" * 501}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("description", str(res.data).lower())
+
     def test_invoice_render_includes_discount_details(self):
         invoice = Invoice.objects.create(
             invoice_number="INV-DISC-1",

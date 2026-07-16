@@ -618,6 +618,117 @@ test("standard business user can persist customer invoice and receipt records", 
   expect(updatedReceipt.reference_number).toBe(`RCPT-${suffix}`);
 });
 
+test("invoice create descriptions can be edited, validated, and persisted across responsive layouts", async ({ page, request }) => {
+  const token = await adminToken(request);
+  await setSession(page, request, token);
+  const authHeaders = { Authorization: `Token ${token}` };
+  const suffix = `${Date.now()}_${crypto.randomBytes(2).toString("hex")}`;
+  const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const customerRes = await request.post(`${API_BASE_URL}/customers/`, {
+    headers: authHeaders,
+    data: { name: `Description Buyer ${suffix}`, email: `description_${suffix}@example.com` },
+  });
+  expect(customerRes.ok()).toBeTruthy();
+  const customer = (await customerRes.json()) as { id: number };
+
+  const productDescription = "Catalog product description";
+  const serviceDescription = "Catalog service description";
+  const productRes = await request.post(`${API_BASE_URL}/items/`, {
+    headers: authHeaders,
+    data: {
+      type: "product",
+      name: `Description Product ${suffix}`,
+      sku: `DESC-P-${suffix}`,
+      description: productDescription,
+      unit_price: "15.00",
+      tax_rate: "5.00",
+      stock_quantity: 10,
+    },
+  });
+  expect(productRes.ok()).toBeTruthy();
+  const product = (await productRes.json()) as { id: number; name: string };
+
+  const serviceRes = await request.post(`${API_BASE_URL}/items/`, {
+    headers: authHeaders,
+    data: {
+      type: "service",
+      name: `Description Service ${suffix}`,
+      sku: `DESC-S-${suffix}`,
+      description: serviceDescription,
+      unit_price: "20.00",
+      tax_rate: "0.00",
+      stock_quantity: 0,
+    },
+  });
+  expect(serviceRes.ok()).toBeTruthy();
+  const service = (await serviceRes.json()) as { id: number; name: string };
+
+  await page.goto("/invoices");
+  await expect(page.getByRole("heading", { name: "Create Invoice" })).toBeVisible({ timeout: 30_000 });
+  const invoiceCustomerSelect = page.locator("select").filter({ has: page.locator(`option[value="${customer.id}"]`) }).first();
+  await expect(invoiceCustomerSelect.locator(`option[value="${customer.id}"]`)).toHaveCount(1, { timeout: 30_000 });
+  await invoiceCustomerSelect.selectOption(String(customer.id));
+
+  await page.getByRole("button", { name: "Add Item" }).click();
+  const pickerDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Select Item" }) });
+  await expect(pickerDialog).toBeVisible({ timeout: 30_000 });
+  await pickerDialog.getByRole("button", { name: new RegExp(escapeRegExp(product.name)) }).click();
+
+  const productDescriptionInput = page.getByLabel(`Line item description for ${product.name}`);
+  await expect(productDescriptionInput).toBeVisible({ timeout: 30_000 });
+  await expect(productDescriptionInput).toHaveValue(productDescription);
+  const editedProductDescription = `Custom invoice description ${suffix}`;
+  await productDescriptionInput.fill(editedProductDescription);
+  await expect(page.getByText(`${editedProductDescription.length}/500 characters`)).toBeVisible();
+
+  await page.getByRole("button", { name: "Add Item" }).click();
+  await expect(pickerDialog).toBeVisible({ timeout: 30_000 });
+  await pickerDialog.getByRole("button", { name: new RegExp(escapeRegExp(service.name)) }).click();
+
+  const serviceDescriptionInput = page.getByLabel(`Line item description for ${service.name}`);
+  await expect(serviceDescriptionInput).toBeVisible({ timeout: 30_000 });
+  await expect(serviceDescriptionInput).toHaveValue(serviceDescription);
+  await serviceDescriptionInput.fill("x".repeat(501));
+  await expect(page.getByText("Description must be 500 characters or fewer")).toBeVisible();
+  await page.getByRole("button", { name: "Save Invoice" }).click();
+  await expect(page.getByRole("heading", { name: "Invoice Summary" })).toHaveCount(0);
+
+  await serviceDescriptionInput.fill("");
+  await expect(page.getByText("0/500 characters")).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(productDescriptionInput).toBeVisible({ timeout: 30_000 });
+  await expect(productDescriptionInput).toHaveValue(editedProductDescription);
+  await expect(serviceDescriptionInput).toHaveValue("");
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const invoiceCreateResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${API_BASE_URL}/invoices/` &&
+      response.request().method() === "POST" &&
+      response.status() === 201
+  );
+  await page.getByRole("button", { name: "Save Invoice" }).click();
+  const summaryDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Invoice Summary" }) });
+  await expect(summaryDialog).toBeVisible({ timeout: 30_000 });
+  await expect(summaryDialog).toContainText(editedProductDescription);
+
+  const createdInvoice = (await (await invoiceCreateResponse).json()) as { id: number; invoice_number: string };
+  await summaryDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText(`Invoice ${createdInvoice.invoice_number} saved.`)).toBeVisible({ timeout: 30_000 });
+
+  const invoiceDetailRes = await request.get(`${API_BASE_URL}/invoices/${createdInvoice.id}/`, { headers: authHeaders });
+  expect(invoiceDetailRes.ok()).toBeTruthy();
+  const invoiceDetail = (await invoiceDetailRes.json()) as {
+    invoice_items: Array<{ item: number; description: string | null }>;
+  };
+  const persistedProductLine = invoiceDetail.invoice_items.find((row) => row.item === product.id);
+  const persistedServiceLine = invoiceDetail.invoice_items.find((row) => row.item === service.id);
+  expect(persistedProductLine?.description).toBe(editedProductDescription);
+  expect(persistedServiceLine?.description).toBeNull();
+});
+
 test("admin can upload PNG logo, save global settings, and logo shows in user Settings previews", async ({ page, request }) => {
   const token = await adminToken(request);
   await setSession(page, request, token);

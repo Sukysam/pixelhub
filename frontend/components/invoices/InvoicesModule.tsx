@@ -160,10 +160,13 @@ function normalizeItem(raw: ItemApi): Item {
 interface LineItem {
   id: number;
   itemId: number | null;
+  description: string;
   quantity: string;
   unitPrice: string;
   taxRateOverride: string;
 }
+
+const LINE_ITEM_DESCRIPTION_MAX_LENGTH = 500;
 
 function parsePositiveInt(value: string): number | null {
   const n = Number(value);
@@ -187,6 +190,13 @@ function parseUnitPrice(value: string): number | null {
 
 function moneyInputValue(value: number): string {
   return roundMoney(value).toFixed(2);
+}
+
+function lineItemDescriptionError(value: string): string | null {
+  if (value.length > LINE_ITEM_DESCRIPTION_MAX_LENGTH) {
+    return `Description must be ${LINE_ITEM_DESCRIPTION_MAX_LENGTH} characters or fewer`;
+  }
+  return null;
 }
 
 function luhnOk(value: string) {
@@ -889,7 +899,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   );
 
   const addLineItem = () => {
-    const li: LineItem = { id: Date.now(), itemId: null, quantity: "1", unitPrice: "", taxRateOverride: "" };
+    const li: LineItem = { id: Date.now(), itemId: null, description: "", quantity: "1", unitPrice: "", taxRateOverride: "" };
     setLineItems((prev) => [...prev, li]);
     setPickerLineId(li.id);
     setIsPickerOpen(true);
@@ -966,7 +976,11 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setInventoryItems((prev) => [normalized, ...prev]);
 
       if (addItemTargetLineId !== null) {
-        updateLineItem(addItemTargetLineId, { itemId: normalized.id, unitPrice: moneyInputValue(normalized.unit_price) });
+        updateLineItem(addItemTargetLineId, {
+          itemId: normalized.id,
+          description: normalized.description ?? "",
+          unitPrice: moneyInputValue(normalized.unit_price),
+        });
       }
 
       setIsAddItemOpen(false);
@@ -1001,8 +1015,13 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       return;
     }
 
-    const normalizedLines: Array<{ item: number; quantity: number; unit_price: number; tax_rate?: number }> = [];
+    const normalizedLines: Array<{ item: number; quantity: number; unit_price: number; tax_rate?: number; description: string }> = [];
     for (const li of lineItems) {
+      const descriptionError = lineItemDescriptionError(li.description);
+      if (descriptionError) {
+        setError(descriptionError);
+        return;
+      }
       if (!li.itemId) {
         setError("Please select an item for each line");
         return;
@@ -1023,8 +1042,9 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
         return;
       }
 
-      const payloadLine: { item: number; quantity: number; unit_price: number; tax_rate?: number } = {
+      const payloadLine: { item: number; quantity: number; unit_price: number; tax_rate?: number; description: string } = {
         item: li.itemId,
+        description: li.description,
         quantity: qty,
         unit_price: unitPrice,
       };
@@ -1669,6 +1689,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Item</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Description</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Tax %</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Qty</th>
                     <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Unit Price</th>
@@ -1677,11 +1698,14 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {lineItems.map((li) => {
+                  {lineItems.map((li, index) => {
                     const invItem = li.itemId ? itemsById.get(li.itemId) : undefined;
                     const qty = parsePositiveInt(li.quantity) ?? 0;
                     const parsedUnitPrice = parseUnitPrice(li.unitPrice);
                     const unitPrice = parsedUnitPrice ?? 0;
+                    const descriptionFieldId = `line-item-description-${li.id}`;
+                    const descriptionHintId = `${descriptionFieldId}-hint`;
+                    const descriptionError = lineItemDescriptionError(li.description);
                     const effectiveTaxRate =
                       li.taxRateOverride.trim() !== ""
                         ? parseTaxRate(li.taxRateOverride) ?? 0
@@ -1700,9 +1724,31 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                               Add New Item
                             </Button>
                           </div>
-                          {invItem?.description ? (
-                            <div className="mt-1 text-xs text-gray-500 line-clamp-2">{invItem.description}</div>
-                          ) : null}
+                        </td>
+                        <td className="px-4 py-3 min-w-[260px] align-top">
+                          <div className="space-y-2">
+                            <Label htmlFor={descriptionFieldId} className="sr-only">
+                              {`Line item description for ${invItem?.name ?? `line item ${index + 1}`}`}
+                            </Label>
+                            <textarea
+                              id={descriptionFieldId}
+                              value={li.description}
+                              onChange={(e) => updateLineItem(li.id, { description: e.target.value })}
+                              placeholder={invItem ? "Add or edit the line item description" : "Select an item to add a description"}
+                              disabled={loading || !invItem}
+                              rows={3}
+                              aria-invalid={descriptionError ? "true" : "false"}
+                              aria-describedby={descriptionHintId}
+                              className="flex min-h-[88px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                            />
+                            <div
+                              id={descriptionHintId}
+                              className={`text-xs ${descriptionError ? "text-red-600" : "text-gray-500"}`}
+                              aria-live="polite"
+                            >
+                              {descriptionError ?? `${li.description.length}/${LINE_ITEM_DESCRIPTION_MAX_LENGTH} characters`}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-3 w-28">
                           <Input
@@ -2334,7 +2380,11 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                     className="w-full text-left p-3 hover:bg-gray-50"
                     onClick={() => {
                       if (pickerLineId === null) return;
-                      updateLineItem(pickerLineId, { itemId: i.id, unitPrice: moneyInputValue(i.unit_price) });
+                      updateLineItem(pickerLineId, {
+                        itemId: i.id,
+                        description: i.description ?? "",
+                        unitPrice: moneyInputValue(i.unit_price),
+                      });
                       setIsPickerOpen(false);
                       setPickerLineId(null);
                       setItemSearch("");

@@ -139,6 +139,7 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+INVOICE_ITEM_DESCRIPTION_MAX_LENGTH = 500
 
 class PaymentDeclined(APIException):
     status_code = 402
@@ -2344,6 +2345,8 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     qty = raw.get("quantity")
                     override_tax_rate = raw.get("tax_rate")
                     override_unit_price = raw.get("unit_price")
+                    description_provided = "description" in raw
+                    override_description = raw.get("description") if description_provided else None
                     try:
                         item_id = int(item_id)
                     except (TypeError, ValueError):
@@ -2365,8 +2368,19 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                             raise ValidationError({"unit_price": "Each item must include a valid unit_price"})
                         if normalized_unit_price < 0:
                             raise ValidationError({"unit_price": "unit_price must be >= 0"})
+                    if description_provided:
+                        if override_description is None or str(override_description).strip() == "":
+                            normalized_description = None
+                        else:
+                            normalized_description = str(override_description)
+                            if len(normalized_description) > INVOICE_ITEM_DESCRIPTION_MAX_LENGTH:
+                                raise ValidationError(
+                                    {"description": f"description must be {INVOICE_ITEM_DESCRIPTION_MAX_LENGTH} characters or fewer"}
+                                )
+                    else:
+                        normalized_description = None
                     item_ids.append(item_id)
-                    normalized_items.append((item_id, qty, override_tax_rate, normalized_unit_price))
+                    normalized_items.append((item_id, qty, override_tax_rate, normalized_unit_price, description_provided, normalized_description))
 
                 items_by_id = {i.id: i for i in Item.objects.select_for_update().filter(id__in=item_ids, is_deleted=False)}
                 if len(items_by_id) != len(set(item_ids)):
@@ -2375,7 +2389,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 subtotal = Decimal("0.00")
                 tax_total = Decimal("0.00")
                 created_lines = []
-                for item_id, qty, override_tax_rate, override_unit_price in normalized_items:
+                for item_id, qty, override_tax_rate, override_unit_price, description_provided, normalized_description in normalized_items:
                     db_item = items_by_id[item_id]
                     unit_price = _q2(override_unit_price if override_unit_price is not None else db_item.unit_price)
                     line_subtotal = _q2(unit_price * qty)
@@ -2399,7 +2413,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                         InvoiceItem(
                             invoice=invoice,
                             item=db_item,
-                            description=db_item.description,
+                            description=normalized_description if description_provided else db_item.description,
                             unit_of_measure=db_item.unit_of_measure,
                             quantity=qty,
                             unit_price=unit_price,

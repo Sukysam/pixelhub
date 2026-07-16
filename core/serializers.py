@@ -372,6 +372,7 @@ class ItemDetailSerializer(ItemSerializer):
 class InvoiceItemSerializer(serializers.ModelSerializer):
     item_name = serializers.CharField(source="item.name", read_only=True)
     item_sku = serializers.CharField(source="item.sku", read_only=True)
+    DESCRIPTION_MAX_LENGTH = 500
 
     class Meta:
         model = InvoiceItem
@@ -398,6 +399,13 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
     def validate_quantity(self, value):
         if value < 1:
             raise serializers.ValidationError("quantity must be >= 1")
+        return value
+
+    def validate_description(self, value):
+        if value is None:
+            return value
+        if len(value) > self.DESCRIPTION_MAX_LENGTH:
+            raise serializers.ValidationError(f"description must be {self.DESCRIPTION_MAX_LENGTH} characters or fewer")
         return value
 
     def validate_unit_price(self, value):
