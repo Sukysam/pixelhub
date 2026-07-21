@@ -72,10 +72,40 @@ export class ApiError extends Error {
 }
 
 const AUTH_CHANGE_EVENT = "pixelhub:authchange";
+const DATA_CHANGE_EVENT = "pixelhub:datachange";
+const DATA_CHANGE_STORAGE_KEY = "pixelhub:datachange";
 
 function notifyAuthChanged() {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+}
+
+export type DataChangeScope = "all" | "expenses" | "invoices" | "receipts" | "inventory" | "customers";
+
+export function notifyDataChanged(scope: DataChangeScope = "all") {
+  if (typeof window === "undefined") return;
+  const payload = JSON.stringify({ scope, ts: Date.now() });
+  try {
+    window.localStorage.setItem(DATA_CHANGE_STORAGE_KEY, payload);
+  } catch {
+    // Ignore storage quota or privacy-mode failures and still emit an in-page event.
+  }
+  window.dispatchEvent(new CustomEvent(DATA_CHANGE_EVENT, { detail: { scope, ts: Date.now() } }));
+}
+
+export function isDataChangeStorageKey(key: string | null): boolean {
+  return key === DATA_CHANGE_STORAGE_KEY;
+}
+
+export function parseDataChangePayload(raw: string | null): { scope: DataChangeScope; ts?: number } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { scope?: DataChangeScope; ts?: number };
+    if (!parsed.scope) return null;
+    return { scope: parsed.scope, ts: parsed.ts };
+  } catch {
+    return null;
+  }
 }
 
 export function getAuthToken(): string | null {

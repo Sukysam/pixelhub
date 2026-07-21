@@ -8,7 +8,19 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { AlertTriangle, DollarSign, FileText } from "lucide-react";
-import { ApiError, API_BASE_URL, apiRequest, clearAuthToken, clearAuthUser, getAuthUser, getErrorMessage, setAuthUser, type AuthUser } from "@/lib/api";
+import {
+  ApiError,
+  API_BASE_URL,
+  apiRequest,
+  clearAuthToken,
+  clearAuthUser,
+  getAuthUser,
+  getErrorMessage,
+  isDataChangeStorageKey,
+  parseDataChangePayload,
+  setAuthUser,
+  type AuthUser,
+} from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -306,6 +318,47 @@ function DashboardInner() {
     loadOverview();
     loadTopProducts();
   }, [loadOverview, loadTopProducts]);
+
+  useEffect(() => {
+    const refreshExpenseSummary = () => {
+      void loadOverview();
+      void loadActivity();
+    };
+
+    const onStorage = (event: StorageEvent) => {
+      if (!isDataChangeStorageKey(event.key)) return;
+      const payload = parseDataChangePayload(event.newValue);
+      if (!payload || (payload.scope !== "expenses" && payload.scope !== "all")) return;
+      refreshExpenseSummary();
+    };
+
+    const onDataChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ scope?: string }>).detail;
+      const scope = detail?.scope;
+      if (scope !== "expenses" && scope !== "all") return;
+      refreshExpenseSummary();
+    };
+
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === "visible") refreshExpenseSummary();
+    };
+
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("pixelhub:datachange", onDataChange as EventListener);
+    window.addEventListener("focus", onVisibilityOrFocus);
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    const intervalId = window.setInterval(() => {
+      void loadOverview();
+    }, 30_000);
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("pixelhub:datachange", onDataChange as EventListener);
+      window.removeEventListener("focus", onVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.clearInterval(intervalId);
+    };
+  }, [loadActivity, loadOverview]);
 
   useEffect(() => {
     loadActivity();

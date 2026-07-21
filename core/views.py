@@ -1140,6 +1140,8 @@ def _pct_change(current: Decimal, previous: Decimal) -> Optional[str]:
 
 
 class FinanceViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+
     def list(self, request):
         period = request.query_params.get("period", "6m")
         start, end, prev_start, prev_end, granularity = _period_range(period)
@@ -1309,6 +1311,8 @@ class FinanceViewSet(viewsets.ViewSet):
 
 
 class DashboardViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+
     def list(self, request):
         total_revenue = Receipt.objects.filter(is_deleted=False).aggregate(total=Coalesce(Sum("amount_paid"), Decimal("0.00")))[
             "total"

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getAuthUser, getErrorMessage } from "@/lib/api";
+import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getAuthUser, getErrorMessage, notifyDataChanged } from "@/lib/api";
 
 type Expense = {
   id: number;
@@ -373,6 +373,7 @@ export default function ExpensesPage() {
         setExpenses((prev) => [saved, ...prev]);
         setSuccess("Expense created.");
       }
+      notifyDataChanged("expenses");
       resetExpenseForm();
       setIsExpenseDialogOpen(false);
     } catch (e: unknown) {
@@ -430,6 +431,7 @@ export default function ExpensesPage() {
       await apiRequest<void>(`/expenses/${expense.id}/?updated_at=${encodeURIComponent(expense.updated_at)}`, { method: "DELETE" });
       setExpenses((prev) => prev.filter((row) => row.id !== expense.id));
       setSuccess("Expense deleted.");
+      notifyDataChanged("expenses");
     } catch (e: unknown) {
       setError(toUserMessage(e, "Failed to delete expense"));
     }
@@ -537,6 +539,7 @@ export default function ExpensesPage() {
       setImportResult(result);
       if (!importDryRun) {
         setSuccess("Expense import completed.");
+        notifyDataChanged("expenses");
         await loadExpenses();
       }
     } catch (e: unknown) {

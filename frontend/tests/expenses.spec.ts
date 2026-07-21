@@ -110,3 +110,60 @@ test("user can create edit and delete source accounts inside expenses", async ({
   await expect(expensesTable.locator("tbody tr").first()).toContainText(updatedAccountName);
   await expect(expensesTable.locator("tbody tr").first()).toContainText("Closed");
 });
+
+test("dashboard expense summary refreshes after expense create and update", async ({ page, request }) => {
+  const session = await createStandardBusinessUserSession(request);
+  await setSession(page, request, session.token);
+
+  const dashboardPage = await page.context().newPage();
+  await setSession(dashboardPage, request, session.token);
+
+  await dashboardPage.goto("/");
+  await expect(dashboardPage.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
+  const expenseCard = dashboardPage.locator("div.border.rounded-lg.p-4").filter({ has: dashboardPage.getByText("Expense") }).first();
+  await expect(expenseCard).toContainText("0.00", { timeout: 30_000 });
+
+  await page.goto("/expenses");
+  await expect(page.getByRole("heading", { name: "Expenses" })).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Add Expense" }).click();
+  const expenseDialog = page.locator('[role="dialog"]').filter({ hasText: "Add Expense" }).first();
+  await expect(expenseDialog).toBeVisible({ timeout: 30_000 });
+  await expenseDialog.locator("#exp_amount").fill("12.50");
+  await expenseDialog.locator("#exp_category").fill("Travel");
+  await expenseDialog.locator("#exp_cost").fill("CC-DASH");
+  const createExpenseResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/expenses/") &&
+      response.request().method() === "POST" &&
+      response.status() === 201
+  );
+  await expenseDialog.getByRole("button", { name: "Create Expense" }).click();
+  await createExpenseResponse;
+  await expect(page.getByText("Expense created.")).toBeVisible({ timeout: 30_000 });
+
+  await expect
+    .poll(async () => ((await expenseCard.textContent()) ?? "").includes("12.50"), { timeout: 30_000 })
+    .toBeTruthy();
+
+  const expenseRow = page.locator("tbody tr").filter({ hasText: "Travel" }).first();
+  await expect(expenseRow).toBeVisible({ timeout: 30_000 });
+  await expenseRow.getByRole("button", { name: "Edit" }).click();
+  const editDialog = page.locator('[role="dialog"]').filter({ hasText: "Edit Expense" }).first();
+  await expect(editDialog).toBeVisible({ timeout: 30_000 });
+  await editDialog.locator("#exp_amount").fill("18.75");
+  const updateExpenseResponse = page.waitForResponse(
+    (response) =>
+      /\/api\/expenses\/\d+\/$/.test(response.url()) &&
+      response.request().method() === "PATCH" &&
+      response.status() === 200
+  );
+  await editDialog.getByRole("button", { name: "Save Changes" }).click();
+  await updateExpenseResponse;
+  await expect(page.getByText("Expense updated.")).toBeVisible({ timeout: 30_000 });
+
+  await expect
+    .poll(async () => ((await expenseCard.textContent()) ?? "").includes("18.75"), { timeout: 30_000 })
+    .toBeTruthy();
+
+  await dashboardPage.close();
+});

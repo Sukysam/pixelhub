@@ -1216,6 +1216,26 @@ class PersistenceTests(APITestCase):
         self.assertIn("products", top.data)
         self.assertGreaterEqual(len(top.data["products"]), 1)
 
+    def test_finance_overview_returns_zero_expenses_and_reflects_expense_updates(self):
+        today = timezone.localdate()
+        initial = self.client.get(reverse("finance-list") + "?period=1m")
+        self.assertEqual(initial.status_code, status.HTTP_200_OK)
+        self.assertEqual(initial.data["expense_total"], "0.00")
+        self.assertTrue(all(point["expense"] == "0.00" for point in initial.data["points"]))
+
+        expense = Expense.objects.create(amount=Decimal("12.50"), expense_date=today, category="Office", description="Printer paper")
+        after_create = self.client.get(reverse("finance-list") + "?period=1m")
+        self.assertEqual(after_create.status_code, status.HTTP_200_OK)
+        self.assertEqual(after_create.data["expense_total"], "12.50")
+        self.assertIn("12.50", {point["expense"] for point in after_create.data["points"]})
+
+        expense.amount = Decimal("18.75")
+        expense.save(update_fields=["amount", "updated_at"])
+        after_update = self.client.get(reverse("finance-list") + "?period=1m")
+        self.assertEqual(after_update.status_code, status.HTTP_200_OK)
+        self.assertEqual(after_update.data["expense_total"], "18.75")
+        self.assertIn("18.75", {point["expense"] for point in after_update.data["points"]})
+
 
 class SettingsTests(APITestCase):
     def setUp(self):
