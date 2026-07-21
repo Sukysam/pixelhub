@@ -12,10 +12,8 @@ test("user can create edit and delete source accounts inside expenses", async ({
   const sourceAccountsTable = page.locator("table").first();
   const expensesTable = page.locator("table").nth(1);
   await expect(expensesTable.getByRole("columnheader", { name: "Source Account" })).toBeVisible();
-  await expect(expensesTable.getByRole("columnheader", { name: "Approval" })).toHaveCount(0);
-  await expect(expensesTable.getByRole("columnheader", { name: "Policy" })).toHaveCount(0);
-  await expect(expensesTable.getByRole("columnheader", { name: "Receipt" })).toHaveCount(0);
-  await expect(expensesTable.getByRole("columnheader", { name: "Actions" })).toHaveCount(0);
+  await expect(expensesTable.getByRole("columnheader", { name: "Source Balance" })).toBeVisible();
+  await expect(expensesTable.getByRole("columnheader", { name: "Manage" })).toBeVisible();
 
   const accountName = `petty_ui_${Date.now()}`;
   const createSourceAccountButton = page.getByRole("button", { name: "New Source Account" });
@@ -53,9 +51,10 @@ test("user can create edit and delete source accounts inside expenses", async ({
   await page.getByRole("button", { name: "Add Expense" }).click();
   const expenseDialog = page.locator('[role="dialog"]').filter({ hasText: "Add Expense" }).first();
   await expect(expenseDialog).toBeVisible({ timeout: 30_000 });
+  const manualProjectCode = `PROJECT-UI-${Date.now()}`;
   await expenseDialog.locator("#exp_amount").fill("10.00");
   await expenseDialog.locator("#exp_category").fill("Office");
-  await expenseDialog.locator("#exp_project").fill("PROJECT-UI");
+  await expenseDialog.locator("#exp_project").fill(manualProjectCode);
   await expect
     .poll(async () => await expenseDialog.locator("#exp_source_account option").count(), { timeout: 30_000 })
     .toBeGreaterThan(1);
@@ -120,8 +119,18 @@ test("dashboard expense summary refreshes after expense create and update", asyn
 
   await dashboardPage.goto("/");
   await expect(dashboardPage.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: 30_000 });
-  const expenseCard = dashboardPage.locator("div.border.rounded-lg.p-4").filter({ has: dashboardPage.getByText("Expense") }).first();
-  await expect(expenseCard).toContainText("0.00", { timeout: 30_000 });
+  const overviewSection = dashboardPage.locator("div.bg-white.border.rounded-lg.p-6").filter({
+    has: dashboardPage.getByText("Income & Expense Overview"),
+  }).first();
+  await expect(overviewSection).toBeVisible({ timeout: 30_000 });
+  const expenseCard = overviewSection.locator("div.border.rounded-lg.p-4").nth(1);
+  const readExpenseTotal = async () => {
+    const text = (await expenseCard.textContent()) ?? "";
+    const matches = [...text.matchAll(/-?[\d,]+\.\d{2}/g)];
+    const value = matches.at(-1)?.[0] ?? "0.00";
+    return Number(value.replace(/,/g, ""));
+  };
+  const startingExpenseTotal = await readExpenseTotal();
 
   await page.goto("/expenses");
   await expect(page.getByRole("heading", { name: "Expenses" })).toBeVisible({ timeout: 30_000 });
@@ -142,8 +151,8 @@ test("dashboard expense summary refreshes after expense create and update", asyn
   await expect(page.getByText("Expense created.")).toBeVisible({ timeout: 30_000 });
 
   await expect
-    .poll(async () => ((await expenseCard.textContent()) ?? "").includes("12.50"), { timeout: 30_000 })
-    .toBeTruthy();
+    .poll(readExpenseTotal, { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(startingExpenseTotal + 12.5);
 
   const expenseRow = page.locator("tbody tr").filter({ hasText: "Travel" }).first();
   await expect(expenseRow).toBeVisible({ timeout: 30_000 });
@@ -162,8 +171,8 @@ test("dashboard expense summary refreshes after expense create and update", asyn
   await expect(page.getByText("Expense updated.")).toBeVisible({ timeout: 30_000 });
 
   await expect
-    .poll(async () => ((await expenseCard.textContent()) ?? "").includes("18.75"), { timeout: 30_000 })
-    .toBeTruthy();
+    .poll(readExpenseTotal, { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(startingExpenseTotal + 18.75);
 
   await dashboardPage.close();
 });

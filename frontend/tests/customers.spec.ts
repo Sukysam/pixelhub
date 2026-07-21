@@ -15,8 +15,28 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
     const loadMoreButton = page.getByRole("button", { name: /load more/i });
     if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) break;
     const previousRowCount = await page.locator("tbody tr").count();
+    const loadMoreResponse = page
+      .waitForResponse(
+        (response) =>
+          response.url().startsWith(`${API_BASE_URL}/customers/`) &&
+          response.request().method() === "GET" &&
+          response.status() === 200,
+        { timeout: 10_000 }
+      )
+      .catch(() => null);
     await loadMoreButton.click();
-    await expect.poll(async () => await page.locator("tbody tr").count(), { timeout: 10_000 }).not.toBe(previousRowCount);
+    await loadMoreResponse;
+    await expect
+      .poll(
+        async () => {
+          if ((await row.count()) > 0) return "row-visible";
+          if ((await page.locator("tbody tr").count()) !== previousRowCount) return "row-count-changed";
+          if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) return "pagination-finished";
+          return "waiting";
+        },
+        { timeout: 10_000 }
+      )
+      .not.toBe("waiting");
   }
   return row;
 }
@@ -81,9 +101,7 @@ test("admin can preview internal customer notes from the customers list after pa
       response.request().method() === "GET" &&
       response.status() === 200
   );
-  await previewButton.focus();
-  await page.keyboard.press("Enter");
-  await detailResponse;
+  await Promise.all([detailResponse, previewButton.click()]);
 
   const dialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: `Internal Customer Notes: ${customerName}` }) });
   await expect(dialog).toBeVisible({ timeout: 30_000 });
