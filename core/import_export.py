@@ -19,6 +19,7 @@ from django.utils import timezone
 from openpyxl import load_workbook
 
 from .models import Customer, Expense, Invoice, InvoiceItem, Item, SourceAccount
+from .project_code_service import generate_next_project_code, normalize_project_code
 
 CENTS = Decimal("0.01")
 logger = logging.getLogger(__name__)
@@ -622,6 +623,14 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
             lowered = str(account.name or "").strip().lower()
             if lowered in source_account_names:
                 source_accounts_by_name[lowered] = account
+    reserved_project_codes: set[str] = set()
+    existing_project_codes = {
+        normalize_project_code(code)
+        for code in Expense.objects.filter(is_deleted=False, project_code__isnull=False)
+        .exclude(project_code="")
+        .values_list("project_code", flat=True)
+    }
+    generated_project_codes: list[str] = []
 
     def _clean(value) -> str:
         return str(value or "").strip()
@@ -659,10 +668,11 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         category = _clean(r.get("category"))
         if not category:
             row_errors.append({"row": row_num, "field": "category", "message": "category is required"})
-        project_code = _clean(r.get("project_code")) or None
+        project_code = normalize_project_code(r.get("project_code")) or None
         cost_center = _clean(r.get("cost_center")) or None
-        if not project_code and not cost_center:
-            row_errors.append({"row": row_num, "field": "project_code", "message": "project_code or cost_center is required"})
+        if project_code:
+            if project_code in existing_project_codes:
+                row_errors.append({"row": row_num, "field": "project_code", "message": "project_code already exists"})
 
         assigned_to_name = _clean(r.get("assigned_to")) or None
         assigned_to = users_by_name.get(assigned_to_name) if assigned_to_name else actor
@@ -678,8 +688,14 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
             elif source_account.status != SourceAccount.STATUS_ACTIVE:
                 row_errors.append({"row": row_num, "field": "source_account", "message": "Source account must be active"})
 
+        if project_code and project_code in reserved_project_codes:
+            row_errors.append({"row": row_num, "field": "project_code", "message": "project_code is duplicated in the import file"})
+
         if row_errors:
             return None, row_errors
+
+        if project_code:
+            reserved_project_codes.add(project_code)
 
         return (
             Expense(
@@ -701,10 +717,12 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
     def _persist(valid_items: list[Expense]) -> tuple[int, list[dict] | None]:
         created = 0
         with transaction.atomic():
-            for i in range(0, len(valid_items), 1000):
-                batch = valid_items[i : i + 1000]
-                Expense.objects.bulk_create(batch, batch_size=1000)
-                created += len(batch)
+            for expense in valid_items:
+                if not expense.project_code:
+                    expense.project_code = generate_next_project_code(year=(expense.expense_date or timezone.localdate()).year)
+                    generated_project_codes.append(expense.project_code)
+                expense.save()
+                created += 1
         return created, None
 
     status_code, payload = process_batch_import(
@@ -714,4 +732,6 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         dry_run=dry_run,
         rollback_on_error=rollback_on_error,
     )
+    if generated_project_codes:
+        payload["generated_project_codes"] = generated_project_codes
     return status_code, payload

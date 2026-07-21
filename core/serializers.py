@@ -6,6 +6,7 @@ from django.db.models import Sum
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from .expense_security import decrypt_expense_text
+from .project_code_service import generate_next_project_code, normalize_project_code
 from .models import (
     Customer,
     Item,
@@ -620,6 +621,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
     source_account_name = serializers.CharField(source="source_account.name", read_only=True)
     source_account_status = serializers.CharField(source="source_account.status", read_only=True)
+    source_account_currency_code = serializers.CharField(source="source_account.currency.code", read_only=True)
     source_account = serializers.PrimaryKeyRelatedField(
         queryset=SourceAccount.objects.filter(is_deleted=False),
         required=False,
@@ -641,6 +643,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
             "source_account",
             "source_account_name",
             "source_account_status",
+            "source_account_currency_code",
             "assigned_to",
             "assigned_to_name",
             "created_by",
@@ -665,6 +668,19 @@ class ExpenseSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("amount must be > 0")
         return value
 
+    def validate_project_code(self, value):
+        normalized = normalize_project_code(value)
+        if not normalized:
+            if self.instance is not None and str(getattr(self.instance, "project_code", "") or "").strip():
+                raise serializers.ValidationError("project_code cannot be blank once assigned")
+            return None
+        existing = Expense.objects.filter(project_code=normalized, is_deleted=False)
+        if self.instance is not None:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError("project_code already exists")
+        return normalized
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         for field_name in ("description", "merchant_reference"):
@@ -676,17 +692,9 @@ class ExpenseSerializer(serializers.ModelSerializer):
         category = str(
             attrs.get("category") if "category" in attrs else getattr(self.instance, "category", "") or ""
         ).strip()
-        project_code = str(
-            attrs.get("project_code") if "project_code" in attrs else getattr(self.instance, "project_code", "") or ""
-        ).strip()
-        cost_center = str(
-            attrs.get("cost_center") if "cost_center" in attrs else getattr(self.instance, "cost_center", "") or ""
-        ).strip()
         chosen_source_account = attrs.get("source_account") if "source_account" in attrs else getattr(self.instance, "source_account", None)
         if not category:
             raise serializers.ValidationError({"category": "category is required"})
-        if not project_code and not cost_center:
-            raise serializers.ValidationError({"detail": "Either project_code or cost_center is required"})
         if expense_date and expense_date > timezone.localdate() + timedelta(days=1):
             raise serializers.ValidationError({"expense_date": "expense_date cannot be more than one day in the future"})
         if chosen_source_account is not None and chosen_source_account.status != SourceAccount.STATUS_ACTIVE:
@@ -695,10 +703,17 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         request = self.context.get("request")
+        generated_project_code = False
+        if not validated_data.get("project_code"):
+            expense_date = validated_data.get("expense_date") or timezone.localdate()
+            validated_data["project_code"] = generate_next_project_code(year=expense_date.year)
+            generated_project_code = True
         if request is not None and getattr(request.user, "is_authenticated", False):
             validated_data.setdefault("created_by", request.user)
             validated_data.setdefault("assigned_to", request.user)
-        return super().create(validated_data)
+        expense = super().create(validated_data)
+        expense._generated_project_code = generated_project_code
+        return expense
 
     def update(self, instance, validated_data):
         return super().update(instance, validated_data)
@@ -714,6 +729,7 @@ class CurrencySerializer(serializers.ModelSerializer):
 class SourceAccountSerializer(serializers.ModelSerializer):
     currency_code = serializers.CharField(source="currency.code", read_only=True)
     active_expense_count = serializers.SerializerMethodField()
+    current_balance = serializers.SerializerMethodField()
 
     class Meta:
         model = SourceAccount
@@ -726,12 +742,13 @@ class SourceAccountSerializer(serializers.ModelSerializer):
             "currency_code",
             "status",
             "active_expense_count",
+            "current_balance",
             "created_at",
             "updated_at",
             "is_deleted",
             "deleted_at",
         )
-        read_only_fields = ("id", "currency_code", "active_expense_count", "created_at", "updated_at", "is_deleted", "deleted_at")
+        read_only_fields = ("id", "currency_code", "active_expense_count", "current_balance", "created_at", "updated_at", "is_deleted", "deleted_at")
 
     def validate_name(self, value):
         normalized = re.sub(r"\s+", " ", str(value or "").strip())
@@ -748,6 +765,12 @@ class SourceAccountSerializer(serializers.ModelSerializer):
         if hasattr(obj, "active_expense_count"):
             return int(obj.active_expense_count or 0)
         return int(obj.expenses.filter(is_deleted=False).count())
+
+    def get_current_balance(self, obj):
+        if hasattr(obj, "current_balance"):
+            return str(obj.current_balance)
+        spent = obj.expenses.filter(is_deleted=False).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return str(Decimal(str(obj.initial_balance or 0)) - Decimal(str(spent or 0)))
 
 
 class ExchangeRateSerializer(serializers.ModelSerializer):

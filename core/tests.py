@@ -2363,6 +2363,7 @@ class CustomerExpenseImportExportTests(APITestCase):
         self.assertEqual(len(list_res.data), 2)
         petty1_row = next(row for row in list_res.data if row["id"] == self.petty1.id)
         self.assertEqual(petty1_row["active_expense_count"], 1)
+        self.assertEqual(Decimal(petty1_row["current_balance"]), Decimal("85.00"))
 
         missing_confirm = self.client.delete(f"/api/source-accounts/{self.petty1.id}/", {}, format="json")
         self.assertEqual(missing_confirm.status_code, status.HTTP_400_BAD_REQUEST)
@@ -2395,6 +2396,50 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
         self.assertEqual(negative_balance.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("initial_balance", negative_balance.data)
+
+    def test_expense_project_code_generation_duplicate_blocking_and_balance_export(self):
+        next_code_res = self.client.get("/api/expenses/next_project_code/")
+        self.assertEqual(next_code_res.status_code, status.HTTP_200_OK)
+        self.assertRegex(next_code_res.data["project_code"], r"^PRJ-\d{4}-\d{4}$")
+
+        generated_res = self.client.post(
+            "/api/expenses/",
+            {
+                "amount": "25.00",
+                "expense_date": str(timezone.localdate()),
+                "category": "Travel",
+                "source_account": self.petty1.id,
+            },
+            format="json",
+        )
+        self.assertEqual(generated_res.status_code, status.HTTP_201_CREATED)
+        self.assertRegex(generated_res.data["project_code"], r"^PRJ-\d{4}-\d{4}$")
+        self.assertEqual(generated_res.data["source_account_currency_code"], "USD")
+        create_audit = AuditLog.objects.filter(action="create", object_id=str(generated_res.data["id"])).first()
+        self.assertIsNotNone(create_audit)
+        self.assertEqual(create_audit.changes["project_code"]["to"], generated_res.data["project_code"])
+        self.assertTrue(create_audit.changes["project_code"]["generated"])
+
+        duplicate_res = self.client.post(
+            "/api/expenses/",
+            {
+                "amount": "10.00",
+                "expense_date": str(timezone.localdate()),
+                "category": "Travel",
+                "project_code": generated_res.data["project_code"].lower(),
+                "source_account": self.petty1.id,
+            },
+            format="json",
+        )
+        self.assertEqual(duplicate_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("project_code", duplicate_res.data)
+
+        export_res = self.client.get("/api/expenses/export/?file_format=csv&fields=source_account,source_account_balance,project_code")
+        self.assertEqual(export_res.status_code, status.HTTP_200_OK)
+        export_body = b"".join(export_res.streaming_content).decode("utf-8")
+        self.assertIn("petty1", export_body)
+        self.assertIn("75.00", export_body)
+        self.assertIn(generated_res.data["project_code"], export_body)
 
     def test_expense_crud_source_account_filters_export_and_removed_endpoints(self):
         create_res = self.client.post(
@@ -2694,10 +2739,11 @@ class CustomerExpenseImportExportTests(APITestCase):
                 "oops,2026-05-01,Office,Bad amount,Vendor,REF-1,PRJ-1,,,petty1,\n"
                 "-5.00,2026-05-01,Office,Negative amount,Vendor,REF-2,PRJ-1,,,petty1,\n"
                 "10.00,not-a-date,Office,Bad date,Vendor,REF-3,PRJ-1,,,petty1,\n"
-                "15.00,2026-05-01,Office,Missing cost refs,Vendor,REF-4,,,,petty1,\n"
+                "15.00,2026-05-01,Office,Generated project code,Vendor,REF-4,,,petty1,\n"
                 "25.00,2026-05-01,Office,Unknown assignee,Vendor,REF-6,PRJ-1,,petty1,ghost-user\n"
                 f"1500.00,{timezone.localdate() + timedelta(days=2)},Travel,Future expense,Vendor,REF-7,PRJ-2,,petty2,{self.user.username}\n"
                 f"35.00,{timezone.localdate()},Meals,Created expense,Vendor,REF-8,PRJ-3,,petty2,{self.user.username}\n"
+                f"45.00,{timezone.localdate()},Meals,Duplicate project code,Vendor,REF-9,PRJ-3,,petty2,{self.user.username}\n"
             ),
         )
 
@@ -2709,19 +2755,23 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(payload["imported"], 2)
         messages = {(err["field"], err["message"]) for err in payload["errors"]}
         self.assertIn(("amount", "Invalid amount"), messages)
         self.assertIn(("amount", "amount must be > 0"), messages)
         self.assertIn(("expense_date", "Invalid date. Use YYYY-MM-DD"), messages)
-        self.assertIn(("project_code", "project_code or cost_center is required"), messages)
+        self.assertIn(("project_code", "project_code is duplicated in the import file"), messages)
         self.assertIn(("expense_date", "expense_date cannot be more than one day in the future"), messages)
         self.assertIn(("assigned_to", "Assigned user not found"), messages)
+        self.assertGreaterEqual(len(payload.get("generated_project_codes") or []), 1)
 
         created = Expense.objects.filter(merchant_reference__isnull=False, is_deleted=False).order_by("id")
-        self.assertEqual(created.count(), 1)
+        self.assertEqual(created.count(), 2)
         self.assertTrue(all(exp.created_by == self.user for exp in created))
-        self.assertEqual(created.first().source_account_id, self.petty2.id)
+        created_by_reference = {decrypt_expense_text(exp.merchant_reference): exp for exp in created}
+        self.assertEqual(created_by_reference["REF-8"].source_account_id, self.petty2.id)
+        generated_imported = created_by_reference["REF-4"]
+        self.assertRegex(generated_imported.project_code or "", r"^PRJ-\d{4}-\d{4}$")
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")

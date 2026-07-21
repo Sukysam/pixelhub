@@ -23,6 +23,7 @@ type Expense = {
   source_account: number | null;
   source_account_name: string | null;
   source_account_status: string | null;
+  source_account_currency_code: string | null;
   assigned_to: number | null;
   assigned_to_name: string | null;
   created_by: number | null;
@@ -39,6 +40,7 @@ type SourceAccount = {
   currency_code: string;
   status: string;
   active_expense_count: number;
+  current_balance: string;
   updated_at: string;
 };
 
@@ -81,6 +83,11 @@ const EMPTY_EXPENSE_FORM: ExpenseForm = {
   cost_center: "",
   source_account: "",
 };
+
+const createEmptyExpenseForm = (): ExpenseForm => ({
+  ...EMPTY_EXPENSE_FORM,
+  expense_date: new Date().toISOString().slice(0, 10),
+});
 
 const EMPTY_SOURCE_ACCOUNT_FORM: SourceAccountForm = {
   name: "",
@@ -125,7 +132,7 @@ export default function ExpensesPage() {
   const [mineOnly, setMineOnly] = useState(false);
   const [isExpenseDialogOpen, setIsExpenseDialogOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
-  const [expenseForm, setExpenseForm] = useState<ExpenseForm>(EMPTY_EXPENSE_FORM);
+  const [expenseForm, setExpenseForm] = useState<ExpenseForm>(() => createEmptyExpenseForm());
   const [isExpenseSaving, setIsExpenseSaving] = useState(false);
   const [sourceAccountDialogOpen, setSourceAccountDialogOpen] = useState(false);
   const [editingSourceAccount, setEditingSourceAccount] = useState<SourceAccount | null>(null);
@@ -146,6 +153,7 @@ export default function ExpensesPage() {
     project_code: true,
     cost_center: true,
     source_account: true,
+      source_account_balance: true,
     assigned_to: true,
   });
   const [importOpen, setImportOpen] = useState(false);
@@ -172,6 +180,7 @@ export default function ExpensesPage() {
       "project_code",
       "cost_center",
       "source_account",
+      "source_account_balance",
       "assigned_to",
       "created_by",
       "created_at",
@@ -184,6 +193,25 @@ export default function ExpensesPage() {
     () => sourceAccounts.filter((account) => account.status === "active"),
     [sourceAccounts]
   );
+  const sourceAccountsById = useMemo(
+    () => new Map(sourceAccounts.map((account) => [account.id, account])),
+    [sourceAccounts]
+  );
+
+  const formatCurrencyAmount = useCallback((amount: string | null | undefined, currencyCode?: string | null) => {
+    const parsed = Number(amount);
+    if (!Number.isFinite(parsed)) return null;
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: currencyCode || "USD",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(parsed);
+    } catch {
+      return `${currencyCode || "USD"} ${parsed.toFixed(2)}`;
+    }
+  }, []);
 
   const toUserMessage = useCallback((e: unknown, fallback: string) => {
     if (e instanceof ApiError) {
@@ -260,6 +288,14 @@ export default function ExpensesPage() {
     void loadSourceAccounts();
   }, [loadSourceAccounts]);
 
+  useEffect(() => {
+    if (!canReadSourceAccounts) return;
+    const intervalId = window.setInterval(() => {
+      void loadSourceAccounts();
+    }, 30_000);
+    return () => window.clearInterval(intervalId);
+  }, [canReadSourceAccounts, loadSourceAccounts]);
+
   const loadMore = async () => {
     if (!nextUrl) return;
     try {
@@ -275,7 +311,7 @@ export default function ExpensesPage() {
   };
 
   const resetExpenseForm = () => {
-    setExpenseForm(EMPTY_EXPENSE_FORM);
+    setExpenseForm(createEmptyExpenseForm());
     setEditingExpense(null);
   };
 
@@ -321,6 +357,21 @@ export default function ExpensesPage() {
       currency: currencies[0] ? String(currencies[0].id) : "",
     });
     setSourceAccountDialogOpen(true);
+  };
+
+  const openCreateExpense = async () => {
+    setError(null);
+    setSuccess(null);
+    const nextForm = createEmptyExpenseForm();
+    setEditingExpense(null);
+    try {
+      const result = await apiRequest<{ project_code: string }>("/expenses/next_project_code/");
+      nextForm.project_code = result.project_code || "";
+    } catch (e: unknown) {
+      setError(toUserMessage(e, "Failed to generate the next project code"));
+    }
+    setExpenseForm(nextForm);
+    setIsExpenseDialogOpen(true);
   };
 
   const openEditSourceAccount = (account: SourceAccount) => {
@@ -373,6 +424,7 @@ export default function ExpensesPage() {
         setExpenses((prev) => [saved, ...prev]);
         setSuccess("Expense created.");
       }
+      if (canReadSourceAccounts) await loadSourceAccounts();
       notifyDataChanged("expenses");
       resetExpenseForm();
       setIsExpenseDialogOpen(false);
@@ -431,6 +483,7 @@ export default function ExpensesPage() {
       await apiRequest<void>(`/expenses/${expense.id}/?updated_at=${encodeURIComponent(expense.updated_at)}`, { method: "DELETE" });
       setExpenses((prev) => prev.filter((row) => row.id !== expense.id));
       setSuccess("Expense deleted.");
+      if (canReadSourceAccounts) await loadSourceAccounts();
       notifyDataChanged("expenses");
     } catch (e: unknown) {
       setError(toUserMessage(e, "Failed to delete expense"));
@@ -539,6 +592,7 @@ export default function ExpensesPage() {
       setImportResult(result);
       if (!importDryRun) {
         setSuccess("Expense import completed.");
+        if (canReadSourceAccounts) await loadSourceAccounts();
         notifyDataChanged("expenses");
         await loadExpenses();
       }
@@ -574,10 +628,7 @@ export default function ExpensesPage() {
             ) : null}
             <Button
               type="button"
-              onClick={() => {
-                resetExpenseForm();
-                setIsExpenseDialogOpen(true);
-              }}
+              onClick={() => void openCreateExpense()}
             >
               <Plus className="mr-2 h-4 w-4" />
               Add Expense
@@ -610,6 +661,7 @@ export default function ExpensesPage() {
                     <th className="px-4 py-3">Type</th>
                     <th className="px-4 py-3">Currency</th>
                     <th className="px-4 py-3">Initial Balance</th>
+                    <th className="px-4 py-3">Current Balance</th>
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Linked Expenses</th>
                     <th className="px-4 py-3">Manage</th>
@@ -618,13 +670,13 @@ export default function ExpensesPage() {
                 <tbody className="divide-y divide-gray-200">
                   {sourceAccountsLoading ? (
                     <tr>
-                      <td className="px-4 py-6 text-gray-500" colSpan={7}>
+                      <td className="px-4 py-6 text-gray-500" colSpan={8}>
                         Loading source accounts...
                       </td>
                     </tr>
                   ) : sourceAccounts.length === 0 ? (
                     <tr>
-                      <td className="px-4 py-6 text-gray-500" colSpan={7}>
+                      <td className="px-4 py-6 text-gray-500" colSpan={8}>
                         No source accounts created yet.
                       </td>
                     </tr>
@@ -634,7 +686,8 @@ export default function ExpensesPage() {
                         <td className="px-4 py-4 font-medium">{account.name}</td>
                         <td className="px-4 py-4">{ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}</td>
                         <td className="px-4 py-4">{account.currency_code}</td>
-                        <td className="px-4 py-4">{account.initial_balance}</td>
+                        <td className="px-4 py-4">{formatCurrencyAmount(account.initial_balance, account.currency_code) ?? account.initial_balance}</td>
+                        <td className="px-4 py-4">{formatCurrencyAmount(account.current_balance, account.currency_code) ?? "Balance unavailable"}</td>
                         <td className="px-4 py-4">{ACCOUNT_STATUS_LABELS[account.status] ?? account.status}</td>
                         <td className="px-4 py-4">{account.active_expense_count}</td>
                         <td className="px-4 py-4">
@@ -690,19 +743,20 @@ export default function ExpensesPage() {
                 <th className="px-4 py-3">Vendor</th>
                 <th className="px-4 py-3">Project / Cost Center</th>
                 <th className="px-4 py-3">Source Account</th>
+                <th className="px-4 py-3">Source Balance</th>
                 <th className="px-4 py-3">Manage</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-6 text-gray-500" colSpan={7}>
+                  <td className="px-4 py-6 text-gray-500" colSpan={8}>
                     Loading...
                   </td>
                 </tr>
               ) : expenses.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-gray-500" colSpan={7}>
+                  <td className="px-4 py-6 text-gray-500" colSpan={8}>
                     No expenses found.
                   </td>
                 </tr>
@@ -728,6 +782,44 @@ export default function ExpensesPage() {
                       <div className="text-xs text-gray-500">
                         {expense.source_account_status ? ACCOUNT_STATUS_LABELS[expense.source_account_status] ?? expense.source_account_status : ""}
                       </div>
+                    </td>
+                    <td className="px-4 py-4">
+                      {expense.source_account ? (() => {
+                        const account = sourceAccountsById.get(expense.source_account);
+                        if (!canReadSourceAccounts) {
+                          return (
+                            <div className="text-amber-700">
+                              <div>Balance unavailable</div>
+                              <div className="text-xs">No source account balance access.</div>
+                            </div>
+                          );
+                        }
+                        if (!account) {
+                          return (
+                            <div className="text-red-700">
+                              <div>Balance unavailable</div>
+                              <div className="text-xs">Missing or invalid source account data.</div>
+                            </div>
+                          );
+                        }
+                        const formatted = formatCurrencyAmount(account.current_balance, account.currency_code ?? expense.source_account_currency_code);
+                        if (!formatted) {
+                          return (
+                            <div className="text-red-700">
+                              <div>Balance unavailable</div>
+                              <div className="text-xs">Invalid balance data received.</div>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div>
+                            <div>{formatted}</div>
+                            <div className="text-xs text-gray-500">{account.currency_code}</div>
+                          </div>
+                        );
+                      })() : (
+                        "-"
+                      )}
                     </td>
                     <td className="px-4 py-4">
                       <div className="flex flex-wrap gap-2">
@@ -797,6 +889,7 @@ export default function ExpensesPage() {
               <div className="space-y-2">
                 <Label htmlFor="exp_project">Project Code</Label>
                 <Input id="exp_project" value={expenseForm.project_code} onChange={(e) => setExpenseForm((prev) => ({ ...prev, project_code: e.target.value }))} />
+                <p className="text-xs text-gray-500">Automatically generated in sequence for new expenses. Manual duplicates are blocked.</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="exp_cost">Cost Center</Label>

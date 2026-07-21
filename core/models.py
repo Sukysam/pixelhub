@@ -142,7 +142,7 @@ class Item(SoftDeleteModel):
             models.Index(fields=["is_deleted", "sku"]),
             models.Index(fields=["is_deleted", "name"]),
             models.Index(fields=["is_deleted", "type"]),
-            models.Index(fields=["is_deleted", "category"]),
+            models.Index(fields=["is_deleted", "category"], name="core_item_is_dele_c1d8b5_idx"),
             models.Index(fields=["is_deleted", "stock_quantity"]),
             models.Index(fields=["is_deleted", "last_restock_date"]),
         ]
@@ -329,6 +329,13 @@ class Expense(SoftDeleteModel):
             models.Index(fields=["is_deleted", "cost_center"]),
             models.Index(fields=["is_deleted", "created_at"]),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project_code"],
+                condition=models.Q(is_deleted=False) & models.Q(project_code__isnull=False) & ~models.Q(project_code=""),
+                name="uniq_active_expense_project_code",
+            ),
+        ]
 
     def __str__(self):
         return f"Expense {self.amount} on {self.expense_date}"
@@ -341,6 +348,14 @@ class Expense(SoftDeleteModel):
 
 
 class InvoiceNumberSequence(models.Model):
+    year = models.IntegerField(unique=True)
+    last_number = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.year}: {self.last_number}"
+
+
+class ProjectCodeSequence(models.Model):
     year = models.IntegerField(unique=True)
     last_number = models.IntegerField(default=0)
 
@@ -408,9 +423,9 @@ class SourceAccount(SoftDeleteModel):
 
     class Meta:
         indexes = [
-            models.Index(fields=["is_deleted", "name"]),
-            models.Index(fields=["is_deleted", "status"]),
-            models.Index(fields=["currency", "name"]),
+            models.Index(fields=["is_deleted", "name"], name="core_source_is_dele_name_idx"),
+            models.Index(fields=["is_deleted", "status"], name="core_source_is_dele_status_idx"),
+            models.Index(fields=["currency", "name"], name="core_source_currency_name_idx"),
         ]
 
     def __str__(self):

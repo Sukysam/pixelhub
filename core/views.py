@@ -137,6 +137,7 @@ from .serializers import (
     NIGERIA_COUNTRY_NAME,
     DEFAULT_COUNTRY_CODE,
 )
+from .project_code_service import peek_next_project_code
 
 logger = logging.getLogger(__name__)
 INVOICE_ITEM_DESCRIPTION_MAX_LENGTH = 500
@@ -3356,11 +3357,23 @@ class SourceAccountViewSet(SoftDeleteModelViewSet):
     parser_classes = [parsers.JSONParser, parsers.FormParser]
 
     def get_queryset(self):
+        balance_output = models.DecimalField(max_digits=12, decimal_places=2)
+        spent_amount = Coalesce(
+            Sum("expenses__amount", filter=Q(expenses__is_deleted=False)),
+            Decimal("0.00"),
+            output_field=balance_output,
+        )
         qs = (
             super()
             .get_queryset()
             .select_related("currency")
             .annotate(active_expense_count=Count("expenses", filter=Q(expenses__is_deleted=False)))
+            .annotate(
+                current_balance=models.ExpressionWrapper(
+                    F("initial_balance") - spent_amount,
+                    output_field=balance_output,
+                )
+            )
         )
         params = self.request.query_params
         q = str(params.get("q") or "").strip()
@@ -3377,6 +3390,7 @@ class SourceAccountViewSet(SoftDeleteModelViewSet):
                 "name": "name",
                 "account_type": "account_type",
                 "initial_balance": "initial_balance",
+                "current_balance": "current_balance",
                 "currency": "currency__code",
                 "status": "status",
                 "created_at": "created_at",
@@ -3525,6 +3539,27 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             default=("-expense_date", "-id"),
         )
 
+    def create(self, request, *args, **kwargs):
+        try:
+            self._require_model_perm("add")
+            with transaction.atomic():
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                instance = serializer.save()
+                audit_changes: dict[str, object] = {}
+                if getattr(instance, "_generated_project_code", False):
+                    audit_changes["project_code"] = {"to": instance.project_code, "generated": True}
+                _log_audit(request.user, "create", instance, audit_changes)
+            headers = self.get_success_headers(serializer.data)
+            return self._disable_response_cache(Response(self.get_serializer(instance).data, status=status.HTTP_201_CREATED, headers=headers))
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="expense", operation="create", exc=exc)
+
+    @action(detail=False, methods=["get"], url_path="next_project_code")
+    def next_project_code(self, request):
+        self._require_any_model_perm(["add", "change"])
+        return Response({"project_code": peek_next_project_code()}, status=status.HTTP_200_OK)
+
     @action(detail=False, methods=["get"], url_path="export")
     def export(self, request):
         self._require_model_perm("view")
@@ -3544,6 +3579,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             "project_code",
             "cost_center",
             "source_account",
+            "source_account_balance",
             "assigned_to",
             "created_by",
             "created_at",
@@ -3559,6 +3595,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 "project_code",
                 "cost_center",
                 "source_account",
+                "source_account_balance",
                 "assigned_to",
             ]
         else:
@@ -3578,6 +3615,30 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
         rows_limit = max(1, min(rows_limit, 50000 if fmt in ("csv", "xlsx") else 5000))
 
         qs = self.filter_queryset(self.get_queryset())[:rows_limit]
+        source_account_ids = {
+            expense.source_account_id
+            for expense in qs
+            if getattr(expense, "source_account_id", None) is not None
+        }
+        source_account_balances: dict[int, str] = {}
+        if source_account_ids:
+            balance_output = models.DecimalField(max_digits=12, decimal_places=2)
+            spent_amount = Coalesce(
+                Sum("expenses__amount", filter=Q(expenses__is_deleted=False)),
+                Decimal("0.00"),
+                output_field=balance_output,
+            )
+            for account in (
+                SourceAccount.objects.filter(id__in=source_account_ids)
+                .annotate(
+                    current_balance=models.ExpressionWrapper(
+                        F("initial_balance") - spent_amount,
+                        output_field=balance_output,
+                    )
+                )
+                .only("id")
+            ):
+                source_account_balances[account.id] = f"{Decimal(str(account.current_balance or Decimal('0.00'))):.2f}"
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")
@@ -3592,6 +3653,11 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 return str(getattr(getattr(expense, "created_by", None), "username", "") or "")
             if field == "source_account":
                 return str(getattr(getattr(expense, "source_account", None), "name", "") or "")
+            if field == "source_account_balance":
+                source_account_id = getattr(expense, "source_account_id", None)
+                if source_account_id is None:
+                    return ""
+                return source_account_balances.get(source_account_id, "")
             if field in ("description", "merchant_reference"):
                 return str(decrypt_expense_text(getattr(expense, field, None)) or "")
             if field in ("expense_date",):
@@ -3760,6 +3826,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                     "would_create": int(payload.get("would_create") or 0),
                     "errors": len(payload.get("errors") or []),
                     "flags": len(payload.get("flags") or []),
+                    "generated_project_codes": payload.get("generated_project_codes") or [],
                 },
             )
             return Response(payload, status=status_code)
@@ -3774,6 +3841,7 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
                 "created": int(payload.get("imported") or 0),
                 "errors": len(payload.get("errors") or []),
                 "flags": len(payload.get("flags") or []),
+                "generated_project_codes": payload.get("generated_project_codes") or [],
             },
         )
         return Response(payload, status=status_code)

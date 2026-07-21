@@ -167,3 +167,89 @@ test("dashboard expense summary refreshes after expense create and update", asyn
 
   await dashboardPage.close();
 });
+
+test("expenses page shows source account balances and auto-generates sequential project codes", async ({ page }) => {
+  const session = await createStandardBusinessUserSession(page.request);
+  await setSession(page, page.request, session.token);
+
+  await page.goto("/expenses");
+  await expect(page.getByRole("heading", { name: "Expenses" })).toBeVisible({ timeout: 30_000 });
+
+  const sourceAccountsTable = page.locator("table").first();
+  const expensesTable = page.locator("table").nth(1);
+  await expect(sourceAccountsTable.getByRole("columnheader", { name: "Current Balance" })).toBeVisible();
+
+  const accountName = `bal_ui_${Date.now()}`;
+  await page.getByRole("button", { name: "New Source Account" }).click();
+  const sourceAccountDialog = page.locator('[role="dialog"]').filter({ hasText: "Create Source Account" }).first();
+  await expect(sourceAccountDialog).toBeVisible({ timeout: 30_000 });
+  await sourceAccountDialog.locator("#source_account_name").fill(accountName);
+  await sourceAccountDialog.locator("#source_account_initial_balance").fill("250.00");
+  await expect
+    .poll(async () => await sourceAccountDialog.locator("#source_account_currency option").count(), { timeout: 30_000 })
+    .toBeGreaterThan(1);
+  const currencyValue = await sourceAccountDialog.locator("#source_account_currency option").nth(1).getAttribute("value");
+  await sourceAccountDialog.locator("#source_account_currency").selectOption(currencyValue ?? "");
+  const createAccountResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/source-accounts/") &&
+      response.request().method() === "POST" &&
+      response.status() === 201
+  );
+  await sourceAccountDialog.getByRole("button", { name: "Create Account" }).click();
+  const createdAccount = (await (await createAccountResponse).json()) as { id: number; currency_code: string };
+  await expect(page.getByText("Source account created.")).toBeVisible({ timeout: 30_000 });
+
+  const createdAccountRow = sourceAccountsTable.locator("tbody tr").filter({ hasText: accountName }).first();
+  await expect(createdAccountRow).toBeVisible({ timeout: 30_000 });
+  await expect(createdAccountRow).toContainText("250.00");
+
+  await page.getByRole("button", { name: "Add Expense" }).click();
+  const expenseDialog = page.locator('[role="dialog"]').filter({ hasText: "Add Expense" }).first();
+  await expect(expenseDialog).toBeVisible({ timeout: 30_000 });
+  const generatedProjectCode = await expenseDialog.locator("#exp_project").inputValue();
+  expect(generatedProjectCode).toMatch(/^PRJ-\d{4}-\d{4}$/);
+  await expenseDialog.locator("#exp_amount").fill("10.00");
+  await expenseDialog.locator("#exp_category").fill("Office");
+  await expect
+    .poll(async () => await expenseDialog.locator("#exp_source_account option").count(), { timeout: 30_000 })
+    .toBeGreaterThan(1);
+  await expenseDialog.locator("#exp_source_account").selectOption(String(createdAccount.id));
+  const createExpenseResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/expenses/") &&
+      response.request().method() === "POST" &&
+      response.status() === 201
+  );
+  await expenseDialog.getByRole("button", { name: "Create Expense" }).click();
+  const createdExpense = (await (await createExpenseResponse).json()) as { project_code: string };
+  expect(createdExpense.project_code).toBe(generatedProjectCode);
+  await expect(page.getByText("Expense created.")).toBeVisible({ timeout: 30_000 });
+
+  await expect(expensesTable.locator("tbody tr").first()).toContainText(generatedProjectCode);
+  await expect
+    .poll(async () => ((await createdAccountRow.textContent()) ?? "").includes("240.00"), { timeout: 30_000 })
+    .toBeTruthy();
+
+  await page.getByRole("button", { name: "Add Expense" }).click();
+  const duplicateDialog = page.locator('[role="dialog"]').filter({ hasText: "Add Expense" }).first();
+  await expect(duplicateDialog).toBeVisible({ timeout: 30_000 });
+  await duplicateDialog.locator("#exp_amount").fill("5.00");
+  await duplicateDialog.locator("#exp_category").fill("Office");
+  await duplicateDialog.locator("#exp_project").fill(generatedProjectCode);
+  await duplicateDialog.locator("#exp_source_account").selectOption(String(createdAccount.id));
+  const duplicateExpenseResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/expenses/") &&
+      response.request().method() === "POST" &&
+      response.status() === 400
+  );
+  await duplicateDialog.getByRole("button", { name: "Create Expense" }).click();
+  await duplicateExpenseResponse;
+  await duplicateDialog.getByRole("button", { name: "Cancel" }).click();
+
+  await expect(createdAccountRow).toContainText(createdAccount.currency_code);
+  await expect
+    .poll(async () => ((await createdAccountRow.textContent()) ?? "").includes("240.00"), { timeout: 30_000 })
+    .toBeTruthy();
+});
