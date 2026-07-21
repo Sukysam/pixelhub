@@ -23,9 +23,15 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
           response.status() === 200,
         { timeout: 10_000 }
       )
+      .then((response) => ({ url: response.url(), status: response.status() }))
       .catch(() => null);
+    console.log(`[loadMore attempt ${attempt}] rows=${previousRowCount} clicking...`);
     await loadMoreButton.click();
-    await loadMoreResponse;
+    const responseInfo = await loadMoreResponse;
+    console.log(
+      `[loadMore attempt ${attempt}] response=${responseInfo ? `${responseInfo.status} ${responseInfo.url}` : "TIMED OUT (no matching GET /customers/ within 10s)"}`
+    );
+    let finalStatus = "unknown";
     await expect
       .poll(
         async () => {
@@ -36,7 +42,12 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
         },
         { timeout: 10_000 }
       )
-      .not.toBe("waiting");
+      .not.toBe("waiting")
+      .catch(async (e) => {
+        finalStatus = `stuck rows=${await page.locator("tbody tr").count()} buttonVisible=${await loadMoreButton.isVisible().catch(() => "n/a")}`;
+        throw e;
+      });
+    console.log(`[loadMore attempt ${attempt}] resolved rows=${await page.locator("tbody tr").count()} ${finalStatus}`);
   }
   return row;
 }

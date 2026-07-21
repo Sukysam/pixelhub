@@ -206,6 +206,14 @@ jobs:
         # and the invite flow are scoped per business/tenant.
         run: npm run test:e2e -- --workers=1
 
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: frontend/test-results
+          retention-days: 7
+
   secrets:
     runs-on: ubuntu-latest
     steps:
