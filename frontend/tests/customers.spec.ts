@@ -10,12 +10,9 @@ function buildPreview(value: string) {
 
 async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPages = 6) {
   const row = page.locator("tbody tr", { hasText: customerName }).first();
-  for (let attempt = 0; attempt < maxPages; attempt += 1) {
-    if ((await row.count()) > 0) return row;
-    const loadMoreButton = page.getByRole("button", { name: /load more/i });
-    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) break;
-    const previousRowCount = await page.locator("tbody tr").count();
-    const loadMoreResponse = page
+
+  const clickLoadMoreAndWaitForResponse = async (loadMoreButton: ReturnType<Page["getByRole"]>) => {
+    const responsePromise = page
       .waitForResponse(
         (response) =>
           response.url().startsWith(`${API_BASE_URL}/customers/`) &&
@@ -25,11 +22,29 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
       )
       .then((response) => ({ url: response.url(), status: response.status() }))
       .catch(() => null);
-    console.log(`[loadMore attempt ${attempt}] rows=${previousRowCount} clicking...`);
+    // `disabled={loading}` on the button means a click while a request is still
+    // in flight simply waits for the button to re-enable, so retrying here can't
+    // race a duplicate fetch of the same page.
     await loadMoreButton.click();
-    const responseInfo = await loadMoreResponse;
+    return responsePromise;
+  };
+
+  for (let attempt = 0; attempt < maxPages; attempt += 1) {
+    if ((await row.count()) > 0) return row;
+    const loadMoreButton = page.getByRole("button", { name: /load more/i });
+    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) break;
+    const previousRowCount = await page.locator("tbody tr").count();
+    console.log(`[loadMore attempt ${attempt}] rows=${previousRowCount} clicking...`);
+    let responseInfo = await clickLoadMoreAndWaitForResponse(loadMoreButton);
+    if (!responseInfo) {
+      // Observed in CI: the click completes and no network request follows at
+      // all (not a slow response) — an intermittent Firefox click-dispatch
+      // miss. Re-clicking recovers it; a longer timeout would not.
+      console.log(`[loadMore attempt ${attempt}] no response within 10s, retrying click once...`);
+      responseInfo = await clickLoadMoreAndWaitForResponse(loadMoreButton);
+    }
     console.log(
-      `[loadMore attempt ${attempt}] response=${responseInfo ? `${responseInfo.status} ${responseInfo.url}` : "TIMED OUT (no matching GET /customers/ within 10s)"}`
+      `[loadMore attempt ${attempt}] response=${responseInfo ? `${responseInfo.status} ${responseInfo.url}` : "TIMED OUT twice (no matching GET /customers/ after retry)"}`
     );
     let finalStatus = "unknown";
     await expect
