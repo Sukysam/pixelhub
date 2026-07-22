@@ -25,7 +25,13 @@ async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPage
     // `disabled={loading}` on the button means a click while a request is still
     // in flight simply waits for the button to re-enable, so retrying here can't
     // race a duplicate fetch of the same page.
-    await loadMoreButton.click();
+    //
+    // Uses dispatchEvent instead of click(): traces showed Playwright's native
+    // click on Firefox sometimes completes successfully (per its own actionability
+    // checks) without the event ever reaching React's handler, and no fetch
+    // follows. dispatchEvent fires the DOM click directly, bypassing whatever
+    // drops the native input on that path.
+    await loadMoreButton.dispatchEvent("click");
     return responsePromise;
   };
 
