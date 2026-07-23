@@ -14,8 +14,10 @@ from django.db.utils import DatabaseError
 from django.urls import reverse
 from django.contrib.auth.models import User, Permission
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.core.cache import cache
 from django.core import mail
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -36,6 +38,7 @@ from .models import (
     AuditLog,
     Expense,
     SourceAccount,
+    SourceAccountDeposit,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -2396,6 +2399,85 @@ class CustomerExpenseImportExportTests(APITestCase):
         )
         self.assertEqual(negative_balance.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("initial_balance", negative_balance.data)
+
+    def test_source_account_deposits_record_immutable_timestamps_and_update_balances(self):
+        create_started_at = timezone.now()
+        deposit_res_1 = self.client.post(
+            f"/api/source-accounts/{self.petty1.id}/deposits/",
+            {"amount": "25.00"},
+            format="json",
+        )
+        self.assertEqual(deposit_res_1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(deposit_res_1.data["amount"]), Decimal("25.00"))
+        self.assertEqual(deposit_res_1.data["source_account"], self.petty1.id)
+        self.assertEqual(deposit_res_1.data["source_account_name"], self.petty1.name)
+        self.assertTrue(deposit_res_1.data["source_account_created_at"].startswith(self.petty1.created_at.date().isoformat()))
+        deposited_at_1 = parse_datetime(deposit_res_1.data["deposited_at"])
+        self.assertIsNotNone(deposited_at_1)
+        self.assertGreaterEqual(deposited_at_1, create_started_at)
+
+        Expense.objects.create(
+            amount=Decimal("15.00"),
+            expense_date=timezone.localdate(),
+            category="Office",
+            description="Paper",
+            vendor="Stationery Hub",
+            merchant_reference="SRC-DEP-1",
+            project_code="PRJ-DEP-1",
+            source_account=self.petty1,
+            assigned_to=self.user,
+            created_by=self.user,
+        )
+
+        deposit_res_2 = self.client.post(
+            f"/api/source-accounts/{self.petty1.id}/deposits/",
+            {"amount": "10.50"},
+            format="json",
+        )
+        self.assertEqual(deposit_res_2.status_code, status.HTTP_201_CREATED)
+
+        list_res = self.client.get("/api/source-accounts/")
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        petty1_row = next(row for row in list_res.data if row["id"] == self.petty1.id)
+        self.assertEqual(petty1_row["deposit_count"], 2)
+        self.assertEqual(Decimal(petty1_row["total_deposited"]), Decimal("35.50"))
+        self.assertEqual(Decimal(petty1_row["current_balance"]), Decimal("120.50"))
+        self.assertTrue(petty1_row["last_deposit_at"])
+
+        deposits_res = self.client.get(f"/api/source-accounts/{self.petty1.id}/deposits/")
+        self.assertEqual(deposits_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(deposits_res.data), 2)
+        self.assertEqual(Decimal(deposits_res.data[0]["amount"]), Decimal("10.50"))
+        self.assertEqual(Decimal(deposits_res.data[1]["amount"]), Decimal("25.00"))
+        self.assertTrue(all(row["source_account_created_at"].startswith(self.petty1.created_at.date().isoformat()) for row in deposits_res.data))
+
+        invalid_zero = self.client.post(
+            f"/api/source-accounts/{self.petty1.id}/deposits/",
+            {"amount": "0.00"},
+            format="json",
+        )
+        self.assertEqual(invalid_zero.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("amount", invalid_zero.data)
+
+        invalid_negative = self.client.post(
+            f"/api/source-accounts/{self.petty1.id}/deposits/",
+            {"amount": "-5.00"},
+            format="json",
+        )
+        self.assertEqual(invalid_negative.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("amount", invalid_negative.data)
+
+        stored_deposit = SourceAccountDeposit.objects.get(pk=deposit_res_1.data["id"])
+        stored_deposit.amount = Decimal("99.00")
+        with self.assertRaises(DjangoValidationError):
+            stored_deposit.save()
+        with self.assertRaises(DjangoValidationError):
+            stored_deposit.delete()
+
+        audit_entry = AuditLog.objects.filter(action="create", object_id=str(stored_deposit.id)).first()
+        self.assertIsNotNone(audit_entry)
+        self.assertEqual(audit_entry.changes["immutable"], True)
+        self.assertEqual(audit_entry.changes["source_account_id"], self.petty1.id)
 
     def test_expense_project_code_generation_duplicate_blocking_and_balance_export(self):
         next_code_res = self.client.get("/api/expenses/next_project_code/")

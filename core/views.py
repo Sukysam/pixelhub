@@ -55,6 +55,7 @@ from .models import (
     Receipt,
     Expense,
     SourceAccount,
+    SourceAccountDeposit,
     AuditLog,
     Currency,
     ExchangeRate,
@@ -118,6 +119,7 @@ from .serializers import (
     ReceiptDetailSerializer,
     ExpenseSerializer,
     SourceAccountSerializer,
+    SourceAccountDepositSerializer,
     CurrencySerializer,
     ExchangeRateSerializer,
     GlobalSettingsSerializer,
@@ -138,6 +140,7 @@ from .serializers import (
     DEFAULT_COUNTRY_CODE,
 )
 from .project_code_service import peek_next_project_code
+from .source_account_balances import BALANCE_OUTPUT_FIELD, ZERO_BALANCE, annotate_source_account_balance_fields
 
 logger = logging.getLogger(__name__)
 INVOICE_ITEM_DESCRIPTION_MAX_LENGTH = 500
@@ -3357,24 +3360,7 @@ class SourceAccountViewSet(SoftDeleteModelViewSet):
     parser_classes = [parsers.JSONParser, parsers.FormParser]
 
     def get_queryset(self):
-        balance_output = models.DecimalField(max_digits=12, decimal_places=2)
-        spent_amount = Coalesce(
-            Sum("expenses__amount", filter=Q(expenses__is_deleted=False)),
-            Decimal("0.00"),
-            output_field=balance_output,
-        )
-        qs = (
-            super()
-            .get_queryset()
-            .select_related("currency")
-            .annotate(active_expense_count=Count("expenses", filter=Q(expenses__is_deleted=False)))
-            .annotate(
-                current_balance=models.ExpressionWrapper(
-                    F("initial_balance") - spent_amount,
-                    output_field=balance_output,
-                )
-            )
-        )
+        qs = annotate_source_account_balance_fields(super().get_queryset().select_related("currency"))
         params = self.request.query_params
         q = str(params.get("q") or "").strip()
         if q:
@@ -3426,6 +3412,36 @@ class SourceAccountViewSet(SoftDeleteModelViewSet):
                 },
             )
         return self._disable_response_cache(Response({"deleted": True, "active_expense_count": dependency_count}, status=status.HTTP_200_OK))
+
+    @action(detail=True, methods=["get", "post"], url_path="deposits")
+    def deposits(self, request, pk=None):
+        account = SourceAccount.objects.select_related("currency").get(pk=self.get_object().pk, is_deleted=False)
+
+        if request.method.lower() == "get":
+            self._require_model_perm("view")
+            deposits = account.deposits.select_related("created_by").order_by("-deposited_at", "-id")
+            return self._disable_response_cache(Response(SourceAccountDepositSerializer(deposits, many=True).data, status=status.HTTP_200_OK))
+
+        self._require_model_perm("change")
+        with transaction.atomic():
+            locked_account = SourceAccount.objects.select_for_update().get(pk=account.pk, is_deleted=False)
+            serializer = SourceAccountDepositSerializer(data=request.data, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            deposit = serializer.save(source_account=locked_account, created_by=request.user if getattr(request.user, "is_authenticated", False) else None)
+            _log_audit(
+                request.user,
+                "create",
+                deposit,
+                {
+                    "source_account_id": locked_account.id,
+                    "source_account_name": locked_account.name,
+                    "amount": str(deposit.amount),
+                    "source_account_created_at": deposit.source_account_created_at.isoformat(),
+                    "deposited_at": deposit.deposited_at.isoformat(),
+                    "immutable": True,
+                },
+            )
+        return self._disable_response_cache(Response(SourceAccountDepositSerializer(deposit).data, status=status.HTTP_201_CREATED))
 
 
 class ExpenseViewSet(SoftDeleteModelViewSet):
@@ -3622,23 +3638,11 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
         }
         source_account_balances: dict[int, str] = {}
         if source_account_ids:
-            balance_output = models.DecimalField(max_digits=12, decimal_places=2)
-            spent_amount = Coalesce(
-                Sum("expenses__amount", filter=Q(expenses__is_deleted=False)),
-                Decimal("0.00"),
-                output_field=balance_output,
-            )
             for account in (
-                SourceAccount.objects.filter(id__in=source_account_ids)
-                .annotate(
-                    current_balance=models.ExpressionWrapper(
-                        F("initial_balance") - spent_amount,
-                        output_field=balance_output,
-                    )
-                )
-                .only("id")
+                annotate_source_account_balance_fields(SourceAccount.objects.filter(id__in=source_account_ids))
+                .only("id", "initial_balance", "created_at")
             ):
-                source_account_balances[account.id] = f"{Decimal(str(account.current_balance or Decimal('0.00'))):.2f}"
+                source_account_balances[account.id] = f"{Decimal(str(account.current_balance or ZERO_BALANCE)):.2f}"
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")

@@ -15,6 +15,7 @@ from .models import (
     Receipt,
     Expense,
     SourceAccount,
+    SourceAccountDeposit,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -26,6 +27,7 @@ from .models import (
     BusinessAccount,
     BusinessMembership,
 )
+from .source_account_balances import ZERO_BALANCE
 from .rbac import user_has_permission
 
 BUSINESS_INDUSTRY_CHOICES = [
@@ -730,6 +732,9 @@ class SourceAccountSerializer(serializers.ModelSerializer):
     currency_code = serializers.CharField(source="currency.code", read_only=True)
     active_expense_count = serializers.SerializerMethodField()
     current_balance = serializers.SerializerMethodField()
+    deposit_count = serializers.SerializerMethodField()
+    total_deposited = serializers.SerializerMethodField()
+    last_deposit_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = SourceAccount
@@ -742,13 +747,28 @@ class SourceAccountSerializer(serializers.ModelSerializer):
             "currency_code",
             "status",
             "active_expense_count",
+            "deposit_count",
+            "total_deposited",
+            "last_deposit_at",
             "current_balance",
             "created_at",
             "updated_at",
             "is_deleted",
             "deleted_at",
         )
-        read_only_fields = ("id", "currency_code", "active_expense_count", "current_balance", "created_at", "updated_at", "is_deleted", "deleted_at")
+        read_only_fields = (
+            "id",
+            "currency_code",
+            "active_expense_count",
+            "deposit_count",
+            "total_deposited",
+            "last_deposit_at",
+            "current_balance",
+            "created_at",
+            "updated_at",
+            "is_deleted",
+            "deleted_at",
+        )
 
     def validate_name(self, value):
         normalized = re.sub(r"\s+", " ", str(value or "").strip())
@@ -766,11 +786,55 @@ class SourceAccountSerializer(serializers.ModelSerializer):
             return int(obj.active_expense_count or 0)
         return int(obj.expenses.filter(is_deleted=False).count())
 
+    def get_deposit_count(self, obj):
+        if hasattr(obj, "deposit_count"):
+            return int(obj.deposit_count or 0)
+        return int(obj.deposits.count())
+
+    def get_total_deposited(self, obj):
+        if hasattr(obj, "total_deposited"):
+            return str(obj.total_deposited)
+        total = obj.deposits.aggregate(total=Sum("amount"))["total"] or ZERO_BALANCE
+        return str(total)
+
     def get_current_balance(self, obj):
         if hasattr(obj, "current_balance"):
             return str(obj.current_balance)
         spent = obj.expenses.filter(is_deleted=False).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
-        return str(Decimal(str(obj.initial_balance or 0)) - Decimal(str(spent or 0)))
+        deposited = obj.deposits.aggregate(total=Sum("amount"))["total"] or ZERO_BALANCE
+        return str(Decimal(str(obj.initial_balance or 0)) + Decimal(str(deposited or 0)) - Decimal(str(spent or 0)))
+
+
+class SourceAccountDepositSerializer(serializers.ModelSerializer):
+    source_account_name = serializers.CharField(source="source_account.name", read_only=True)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+
+    class Meta:
+        model = SourceAccountDeposit
+        fields = (
+            "id",
+            "source_account",
+            "source_account_name",
+            "amount",
+            "source_account_created_at",
+            "deposited_at",
+            "created_by",
+            "created_by_name",
+        )
+        read_only_fields = (
+            "id",
+            "source_account",
+            "source_account_name",
+            "source_account_created_at",
+            "deposited_at",
+            "created_by",
+            "created_by_name",
+        )
+
+    def validate_amount(self, value):
+        if value is None or value <= 0:
+            raise serializers.ValidationError("amount must be > 0")
+        return value
 
 
 class ExchangeRateSerializer(serializers.ModelSerializer):

@@ -40,7 +40,11 @@ type SourceAccount = {
   currency_code: string;
   status: string;
   active_expense_count: number;
+  deposit_count: number;
+  total_deposited: string;
+  last_deposit_at: string | null;
   current_balance: string;
+  created_at: string;
   updated_at: string;
 };
 
@@ -70,6 +74,17 @@ type SourceAccountForm = {
   initial_balance: string;
   currency: string;
   status: string;
+};
+
+type SourceAccountDeposit = {
+  id: number;
+  source_account: number;
+  source_account_name: string;
+  amount: string;
+  source_account_created_at: string;
+  deposited_at: string;
+  created_by: number | null;
+  created_by_name: string | null;
 };
 
 const EMPTY_EXPENSE_FORM: ExpenseForm = {
@@ -141,6 +156,10 @@ export default function ExpensesPage() {
   const [deleteSourceAccountOpen, setDeleteSourceAccountOpen] = useState(false);
   const [deleteSourceAccountTarget, setDeleteSourceAccountTarget] = useState<SourceAccount | null>(null);
   const [deleteSourceAccountConfirmed, setDeleteSourceAccountConfirmed] = useState(false);
+  const [depositDialogOpen, setDepositDialogOpen] = useState(false);
+  const [depositTarget, setDepositTarget] = useState<SourceAccount | null>(null);
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositSaving, setDepositSaving] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportFormat, setExportFormat] = useState<"csv" | "xlsx" | "pdf">("csv");
   const [exportDateFrom, setExportDateFrom] = useState("");
@@ -498,6 +517,46 @@ export default function ExpensesPage() {
     setDeleteSourceAccountOpen(true);
   };
 
+  const openDepositDialog = (account: SourceAccount) => {
+    setError(null);
+    setSuccess(null);
+    setDepositTarget(account);
+    setDepositAmount("");
+    setDepositDialogOpen(true);
+  };
+
+  const saveDeposit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!depositTarget) return;
+    if (!depositAmount.trim()) {
+      setError("Deposit amount is required.");
+      return;
+    }
+    const parsed = Number(depositAmount);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setError("Deposit amount must be greater than 0.");
+      return;
+    }
+    try {
+      setDepositSaving(true);
+      setError(null);
+      setSuccess(null);
+      const saved = await apiRequest<SourceAccountDeposit>(`/source-accounts/${depositTarget.id}/deposits/`, {
+        method: "POST",
+        body: JSON.stringify({ amount: depositAmount }),
+      });
+      await loadSourceAccounts();
+      setDepositDialogOpen(false);
+      setDepositTarget(null);
+      setDepositAmount("");
+      setSuccess(`Deposit recorded for ${saved.source_account_name} on ${new Date(saved.deposited_at).toLocaleString()}.`);
+    } catch (e: unknown) {
+      setError(toUserMessage(e, "Failed to record source account deposit"));
+    } finally {
+      setDepositSaving(false);
+    }
+  };
+
   const deleteSourceAccount = async () => {
     if (!deleteSourceAccountTarget) return;
     if (!deleteSourceAccountConfirmed) {
@@ -695,6 +754,14 @@ export default function ExpensesPage() {
                             <div className="flex flex-wrap gap-2">
                               <Button type="button" variant="outline" onClick={() => openEditSourceAccount(account)}>
                                 Edit
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => openDepositDialog(account)}
+                                disabled={account.status !== "active"}
+                              >
+                                Add Deposit
                               </Button>
                               <Button type="button" variant="destructive" onClick={() => confirmDeleteSourceAccount(account)}>
                                 Delete
@@ -1036,6 +1103,59 @@ export default function ExpensesPage() {
                 </Button>
                 <Button type="submit" disabled={sourceAccountSaving || !sourceAccountForm.currency}>
                   {sourceAccountSaving ? "Saving..." : editingSourceAccount ? "Save Account" : "Create Account"}
+                </Button>
+              </div>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={depositDialogOpen}
+          onOpenChange={(open) => {
+            setDepositDialogOpen(open);
+            if (!open) {
+              setDepositTarget(null);
+              setDepositAmount("");
+            }
+          }}
+        >
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Add Source Account Deposit</DialogTitle>
+            </DialogHeader>
+            <form className="space-y-4" onSubmit={saveDeposit}>
+              <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                {depositTarget ? (
+                  <>
+                    <div className="font-medium">{depositTarget.name}</div>
+                    <div>Created on {new Date(depositTarget.created_at).toLocaleDateString()}</div>
+                    <div>
+                      Current balance: {formatCurrencyAmount(depositTarget.current_balance, depositTarget.currency_code) ?? depositTarget.current_balance}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="source_account_deposit_amount">Deposit Amount</Label>
+                <Input
+                  id="source_account_deposit_amount"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                Deposits are written to an immutable transaction log. Each deposit stores the source account creation date and the exact deposit timestamp automatically.
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setDepositDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={depositSaving || !depositTarget}>
+                  {depositSaving ? "Recording..." : "Record Deposit"}
                 </Button>
               </div>
             </form>

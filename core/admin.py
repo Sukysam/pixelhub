@@ -7,6 +7,7 @@ from .models import (
     Receipt,
     Expense,
     SourceAccount,
+    SourceAccountDeposit,
     Currency,
     ExchangeRate,
     GlobalSettings,
@@ -62,6 +63,21 @@ class SourceAccountAdmin(admin.ModelAdmin):
     list_display = ("name", "account_type", "initial_balance", "currency", "status", "created_at")
     list_filter = ("account_type", "status", "currency")
     search_fields = ("name",)
+
+
+@admin.register(SourceAccountDeposit)
+class SourceAccountDepositAdmin(admin.ModelAdmin):
+    list_display = ("source_account", "amount", "deposited_at", "source_account_created_at", "created_by")
+    list_filter = ("deposited_at", "source_account__currency")
+    search_fields = ("source_account__name", "created_by__username", "created_by__email")
+    readonly_fields = ("source_account", "amount", "deposited_at", "source_account_created_at", "created_by")
+    ordering = ("-deposited_at", "-id")
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Currency)

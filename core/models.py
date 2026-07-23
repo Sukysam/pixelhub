@@ -5,6 +5,7 @@ from typing import Any
 
 from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
@@ -430,6 +431,45 @@ class SourceAccount(SoftDeleteModel):
 
     def __str__(self):
         return self.name
+
+
+class SourceAccountDeposit(models.Model):
+    source_account = models.ForeignKey(SourceAccount, on_delete=models.PROTECT, related_name="deposits")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    source_account_created_at = models.DateTimeField(editable=False)
+    deposited_at = models.DateTimeField(default=timezone.now, editable=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, blank=True, null=True, on_delete=models.SET_NULL, related_name="source_account_deposits")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["source_account", "deposited_at"], name="core_src_dep_acct_dt_idx"),
+        ]
+        ordering = ("-deposited_at", "-id")
+
+    def clean(self):
+        if self.amount is None or self.amount <= 0:
+            raise ValidationError({"amount": "amount must be > 0"})
+        source_account = getattr(self, "source_account", None)
+        if source_account is None:
+            raise ValidationError({"source_account": "source_account is required"})
+        if bool(getattr(source_account, "is_deleted", False)):
+            raise ValidationError({"source_account": "Cannot add deposits to a deleted source account."})
+        if source_account.status != SourceAccount.STATUS_ACTIVE:
+            raise ValidationError({"source_account": "Cannot add deposits to an inactive or closed source account."})
+
+    def save(self, *args, **kwargs):
+        if self.pk and self.__class__.objects.filter(pk=self.pk).exists():
+            raise ValidationError("Source account deposit entries are immutable and cannot be modified.")
+        if not self.source_account_created_at and getattr(self, "source_account", None) is not None:
+            self.source_account_created_at = self.source_account.created_at
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Source account deposit entries are immutable and cannot be deleted.")
+
+    def __str__(self):
+        return f"{self.source_account_id}:{self.amount}:{self.deposited_at.isoformat()}"
 
 
 class ExchangeRate(models.Model):

@@ -17,6 +17,14 @@ Each Source Account stores:
 - `status`
 - audit metadata from the shared soft-delete model
 
+Each funding deposit is stored as a separate immutable `SourceAccountDeposit` record with:
+
+- `source_account`
+- `amount`
+- `source_account_created_at`
+- `deposited_at`
+- `created_by`
+
 Expenses reference Source Accounts by foreign key. Historical expenses keep their Source Account relationship even after an account is deleted from active management.
 
 ## Permissions
@@ -55,8 +63,22 @@ Server-side validation includes:
 - trimmed account names
 - required currency
 - `initial_balance >= 0`
+- deposit amounts must be valid decimal values greater than `0`
+- deposits allowed only on active, non-deleted Source Accounts
 - expense create/update restricted to active Source Accounts only
 - import validation requiring a known active Source Account name when the column is provided
+
+## Deposits
+
+Source Accounts now support unlimited additional deposits without mutating the opening balance.
+
+Behavior:
+
+- `initial_balance` remains the immutable opening balance
+- each new deposit creates a permanent ledger record
+- deposit records cannot be edited or deleted after creation
+- every deposit stores both the Source Account creation timestamp and the exact deposit timestamp
+- current balances are calculated as `initial_balance + total_deposited - active_expenses`
 
 ## UI Usage
 
@@ -65,8 +87,9 @@ From the Expenses page:
 1. Open `New Source Account`
 2. Enter the account name, type, initial balance, currency, and status
 3. Save the account
-4. Select the account when creating or editing an expense
-5. Use the Source Accounts table to edit or delete managed accounts
+4. Use `Add Deposit` on an active Source Account to record additional funding
+5. Select the account when creating or editing an expense
+6. Use the Source Accounts table to edit or delete managed accounts
 
 ## Audit Logging
 
@@ -77,12 +100,24 @@ Source Account create, update, and delete operations are recorded in the shared 
 - changed fields
 - dependency information on delete
 
+Deposit creation is also audited with:
+
+- acting user
+- source account identifier
+- deposit amount
+- source account creation timestamp
+- exact deposit timestamp
+- immutable-entry marker
+
 ## Testing
 
 Coverage for Source Accounts includes:
 
 - backend CRUD and permission checks
 - delete behavior with linked expenses preserved
+- immutable deposit creation with multiple funding events
+- timestamp recording for account creation and deposit events
+- validation blocking invalid or negative deposits
 - expense API integration with Source Account IDs
 - import validation by Source Account name
 - end-to-end UI workflow for create, edit, delete, and expense linkage
