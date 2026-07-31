@@ -20,6 +20,13 @@ from openpyxl import load_workbook
 
 from .models import Customer, Expense, Invoice, InvoiceItem, Item, SourceAccount
 from .project_code_service import generate_next_project_code, normalize_project_code
+from .import_export_formatting import (
+    format_text,
+    normalize_text_column,
+    parse_currency_input,
+    parse_decimal_input,
+    parse_integer_input,
+)
 
 CENTS = Decimal("0.01")
 logger = logging.getLogger(__name__)
@@ -165,35 +172,26 @@ def process_batch_import(
 def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
 
-    def _to_decimal(value, field: str):
-        if value in (None, ""):
-            return None, None
-        try:
-            return Decimal(str(value)), None
-        except (InvalidOperation, TypeError):
-            return None, f"Invalid {field}"
-
     allowed_types = {t for t, _ in Item.TYPE_CHOICES}
     seen_skus: set[str] = set()
     seen_name_keys: set[str] = set()
 
     sku_values: list[str] = []
     for r in rows:
-        sku = str(r.get("sku") or "").strip() or None
+        sku = normalize_text_column(r.get("sku"), max_length=int(Item._meta.get_field("sku").max_length or 0) or None)
         if sku:
             sku_values.append(sku)
     existing_skus = set(Item.objects.filter(sku__in=sku_values, is_deleted=False).values_list("sku", flat=True))
 
     def _validate_row(r: dict) -> tuple[Item | None, list[dict]]:
         row_num = int(r.get("_row") or 0)
-        raw_type = str(r.get("type") or "product").strip() or "product"
-        raw_name = str(r.get("name") or "").strip()
-        raw_category = re.sub(r"\s+", " ", str(r.get("category") or "General").strip()) or "General"
-        raw_sku = str(r.get("sku") or "").strip() or None
-        raw_desc = r.get("description")
-        desc = str(raw_desc).strip() if raw_desc not in (None, "") else None
-        uom = str(r.get("unit_of_measure") or "pcs").strip() or "pcs"
-        tax_category = str(r.get("tax_category") or "standard").strip() or "standard"
+        raw_type = format_text(r.get("type") or "product") or "product"
+        raw_name = normalize_text_column(r.get("name"), max_length=int(Item._meta.get_field("name").max_length or 0) or None)
+        raw_category = normalize_text_column(r.get("category"), max_length=255) or "General"
+        raw_sku = normalize_text_column(r.get("sku"), max_length=int(Item._meta.get_field("sku").max_length or 0) or None)
+        raw_desc = normalize_text_column(r.get("description"), max_length=None, collapse_whitespace=False)
+        uom = normalize_text_column(r.get("unit_of_measure") or "pcs", max_length=50) or "pcs"
+        tax_category = normalize_text_column(r.get("tax_category") or "standard", max_length=50) or "standard"
         row_errors: list[dict] = []
 
         if raw_type not in allowed_types:
@@ -211,34 +209,42 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
                 if raw_sku in existing_skus:
                     row_errors.append({"row": row_num, "field": "sku", "message": "sku already exists"})
         else:
-            key = f"{raw_type}:{raw_name.lower()}"
-            if key in seen_name_keys:
+            name_key = f"{raw_type}:{str(raw_name or '').lower()}"
+            if name_key in seen_name_keys:
                 row_errors.append({"row": row_num, "field": "name", "message": "Duplicate name/type in file"})
             else:
-                seen_name_keys.add(key)
+                seen_name_keys.add(name_key)
 
-        unit_price, unit_price_err = _to_decimal(r.get("unit_price"), "unit_price")
-        if unit_price_err:
-            row_errors.append({"row": row_num, "field": "unit_price", "message": unit_price_err})
+        try:
+            unit_price = parse_currency_input(r.get("unit_price"), decimal_places=2)
+        except ValueError:
+            unit_price = None
+            row_errors.append({"row": row_num, "field": "unit_price", "message": "Invalid unit_price"})
         if unit_price is None:
-            row_errors.append({"row": row_num, "field": "unit_price", "message": "unit_price is required"})
+            if not any(err.get("field") == "unit_price" for err in row_errors):
+                row_errors.append({"row": row_num, "field": "unit_price", "message": "unit_price is required"})
         elif unit_price < 0:
             row_errors.append({"row": row_num, "field": "unit_price", "message": "unit_price must be >= 0"})
 
-        tax_rate, tax_rate_err = _to_decimal(r.get("tax_rate", 0), "tax_rate")
-        if tax_rate_err:
-            row_errors.append({"row": row_num, "field": "tax_rate", "message": tax_rate_err})
+        try:
+            tax_rate = parse_decimal_input(r.get("tax_rate", 0), decimal_places=2)
+        except ValueError:
+            tax_rate = None
+            row_errors.append({"row": row_num, "field": "tax_rate", "message": "Invalid tax_rate"})
         if tax_rate is None:
             tax_rate = Decimal("0")
         if tax_rate < 0 or tax_rate > 100:
             row_errors.append({"row": row_num, "field": "tax_rate", "message": "tax_rate must be between 0 and 100"})
 
         stock_qty_raw = r.get("stock_quantity", 0)
-        try:
-            stock_qty = int(stock_qty_raw) if stock_qty_raw not in (None, "") else 0
-        except (TypeError, ValueError):
-            stock_qty = None
-            row_errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be an integer"})
+        if stock_qty_raw in (None, ""):
+            stock_qty = 0
+        else:
+            try:
+                stock_qty = parse_integer_input(stock_qty_raw) or 0
+            except ValueError:
+                stock_qty = None
+                row_errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be an integer"})
         if stock_qty is not None and stock_qty < 0:
             row_errors.append({"row": row_num, "field": "stock_quantity", "message": "stock_quantity must be >= 0"})
         if raw_type == "service":
@@ -253,7 +259,7 @@ def import_items_from_upload(upload, dry_run: bool, rollback_on_error: bool) -> 
                 sku=raw_sku,
                 name=raw_name,
                 category=raw_category,
-                description=desc,
+                description=raw_desc,
                 unit_price=unit_price,
                 tax_rate=tax_rate,
                 tax_category=tax_category,
@@ -291,17 +297,19 @@ def import_invoices_from_upload(
     errors: list[dict] = []
 
     allowed_status = {s for s, _ in Invoice.STATUS_CHOICES}
+    inv_no_max_length = int(Invoice._meta.get_field("invoice_number").max_length or 0) or None
+    status_max_length = int(Invoice._meta.get_field("status").max_length or 0) or None
+    email_max_length = int(Customer._meta.get_field("email").max_length or 0) or None
+    name_max_length = int(Customer._meta.get_field("name").max_length or 0) or None
+    sku_max_length = int(Item._meta.get_field("sku").max_length or 0) or None
 
     customer_emails: set[str] = set()
     customer_names: set[str] = set()
     item_skus: set[str] = set()
     invoice_numbers: set[str] = set()
 
-    def _clean(value) -> str:
-        return str(value or "").strip()
-
     def _parse_date(value, field: str, row_num: int):
-        raw = _clean(value)
+        raw = format_text(value)
         if not raw:
             return None
         try:
@@ -315,8 +323,10 @@ def import_invoices_from_upload(
             errors.append({"row": row_num, "field": field, "message": f"{field} is required"})
             return None
         try:
-            v = int(value)
-        except (TypeError, ValueError):
+            v = parse_integer_input(value)
+        except ValueError:
+            v = None
+        if v is None:
             errors.append({"row": row_num, "field": field, "message": f"{field} must be an integer"})
             return None
         return v
@@ -325,24 +335,24 @@ def import_invoices_from_upload(
         if value in (None, ""):
             return None
         try:
-            return Decimal(str(value))
-        except (InvalidOperation, TypeError):
+            return parse_currency_input(value, decimal_places=2)
+        except ValueError:
             errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
             return None
 
     groups: dict[str, list[dict]] = {}
     for r in rows:
         row_num = int(r.get("_row") or 0)
-        inv_no = _clean(r.get("invoice_number"))
-        inv_key = _clean(r.get("invoice_key"))
+        inv_no = normalize_text_column(r.get("invoice_number"), max_length=inv_no_max_length, collapse_whitespace=False)
+        inv_key = normalize_text_column(r.get("invoice_key"), max_length=None, collapse_whitespace=False)
         key = inv_no or inv_key or f"row:{row_num}"
         groups.setdefault(key, []).append(r)
 
         if inv_no:
             invoice_numbers.add(inv_no)
 
-        email = _clean(r.get("customer_email"))
-        name = _clean(r.get("customer_name"))
+        email = normalize_text_column(r.get("customer_email"), max_length=email_max_length)
+        name = normalize_text_column(r.get("customer_name"), max_length=name_max_length, collapse_whitespace=False)
         if email:
             customer_emails.add(email.lower())
         elif name:
@@ -350,7 +360,7 @@ def import_invoices_from_upload(
         else:
             errors.append({"row": row_num, "field": "customer_email", "message": "customer_email or customer_name is required"})
 
-        sku = _clean(r.get("item_sku"))
+        sku = normalize_text_column(r.get("item_sku"), max_length=sku_max_length)
         if not sku:
             errors.append({"row": row_num, "field": "item_sku", "message": "item_sku is required"})
         else:
@@ -373,22 +383,22 @@ def import_invoices_from_upload(
     for _, group_rows in groups.items():
         first = group_rows[0]
         row_num = int(first.get("_row") or 0)
-        inv_no = _clean(first.get("invoice_number")) or None
+        inv_no = normalize_text_column(first.get("invoice_number"), max_length=inv_no_max_length, collapse_whitespace=False) or None
 
-        status_val = _clean(first.get("status") or "Draft") or "Draft"
+        status_val = normalize_text_column(first.get("status") or "Draft", max_length=status_max_length) or "Draft"
         if status_val not in allowed_status:
             errors.append({"row": row_num, "field": "status", "message": "Invalid status"})
             continue
         for r in group_rows[1:]:
-            other = _clean(r.get("status") or status_val) or status_val
+            other = normalize_text_column(r.get("status") or status_val, max_length=status_max_length) or status_val
             if other != status_val:
                 errors.append({"row": int(r.get("_row") or 0), "field": "status", "message": "Mixed statuses within the same invoice group"})
 
         issue_date = _parse_date(first.get("issue_date"), "issue_date", row_num) or timezone.localdate()
         due_date = _parse_date(first.get("due_date"), "due_date", row_num)
 
-        email = _clean(first.get("customer_email"))
-        name = _clean(first.get("customer_name"))
+        email = normalize_text_column(first.get("customer_email"), max_length=email_max_length)
+        name = normalize_text_column(first.get("customer_name"), max_length=name_max_length, collapse_whitespace=False)
         customer = None
         if email:
             customer = customers_by_email.get(email.lower())
@@ -401,7 +411,7 @@ def import_invoices_from_upload(
         normalized_lines = []
         for r in group_rows:
             rnum = int(r.get("_row") or 0)
-            sku = _clean(r.get("item_sku"))
+            sku = normalize_text_column(r.get("item_sku"), max_length=sku_max_length)
             item = items_by_sku.get(sku)
             if item is None:
                 errors.append({"row": rnum, "field": "item_sku", "message": "Item not found"})
@@ -420,8 +430,8 @@ def import_invoices_from_upload(
             if tax_rate_override is not None and (tax_rate_override < 0 or tax_rate_override > 100):
                 errors.append({"row": rnum, "field": "tax_rate", "message": "tax_rate must be between 0 and 100"})
                 continue
-            desc = _clean(r.get("description")) or None
-            uom = _clean(r.get("unit_of_measure")) or None
+            desc = normalize_text_column(r.get("description"), max_length=500, collapse_whitespace=False) or None
+            uom = normalize_text_column(r.get("unit_of_measure"), max_length=50) or None
             normalized_lines.append(
                 {
                     "row": rnum,
@@ -536,7 +546,7 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
 
     incoming_emails = []
     for r in rows:
-        email = str(r.get("email") or "").strip().lower()
+        email = str(normalize_text_column(r.get("email"), max_length=email_max_length) or "").strip().lower()
         if email:
             incoming_emails.append(email)
     existing_emails = set(
@@ -546,14 +556,45 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
 
     def _validate_row(r: dict) -> tuple[Customer | None, list[dict]]:
         row_num = int(r.get("_row") or 0)
-        name = str(r.get("name") or "").strip()
-        email = str(r.get("email") or "").strip() or None
-        phone = str(r.get("phone") or "").strip() or None
-        billing_address = str(r.get("billing_address") or "").strip() or None
         row_errors: list[dict] = []
+        try:
+            raw_name = normalize_text_column(
+                r.get("name"),
+                max_length=name_max_length,
+                collapse_whitespace=False,
+                truncate=False,
+            )
+        except ValueError:
+            raw_name = None
+            row_errors.append({"row": row_num, "field": "name", "message": f"name must be at most {name_max_length} characters"})
+        try:
+            raw_email = normalize_text_column(r.get("email"), max_length=email_max_length, truncate=False)
+        except ValueError:
+            raw_email = None
+            row_errors.append({"row": row_num, "field": "email", "message": f"email must be at most {email_max_length} characters"})
+        try:
+            raw_phone = normalize_text_column(r.get("phone"), max_length=phone_max_length, truncate=False)
+        except ValueError:
+            raw_phone = None
+            row_errors.append({"row": row_num, "field": "phone", "message": f"phone must be at most {phone_max_length} characters"})
+        try:
+            raw_billing = normalize_text_column(
+                r.get("billing_address"),
+                max_length=int(Customer._meta.get_field("billing_address").max_length or 0) or None,
+                collapse_whitespace=False,
+                truncate=False,
+            )
+        except ValueError:
+            raw_billing = None
+            row_errors.append({"row": row_num, "field": "billing_address", "message": "billing_address is too long"})
 
-        if not name:
-            row_errors.append({"row": row_num, "field": "name", "message": "name is required"})
+        if raw_name is None or (isinstance(raw_name, str) and not raw_name):
+            required_missing = not any(e.get("field") == "name" for e in row_errors)
+            if required_missing:
+                row_errors.append({"row": row_num, "field": "name", "message": "name is required"})
+            row_errors.append({"row": row_num, "field": "non_field_errors", "message": "missing required fields"})
+            return None, row_errors
+        name = str(raw_name)
         if name_max_length and len(name) > name_max_length:
             row_errors.append({"row": row_num, "field": "name", "message": f"name must be at most {name_max_length} characters"})
         name_key = name.lower()
@@ -562,6 +603,7 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
         else:
             seen_names.add(name_key)
 
+        email = None if raw_email is None else str(raw_email)
         if email:
             if email_max_length and len(email) > email_max_length:
                 row_errors.append({"row": row_num, "field": "email", "message": f"email must be at most {email_max_length} characters"})
@@ -576,6 +618,7 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
                 validate_email(email)
             except DjangoValidationError:
                 row_errors.append({"row": row_num, "field": "email", "message": "Invalid email"})
+        phone = None if raw_phone is None else str(raw_phone)
         if phone and phone_max_length and len(phone) > phone_max_length:
             row_errors.append({"row": row_num, "field": "phone", "message": f"phone must be at most {phone_max_length} characters"})
 
@@ -587,7 +630,7 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
                 name=name,
                 email=email,
                 phone=phone,
-                billing_address=billing_address,
+                billing_address=raw_billing,
             ),
             [],
         )
@@ -613,10 +656,19 @@ def import_customers_from_upload(upload, dry_run: bool, rollback_on_error: bool)
 def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: bool, actor=None) -> tuple[int, dict]:
     rows = _parse_upload_rows(upload)
     User = get_user_model()
+    username_field_max_length = int(User._meta.get_field(User.USERNAME_FIELD).max_length or 0) or None
 
-    usernames = {str(r.get("assigned_to") or "").strip() for r in rows if str(r.get("assigned_to") or "").strip()}
+    usernames = set()
+    source_account_names = set()
+    for r in rows:
+        username = normalize_text_column(r.get("assigned_to"), max_length=username_field_max_length)
+        if username:
+            usernames.add(username)
+        sa_name = normalize_text_column(r.get("source_account"), collapse_whitespace=False)
+        if sa_name:
+            source_account_names.add(sa_name.lower())
+
     users_by_name = {u.username: u for u in User.objects.filter(username__in=list(usernames))}
-    source_account_names = {str(r.get("source_account") or "").strip().lower() for r in rows if str(r.get("source_account") or "").strip()}
     source_accounts_by_name = {}
     if source_account_names:
         for account in SourceAccount.objects.filter(is_deleted=False):
@@ -632,11 +684,8 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
     }
     generated_project_codes: list[str] = []
 
-    def _clean(value) -> str:
-        return str(value or "").strip()
-
     def _parse_date(value, field: str, row_num: int, row_errors: list[dict]):
-        raw = _clean(value)
+        raw = format_text(value)
         if not raw:
             return None
         try:
@@ -650,8 +699,8 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
             row_errors.append({"row": row_num, "field": field, "message": f"{field} is required"})
             return None
         try:
-            return Decimal(str(value))
-        except (InvalidOperation, TypeError):
+            return parse_currency_input(value, decimal_places=2)
+        except ValueError:
             row_errors.append({"row": row_num, "field": field, "message": f"Invalid {field}"})
             return None
 
@@ -665,21 +714,21 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
         expense_date = _parse_date(r.get("expense_date"), "expense_date", row_num, row_errors) or timezone.localdate()
         if expense_date and expense_date > timezone.localdate() + timedelta(days=1):
             row_errors.append({"row": row_num, "field": "expense_date", "message": "expense_date cannot be more than one day in the future"})
-        category = _clean(r.get("category"))
+        category = normalize_text_column(r.get("category"), max_length=100)
         if not category:
             row_errors.append({"row": row_num, "field": "category", "message": "category is required"})
         project_code = normalize_project_code(r.get("project_code")) or None
-        cost_center = _clean(r.get("cost_center")) or None
+        cost_center = normalize_text_column(r.get("cost_center"), max_length=120) or None
         if project_code:
             if project_code in existing_project_codes:
                 row_errors.append({"row": row_num, "field": "project_code", "message": "project_code already exists"})
 
-        assigned_to_name = _clean(r.get("assigned_to")) or None
+        assigned_to_name = normalize_text_column(r.get("assigned_to")) or None
         assigned_to = users_by_name.get(assigned_to_name) if assigned_to_name else actor
         if assigned_to_name and assigned_to is None:
             row_errors.append({"row": row_num, "field": "assigned_to", "message": "Assigned user not found"})
 
-        source_account_name = _clean(r.get("source_account")) or None
+        source_account_name = normalize_text_column(r.get("source_account"), collapse_whitespace=False) or None
         source_account = None
         if source_account_name:
             source_account = source_accounts_by_name.get(source_account_name.lower())
@@ -702,9 +751,9 @@ def import_expenses_from_upload(upload, *, dry_run: bool, rollback_on_error: boo
                 amount=amount,
                 expense_date=expense_date,
                 category=category,
-                description=_clean(r.get("description")) or None,
-                vendor=_clean(r.get("vendor")) or None,
-                merchant_reference=_clean(r.get("merchant_reference")) or None,
+                description=normalize_text_column(r.get("description"), max_length=None, collapse_whitespace=False) or None,
+                vendor=normalize_text_column(r.get("vendor"), max_length=255) or None,
+                merchant_reference=normalize_text_column(r.get("merchant_reference"), max_length=None, collapse_whitespace=False) or None,
                 project_code=project_code,
                 cost_center=cost_center,
                 source_account=source_account,

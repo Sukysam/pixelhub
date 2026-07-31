@@ -141,6 +141,15 @@ from .serializers import (
 )
 from .project_code_service import peek_next_project_code
 from .source_account_balances import BALANCE_OUTPUT_FIELD, ZERO_BALANCE, annotate_source_account_balance_fields
+from .import_export_formatting import (
+    format_alphanumeric_text,
+    format_currency_amount,
+    format_date,
+    format_datetime,
+    format_decimal,
+    format_integer,
+    format_text,
+)
 
 logger = logging.getLogger(__name__)
 INVOICE_ITEM_DESCRIPTION_MAX_LENGTH = 500
@@ -1675,6 +1684,8 @@ class CustomerViewSet(SoftDeleteModelViewSet):
         rows_limit = max(1, min(rows_limit, 50000))
 
         qs = self.filter_queryset(self.get_queryset()).order_by("-id")[:rows_limit]
+        _company_currency = _currency_for_code(getattr(_effective_company_identity_for_user(request.user), "currency_code", None) or "")
+        _company_currency_code = getattr(_company_currency, "code", None)
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")
@@ -1696,27 +1707,35 @@ class CustomerViewSet(SoftDeleteModelViewSet):
 
         def _order_history(customer: Customer) -> str:
             invoices = customer.invoices.filter(is_deleted=False).order_by("-issue_date", "-id")[:20]
-            parts = [f"{inv.invoice_number}:{inv.status}:{inv.total_amount}" for inv in invoices]
+            parts = []
+            for inv in invoices:
+                total_text = format_currency_amount(inv.total_amount, currency_code=getattr(_company_currency, "code", None)) or format_decimal(inv.total_amount, decimal_places=2)
+                parts.append(f"{format_text(inv.invoice_number)}:{format_text(inv.status)}:{total_text}")
             return " | ".join(parts)
 
         def _value_for(customer: Customer, field: str) -> str:
             if field == "account_status":
-                return _account_status(customer)
+                return format_text(_account_status(customer))
             if field == "segment":
-                return _segment(customer)
+                return format_text(_segment(customer))
             if field == "invoice_count":
-                return str(int(getattr(customer, "invoice_count", 0) or 0))
+                return format_integer(getattr(customer, "invoice_count", 0) or 0, grouping=False)
             if field in ("lifetime_value", "total_paid_amount"):
-                return str(getattr(customer, field, "") or "")
+                raw_value = getattr(customer, field, None)
+                if _company_currency_code:
+                    return format_currency_amount(raw_value, currency_code=_company_currency_code)
+                return format_decimal(raw_value, decimal_places=2, grouping=True)
             if field == "last_invoice_date":
-                value = getattr(customer, field, None)
-                return str(value or "")
+                return format_date(getattr(customer, field, None))
             if field == "order_history":
                 return _order_history(customer)
             if field in ("created_at", "updated_at"):
-                dt = getattr(customer, field, None)
-                return dt.isoformat() if dt else ""
-            return str(getattr(customer, field, "") or "")
+                return format_datetime(getattr(customer, field, None))
+            if field in ("name", "email", "phone", "billing_address"):
+                return format_text(getattr(customer, field, None), collapse_whitespace=False)
+            if field == "id":
+                return format_integer(getattr(customer, "id", None), grouping=False)
+            return format_text(getattr(customer, field, None))
 
         filename_base = "customers"
         _log_operation(request.user, "export", Customer, "customers_export", {"format": fmt, "fields": fields, "limit": rows_limit})
@@ -2039,6 +2058,8 @@ class ItemViewSet(SoftDeleteModelViewSet):
         rows_limit = max(1, min(rows_limit, 50000 if fmt in ("csv", "xlsx") else 5000))
 
         qs = self.filter_queryset(self.get_queryset()).order_by("-id")[:rows_limit]
+        _company_currency = _currency_for_code(getattr(_effective_company_identity_for_user(request.user), "currency_code", None) or "")
+        _company_currency_code = getattr(_company_currency, "code", None)
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")
@@ -2048,15 +2069,24 @@ class ItemViewSet(SoftDeleteModelViewSet):
 
         def _value_for(it: Item, field: str) -> str:
             if field in ("created_at", "updated_at"):
-                dt = getattr(it, field, None)
-                return dt.isoformat() if dt else ""
+                return format_datetime(getattr(it, field, None))
             if field == "unit_price":
-                return str(it.unit_price)
+                if _company_currency_code:
+                    return format_currency_amount(it.unit_price, currency_code=_company_currency_code)
+                return format_decimal(it.unit_price, decimal_places=2)
             if field == "tax_rate":
-                return str(it.tax_rate)
+                return format_decimal(it.tax_rate, decimal_places=2, grouping=False)
             if field == "stock_quantity":
-                return str(it.stock_quantity)
-            return str(getattr(it, field, "") or "")
+                return format_integer(it.stock_quantity, grouping=False)
+            if field in ("name", "sku", "category", "tax_category", "unit_of_measure"):
+                return format_alphanumeric_text(getattr(it, field, None), collapse_whitespace=True)
+            if field == "description":
+                return format_text(getattr(it, field, None), collapse_whitespace=False)
+            if field == "type":
+                return format_text(getattr(it, field, None))
+            if field == "id":
+                return format_integer(getattr(it, "id", None), grouping=False)
+            return format_text(getattr(it, field, None))
 
         filename_base = "inventory_items"
         _log_operation(request.user, "export", Item, "items_export", {"format": fmt, "fields": fields, "limit": rows_limit})
@@ -2774,6 +2804,8 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         rows_limit = max(1, min(rows_limit, 50000 if fmt in ("csv", "xlsx") else 5000))
 
         qs = self.filter_queryset(self.get_queryset()).select_related("customer").order_by("-id")[:rows_limit]
+        _company_currency = _currency_for_code(getattr(_effective_company_identity_for_user(request.user), "currency_code", None) or "")
+        _company_currency_code = getattr(_company_currency, "code", None)
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")
@@ -2783,18 +2815,23 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
 
         def _value_for(inv: Invoice, field: str) -> str:
             if field == "customer_name":
-                return str(getattr(inv.customer, "name", "") or "")
+                return format_text(getattr(inv.customer, "name", None), collapse_whitespace=False)
             if field == "customer_email":
-                return str(getattr(inv.customer, "email", "") or "")
+                return format_text(getattr(inv.customer, "email", None))
             if field in ("issue_date", "due_date"):
-                d = getattr(inv, field, None)
-                return str(d) if d else ""
+                return format_date(getattr(inv, field, None))
             if field in ("subtotal", "tax_total", "total_amount"):
-                return str(getattr(inv, field, "") or "")
+                raw_value = getattr(inv, field, None)
+                if _company_currency_code:
+                    return format_currency_amount(raw_value, currency_code=_company_currency_code)
+                return format_decimal(raw_value, decimal_places=2)
             if field == "updated_at":
-                dt = getattr(inv, "updated_at", None)
-                return dt.isoformat() if dt else ""
-            return str(getattr(inv, field, "") or "")
+                return format_datetime(getattr(inv, "updated_at", None))
+            if field == "status":
+                return format_text(getattr(inv, field, None))
+            if field in ("id",):
+                return format_integer(getattr(inv, "id", None), grouping=False)
+            return format_text(getattr(inv, field, None))
 
         filename_base = "invoices"
         _log_operation(request.user, "export", Invoice, "invoices_export", {"format": fmt, "fields": fields, "limit": rows_limit})
@@ -3636,13 +3673,24 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
             for expense in qs
             if getattr(expense, "source_account_id", None) is not None
         }
+        source_accounts_lookup: dict[int, SourceAccount] = {}
         source_account_balances: dict[int, str] = {}
         if source_account_ids:
-            for account in (
-                annotate_source_account_balance_fields(SourceAccount.objects.filter(id__in=source_account_ids))
-                .only("id", "initial_balance", "created_at")
-            ):
+            for account in annotate_source_account_balance_fields(
+                SourceAccount.objects.filter(id__in=source_account_ids)
+            ).select_related("currency").only("id", "initial_balance", "created_at", "currency"):
+                source_accounts_lookup[account.id] = account
                 source_account_balances[account.id] = f"{Decimal(str(account.current_balance or ZERO_BALANCE)):.2f}"
+        _company_currency = _currency_for_code(getattr(_effective_company_identity_for_user(request.user), "currency_code", None) or "")
+        _default_currency_code = getattr(_company_currency, "code", None)
+
+        def _currency_for_expense(expense: Expense) -> Any:
+            source_account_id = getattr(expense, "source_account_id", None)
+            account = source_accounts_lookup.get(source_account_id) if source_account_id else None
+            currency = getattr(account, "currency", None)
+            if currency is not None:
+                return currency
+            return _company_currency
 
         def _csv_cell(value: str) -> str:
             v = str(value or "")
@@ -3652,26 +3700,41 @@ class ExpenseViewSet(SoftDeleteModelViewSet):
 
         def _value_for(expense: Expense, field: str) -> str:
             if field == "assigned_to":
-                return str(getattr(getattr(expense, "assigned_to", None), "username", "") or "")
+                return format_text(getattr(getattr(expense, "assigned_to", None), "username", None))
             if field == "created_by":
-                return str(getattr(getattr(expense, "created_by", None), "username", "") or "")
+                return format_text(getattr(getattr(expense, "created_by", None), "username", None))
             if field == "source_account":
-                return str(getattr(getattr(expense, "source_account", None), "name", "") or "")
+                return format_text(getattr(getattr(expense, "source_account", None), "name", None), collapse_whitespace=False)
             if field == "source_account_balance":
                 source_account_id = getattr(expense, "source_account_id", None)
                 if source_account_id is None:
                     return ""
-                return source_account_balances.get(source_account_id, "")
+                account = source_accounts_lookup.get(source_account_id)
+                currency_code = getattr(getattr(account, "currency", None), "code", None) or _default_currency_code
+                raw_balance = source_account_balances.get(source_account_id, "")
+                if not raw_balance:
+                    return ""
+                if currency_code:
+                    return format_currency_amount(raw_balance, currency_code=currency_code)
+                return format_decimal(raw_balance, decimal_places=2)
             if field in ("description", "merchant_reference"):
-                return str(decrypt_expense_text(getattr(expense, field, None)) or "")
-            if field in ("expense_date",):
-                return str(getattr(expense, field, "") or "")
-            if field in ("amount",):
-                return str(getattr(expense, field, "") or "")
+                return format_text(decrypt_expense_text(getattr(expense, field, None)), collapse_whitespace=False)
+            if field == "expense_date":
+                return format_date(getattr(expense, field, None))
+            if field == "amount":
+                currency_obj = _currency_for_expense(expense)
+                currency_code = getattr(currency_obj, "code", None) or _default_currency_code
+                raw_value = getattr(expense, field, None)
+                if currency_code:
+                    return format_currency_amount(raw_value, currency_code=currency_code)
+                return format_decimal(raw_value, decimal_places=2)
             if field in ("created_at", "updated_at"):
-                dt = getattr(expense, field, None)
-                return dt.isoformat() if dt else ""
-            return str(getattr(expense, field, "") or "")
+                return format_datetime(getattr(expense, field, None))
+            if field in ("category", "vendor", "project_code", "cost_center"):
+                return format_alphanumeric_text(getattr(expense, field, None), collapse_whitespace=True)
+            if field == "id":
+                return format_integer(getattr(expense, "id", None), grouping=False)
+            return format_text(getattr(expense, field, None))
 
         filename_base = "expenses"
         _log_operation(request.user, "export", Expense, "expenses_export", {"format": fmt, "fields": fields, "limit": rows_limit})
