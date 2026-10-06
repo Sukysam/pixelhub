@@ -235,6 +235,42 @@ function parseDiscountValue(value: string): number | null {
   return n;
 }
 
+function isValidDateString(value: string): boolean {
+  if (!value) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(value + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return false;
+  return d.toISOString().slice(0, 10) === value;
+}
+
+function formatDateForInput(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getTodayDateString(): string {
+  return formatDateForInput(new Date());
+}
+
+function validateIssueDate(value: string, allowFuture = false): string | null {
+  if (!value.trim()) return "Issue date is required";
+  if (!isValidDateString(value)) return "Invalid date format. Use YYYY-MM-DD";
+  const today = getTodayDateString();
+  if (!allowFuture && value > today) return "Issue date cannot be in the future";
+  return null;
+}
+
+function validateDueDate(value: string, issueDateValue: string): string | null {
+  if (!value.trim()) return null;
+  if (!isValidDateString(value)) return "Invalid date format. Use YYYY-MM-DD";
+  if (issueDateValue && isValidDateString(issueDateValue) && value < issueDateValue) {
+    return "Due date cannot be earlier than the issue date";
+  }
+  return null;
+}
+
 function computeDiscount(subtotal: number, discountType: DiscountType, discountValueRaw: string) {
   const parsed = parseDiscountValue(discountValueRaw);
   if (parsed === null) {
@@ -377,6 +413,8 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   >(null);
 
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
+  const [issueDate, setIssueDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [dueDate, setDueDate] = useState<string>("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [discountType, setDiscountType] = useState<DiscountType>("percentage");
   const [discountValue, setDiscountValue] = useState("0");
@@ -1006,6 +1044,18 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const saveInvoice = async () => {
     setError(null);
     setSuccess(null);
+
+    const issueDateError = validateIssueDate(issueDate, false);
+    if (issueDateError) {
+      setError(issueDateError);
+      return;
+    }
+    const dueDateError = validateDueDate(dueDate, issueDate);
+    if (dueDateError) {
+      setError(dueDateError);
+      return;
+    }
+
     if (!selectedCustomer) {
       setError("Please select a customer");
       return;
@@ -1067,6 +1117,8 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
         method: "POST",
         body: JSON.stringify({
           customer: selectedCustomer,
+          issue_date: issueDate,
+          due_date: dueDate || null,
           status: "Draft",
           discount_type: discountType,
           discount_value: computedDiscount.parsedValue,
@@ -1097,6 +1149,8 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setLineItems([]);
       setDiscountType("percentage");
       setDiscountValue("0");
+      setIssueDate(getTodayDateString());
+      setDueDate("");
       setSuccess(`Invoice ${invoiceSummaryInvoice.invoice_number} saved.`);
       setInvoiceSummaryOpen(false);
       if (alsoNavigateToPayment) {
@@ -1130,6 +1184,11 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setInvoices(inv.results);
       setInvoicesNext(inv.next);
       setSelectedInvoiceIds({});
+      setLineItems([]);
+      setDiscountType("percentage");
+      setDiscountValue("0");
+      setIssueDate(getTodayDateString());
+      setDueDate("");
       setInvoiceSummaryOpen(false);
     } catch (e: unknown) {
       setInvoiceSummaryError(toUserMessage(e, "Failed to discard invoice. You may need to delete it from the invoice list."));
@@ -1649,8 +1708,9 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
         <div className="bg-white border rounded-lg p-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <Label>Customer</Label>
+              <Label htmlFor="customer_select">Customer</Label>
               <Select
+                id="customer_select"
                 value={selectedCustomer}
                 onChange={(e) => {
                   const v = e.target.value;
@@ -1672,6 +1732,38 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                   </Button>
                 </div>
               ) : null}
+            </div>
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="issue_date">Issue Date</Label>
+                <Input
+                  id="issue_date"
+                  type="date"
+                  value={issueDate}
+                  onChange={(e) => setIssueDate(e.target.value)}
+                  max={getTodayDateString()}
+                  disabled={loading || savingInvoice}
+                  aria-invalid={validateIssueDate(issueDate, false) ? "true" : "false"}
+                />
+                <div className={`mt-1 text-xs ${validateIssueDate(issueDate, false) ? "text-red-600" : "text-gray-500"}`}>
+                  {validateIssueDate(issueDate, false) ?? "Date the invoice is issued. Cannot be in the future."}
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="due_date">Due Date <span className="text-gray-400 font-normal">(Optional)</span></Label>
+                <Input
+                  id="due_date"
+                  type="date"
+                  value={dueDate}
+                  onChange={(e) => setDueDate(e.target.value)}
+                  min={issueDate || undefined}
+                  disabled={loading || savingInvoice}
+                  aria-invalid={validateDueDate(dueDate, issueDate) ? "true" : "false"}
+                />
+                <div className={`mt-1 text-xs ${validateDueDate(dueDate, issueDate) ? "text-red-600" : "text-gray-500"}`}>
+                  {validateDueDate(dueDate, issueDate) ?? "Date payment is due. Must be on or after the issue date."}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -2125,35 +2217,44 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
             </div>
           </div>
 
-          <div className="border rounded-lg overflow-x-auto">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={invoices.length > 0 && selectedInvoiceList.length === invoices.length}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        const next: Record<number, boolean> = {};
-                        for (const inv of invoices) next[inv.id] = checked;
-                        setSelectedInvoiceIds(next);
-                      }}
-                    />
-                  </th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Invoice #</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Customer</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Due</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Discount</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Total</th>
-                  <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
-                </tr>
-              </thead>
+          <div
+            className="border rounded-lg overflow-hidden"
+            role="region"
+            aria-label="Invoices list with scroll support"
+          >
+            <div
+              className="max-h-[65vh] overflow-auto -webkit-overflow-scrolling-touch scroll-smooth"
+              style={{ scrollbarWidth: 'thin', scrollbarColor: '#cbd5e1 #f8fafc' }}
+            >
+              <table className="w-full text-left min-w-max">
+                <thead className="bg-gray-50 sticky top-0 z-10">
+                  <tr>
+                    <th className="px-4 py-3 sticky left-0 bg-gray-50 z-20">
+                      <input
+                        type="checkbox"
+                        checked={invoices.length > 0 && selectedInvoiceList.length === invoices.length}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          const next: Record<number, boolean> = {};
+                          for (const inv of invoices) next[inv.id] = checked;
+                          setSelectedInvoiceIds(next);
+                        }}
+                      />
+                    </th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Invoice #</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Customer</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Status</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Issue Date</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Due</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Discount</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Total</th>
+                    <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase whitespace-nowrap sticky right-0 bg-gray-50 z-20">Actions</th>
+                  </tr>
+                </thead>
               <tbody className="divide-y divide-gray-200">
                 {invoices.length === 0 ? (
                   <tr>
-                    <td className="px-6 py-6 text-sm text-gray-500" colSpan={8}>
+                    <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
                       No invoices yet.
                     </td>
                   </tr>
@@ -2162,17 +2263,18 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                     const customerName = customers.find((c) => c.id === inv.customer)?.name ?? `#${inv.customer}`;
                     const isPaid = inv.status === "Paid";
                     const isRowPaying = rowPaymentInvoiceId === inv.id;
+                    const rowBg = invoiceEditingId === inv.id ? "bg-white" : "";
                     return (
                       <tr key={inv.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-4">
+                        <td className={`px-4 py-4 sticky left-0 z-10 ${rowBg || (isRowPaying ? "bg-white" : "bg-white group-hover:bg-gray-50")}`} style={{ backgroundColor: 'inherit' }}>
                           <input
                             type="checkbox"
                             checked={!!selectedInvoiceIds[inv.id]}
                             onChange={(e) => setSelectedInvoiceIds((p) => ({ ...p, [inv.id]: e.target.checked }))}
                           />
                         </td>
-                        <td className="px-4 py-4 text-sm font-medium text-gray-900">{inv.invoice_number}</td>
-                        <td className="px-4 py-4 text-sm text-gray-700">{customerName}</td>
+                        <td className="px-4 py-4 text-sm font-medium text-gray-900 whitespace-nowrap">{inv.invoice_number}</td>
+                        <td className="px-4 py-4 text-sm text-gray-700 whitespace-nowrap">{customerName}</td>
                         <td className="px-4 py-4 text-sm">
                           {invoiceEditingId === inv.id ? (
                             <Select
@@ -2195,13 +2297,23 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                             </span>
                           )}
                         </td>
+                        <td className="px-4 py-4 text-sm text-gray-700 whitespace-nowrap">
+                          {inv.issue_date ?? "-"}
+                        </td>
                         <td className="px-4 py-4 text-sm text-gray-700">
                           {invoiceEditingId === inv.id ? (
-                            <Input
-                              type="date"
-                              value={invoiceEditDraft.due_date}
-                              onChange={(e) => setInvoiceEditDraft((p) => ({ ...p, due_date: e.target.value }))}
-                            />
+                            <div>
+                              <Input
+                                type="date"
+                                value={invoiceEditDraft.due_date}
+                                onChange={(e) => setInvoiceEditDraft((p) => ({ ...p, due_date: e.target.value }))}
+                                min={inv.issue_date || undefined}
+                              />
+                              {(() => {
+                                const err = validateDueDate(invoiceEditDraft.due_date, inv.issue_date);
+                                return err ? <div className="mt-1 text-xs text-red-700">{err}</div> : null;
+                              })()}
+                            </div>
                           ) : (
                             inv.due_date ?? "-"
                           )}
@@ -2245,10 +2357,10 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                             "-"
                           )}
                         </td>
-                        <td className="px-4 py-4 text-sm font-semibold text-gray-900">
+                        <td className="px-4 py-4 text-sm font-semibold text-gray-900 whitespace-nowrap">
                           {formatMoney(Number(inv.total_amount))}
                         </td>
-                        <td className="px-4 py-4 text-sm">
+                        <td className={`px-4 py-4 text-sm sticky right-0 z-10 ${invoiceEditingId === inv.id ? "bg-white" : "bg-white"}`} style={{ backgroundColor: 'inherit' }}>
                           {invoiceEditingId === inv.id ? (
                             <div className="flex gap-2">
                               <Button size="sm" onClick={requestInvoiceSave}>
@@ -2304,6 +2416,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                 )}
               </tbody>
             </table>
+          </div>
           </div>
 
           {invoicesNext ? (
