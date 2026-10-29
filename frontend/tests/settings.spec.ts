@@ -350,6 +350,38 @@ test("user can update invoice footer in settings", async ({ page }) => {
   await expect(page.getByLabel("Invoice preview")).toContainText(newValue);
 });
 
+test("user can save a default invoice note from settings", async ({ page }) => {
+  const session = await registerAndReachDashboard(page);
+
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+
+  const note = page.getByLabel("Default Invoice Note");
+  const newValue = `Default invoice note ${Date.now()}`;
+  await expect(note).toBeVisible({ timeout: 30_000 });
+  await note.fill(newValue);
+
+  await page.getByRole("button", { name: "Save Changes" }).click();
+  const saveDialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Save settings?" }) });
+  await saveDialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(saveDialog).toBeHidden({ timeout: 30_000 });
+  await expect(page.getByText("Settings updated.")).toBeVisible({ timeout: 30_000 });
+
+  await expect
+    .poll(
+      async () =>
+        ((await getJson(page.request, session.token, "/settings/me/")) as {
+          invoice_template: { default_note?: string | null };
+        }).invoice_template.default_note ?? null,
+      { timeout: 30_000 }
+    )
+    .toBe(newValue);
+
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(page.getByLabel("Default Invoice Note")).toHaveValue(newValue);
+  await expect(page.getByLabel("Invoice preview")).toContainText(newValue);
+});
+
 test("user can select NGN currency in settings", async ({ page, request }) => {
   const session = await registerAndReachDashboard(page);
 
