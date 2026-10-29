@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.local
+.env.*.local
+.git
+.next
+node_modules
+out
+test-results
+playwright-report
+npm-debug.log*

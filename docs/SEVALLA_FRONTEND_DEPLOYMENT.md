@@ -35,7 +35,7 @@ This should generate a `.next/standalone` directory if `output: 'standalone'` is
 6.  **Critical Configuration**:
     -   **Application Name**: `pixelhub-frontend`
     -   **Build Path / Root Directory**: `frontend`
-    -   **Build Strategy**: Nixpacks (default)
+    -   **Build Strategy**: `Dockerfile`
 
 ## 5. Environment Variable Configuration
 
@@ -46,12 +46,9 @@ Under the **Environment Variables** tab for your new application, add the follow
 
 ## 6. Build and Start Commands
 
-If Nixpacks doesn't automatically detect the correct commands, use these in the **Processes** > **Web Process** settings:
+When using the Dockerfile-based deploy, Sevalla should use the checked-in [Dockerfile](file:///Users/sam/Documents/trae_projects/PIXELHUB/frontend/Dockerfile) directly. You do not need to enter custom build or start commands in the **Processes** section.
 
--   **Build Command**: `npm run build`
--   **Start Command**: `npm run start`
-
-*Note: The `nixpacks.toml` file in the `frontend` directory already specifies these defaults for Sevalla. The root `nixpacks.toml` builds the Django backend only and does not install Node.js, so the frontend must be deployed as its own application with **Build Path** set to `frontend`.*
+*Note: The root [nixpacks.toml](file:///Users/sam/Documents/trae_projects/PIXELHUB/nixpacks.toml) builds the Django backend only and does not install Node.js. The frontend must be deployed as its own application with **Build Path** set to `frontend`. The Dockerfile-based frontend deploy avoids the repeated Node/V8 source compilation that was causing Sevalla build failures.*
 
 ## 7. Post-Deployment Validation
 
@@ -83,6 +80,6 @@ Once the deployment is "Live":
 ## 9. Compatibility Verification
 
 The configuration provided:
--   Uses **Node.js 20** (via Nixpacks).
--   Utilizes Next.js **Standalone Output** for minimal container footprint.
+-   Uses **Node.js 20** via the official Docker image.
+-   Runs the existing Next.js production server with `npm run start`.
 -   Supports **Client-side Environment Variables** via `NEXT_PUBLIC_` prefix.
