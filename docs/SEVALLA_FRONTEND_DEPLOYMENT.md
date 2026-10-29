@@ -36,6 +36,8 @@ This should generate a `.next/standalone` directory if `output: 'standalone'` is
     -   **Application Name**: `pixelhub-frontend`
     -   **Build Path / Root Directory**: `frontend`
     -   **Build Strategy**: `Dockerfile`
+    -   **Docker Context**: `frontend`
+    -   **Dockerfile Path**: `Dockerfile`
 
 ## 5. Environment Variable Configuration
 
@@ -46,9 +48,14 @@ Under the **Environment Variables** tab for your new application, add the follow
 
 ## 6. Build and Start Commands
 
-When using the Dockerfile-based deploy, Sevalla should use the checked-in [Dockerfile](file:///Users/sam/Documents/trae_projects/PIXELHUB/frontend/Dockerfile) directly. You do not need to enter custom build or start commands in the **Processes** section.
+When using the Dockerfile-based deploy, Sevalla should use the checked-in [Dockerfile](file:///Users/sam/Documents/trae_projects/PIXELHUB/frontend/Dockerfile) directly with:
 
-*Note: The root [nixpacks.toml](file:///Users/sam/Documents/trae_projects/PIXELHUB/nixpacks.toml) builds the Django backend only and does not install Node.js. The frontend must be deployed as its own application with **Build Path** set to `frontend`. The Dockerfile-based frontend deploy avoids the repeated Node/V8 source compilation that was causing Sevalla build failures.*
+-   **Docker Context**: `frontend`
+-   **Dockerfile Path**: `Dockerfile`
+
+You do not need to enter custom build or start commands in the **Processes** section.
+
+*Note: If Sevalla keeps the Docker context at repository root (`.`), it will look for a root-level `Dockerfile` and fail with `open Dockerfile: no such file or directory`. The root [nixpacks.toml](file:///Users/sam/Documents/trae_projects/PIXELHUB/nixpacks.toml) builds the Django backend only and does not install Node.js. The frontend must be deployed as its own application with **Build Path** and **Docker Context** set to `frontend`. The Dockerfile-based frontend deploy avoids the repeated Node/V8 source compilation that was causing Sevalla build failures.*
 
 ## 7. Post-Deployment Validation
 
