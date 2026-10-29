@@ -277,6 +277,7 @@ def _invoice_render_settings(templates: dict[str, dict[str, Any]]) -> dict[str, 
         "footer_text": invoice_template.get("footer_text")
         or global_appearance.get("invoice_footer_text")
         or "Thank you for your business!",
+        "default_note": str(invoice_template.get("default_note") or "").strip() or None,
         "show_item_description": bool(invoice_template.get("show_item_description")),
     }
 
@@ -342,7 +343,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             "invoice_items": rendered_items,
             "issue_date_fmt": format_date_for_pattern(invoice.issue_date, region["date_format"]),
             "due_date_fmt": format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
-            "invoice_note": str(invoice.note or "").strip() or None,
+            "invoice_note": str(invoice.note or "").strip() or invoice_render.get("default_note"),
             "subtotal_fmt": format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
             **discount_context,
             "tax_total_fmt": format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),

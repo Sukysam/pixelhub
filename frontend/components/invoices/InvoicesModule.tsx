@@ -372,12 +372,17 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   });
   const [confirmInvoiceSaveOpen, setConfirmInvoiceSaveOpen] = useState(false);
   const [confirmInvoiceDeleteOpen, setConfirmInvoiceDeleteOpen] = useState(false);
+  const [defaultInvoiceNote, setDefaultInvoiceNote] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    apiRequest<{ effective: { currency_code: string } }>("/settings/effective/")
+    apiRequest<{ effective: { currency_code: string; templates?: { invoice_template?: { default_note?: string | null } } } }>("/settings/effective/")
       .then((res) => {
-        if (!cancelled) setCurrencyCode(res?.effective?.currency_code || "NGN");
+        if (cancelled) return;
+        setCurrencyCode(res?.effective?.currency_code || "NGN");
+        const nextDefaultNote = String(res?.effective?.templates?.invoice_template?.default_note ?? "").trim();
+        setDefaultInvoiceNote(nextDefaultNote);
+        setInvoiceNote((prev) => (prev.trim() ? prev : nextDefaultNote));
       })
       .catch(() => undefined);
     return () => {
@@ -1173,7 +1178,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setDiscountValue("0");
       setIssueDate(getTodayDateString());
       setDueDate("");
-      setInvoiceNote("");
+      setInvoiceNote(defaultInvoiceNote);
       setSuccess(`Invoice ${invoiceSummaryInvoice.invoice_number} saved.`);
       setInvoiceSummaryOpen(false);
       if (alsoNavigateToPayment) {
@@ -1212,6 +1217,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setDiscountValue("0");
       setIssueDate(getTodayDateString());
       setDueDate("");
+      setInvoiceNote(defaultInvoiceNote);
       setInvoiceSummaryOpen(false);
     } catch (e: unknown) {
       setInvoiceSummaryError(toUserMessage(e, "Failed to discard invoice. You may need to delete it from the invoice list."));
@@ -1791,23 +1797,6 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
           </div>
 
           <div>
-            <Label htmlFor="invoice_note">Note / Extra Detail <span className="text-gray-400 font-normal">(Optional)</span></Label>
-            <textarea
-              id="invoice_note"
-              value={invoiceNote}
-              onChange={(e) => setInvoiceNote(e.target.value)}
-              placeholder="Add any extra detail, payment note, project reference, or message to appear on the invoice."
-              disabled={loading || savingInvoice}
-              rows={4}
-              aria-invalid={invoiceNoteError(invoiceNote) ? "true" : "false"}
-              className="mt-2 flex min-h-[112px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            <div className={`mt-1 text-xs ${invoiceNoteError(invoiceNote) ? "text-red-600" : "text-gray-500"}`} aria-live="polite">
-              {invoiceNoteError(invoiceNote) ?? `${invoiceNote.length}/${INVOICE_NOTE_MAX_LENGTH} characters`}
-            </div>
-          </div>
-
-          <div>
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold">Line Items</h3>
               <Button onClick={addLineItem} size="sm" disabled={loading}>
@@ -1968,6 +1957,22 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                       : `Enter an amount from ${formatMoney(0)} to ${formatMoney(computed.subtotal)}.`}
                   </div>
                   {computedDiscount.error ? <div className="mt-1 text-xs text-red-700">{computedDiscount.error}</div> : null}
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="invoice_note">Note / Extra Detail <span className="text-gray-400 font-normal">(Optional)</span></Label>
+                <textarea
+                  id="invoice_note"
+                  value={invoiceNote}
+                  onChange={(e) => setInvoiceNote(e.target.value)}
+                  placeholder="Add any extra detail, payment note, project reference, or message to appear on the invoice."
+                  disabled={loading || savingInvoice}
+                  rows={4}
+                  aria-invalid={invoiceNoteError(invoiceNote) ? "true" : "false"}
+                  className="mt-2 flex min-h-[112px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <div className={`mt-1 text-xs ${invoiceNoteError(invoiceNote) ? "text-red-600" : "text-gray-500"}`} aria-live="polite">
+                  {invoiceNoteError(invoiceNote) ?? `${invoiceNote.length}/${INVOICE_NOTE_MAX_LENGTH} characters`}
                 </div>
               </div>
             </div>

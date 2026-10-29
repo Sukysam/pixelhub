@@ -1618,12 +1618,13 @@ class SettingsLogoUploadTests(APITestCase):
         self.client.force_authenticate(user=self.user)
         res = self.client.patch(
             "/api/settings/me/",
-            {"invoice_template": {"logo_url": "https://evil.example/logo.png", "footer_text": "hello"}},
+            {"invoice_template": {"logo_url": "https://evil.example/logo.png", "footer_text": "hello", "default_note": "Default invoice note"}},
             format="json",
         )
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         us = UserSettings.objects.get(user=self.user)
         self.assertEqual(us.invoice_template.get("footer_text"), "hello")
+        self.assertEqual(us.invoice_template.get("default_note"), "Default invoice note")
         self.assertNotIn("logo_url", us.invoice_template)
 
     def test_user_settings_patch_blocks_currency_and_template_overrides_when_disabled(self):
@@ -1901,6 +1902,34 @@ class InvoiceDiscountTests(APITestCase):
         self.assertEqual(preview_res.status_code, status.HTTP_200_OK)
         self.assertContains(preview_res, "Project reference: Tower fit-out")
         self.assertContains(preview_res, "Please confirm delivery window before dispatch.")
+
+    def test_invoice_create_uses_default_note_from_settings_when_note_is_missing(self):
+        settings_obj = UserSettings.objects.get_or_create(user=self.user)[0]
+        settings_obj.invoice_template = {
+            **(settings_obj.invoice_template or {}),
+            "default_note": "Default note from settings",
+        }
+        settings_obj.save(update_fields=["invoice_template", "updated_at"])
+
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 1}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["note"], "Default note from settings")
+
+        invoice = Invoice.objects.get(pk=res.data["id"])
+        self.assertEqual(invoice.note, "Default note from settings")
+
+        preview_res = self.client.get(f"/api/invoices/{invoice.id}/print_html/")
+        self.assertEqual(preview_res.status_code, status.HTTP_200_OK)
+        self.assertContains(preview_res, "Default note from settings")
 
     def test_invoice_create_rejects_description_longer_than_500_characters(self):
         res = self.client.post(

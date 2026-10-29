@@ -2354,6 +2354,10 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
             self._require_model_perm("add")
             payload = request.data.copy()
             items_payload = payload.pop('items', payload.pop('invoice_items', []))
+            templates = _effective_templates_for_user(request.user)
+            default_note = str(((templates.get("invoice_template") or {}).get("default_note") or "")).strip() or None
+            if not str(payload.get("note") or "").strip() and default_note:
+                payload["note"] = default_note
 
             if not isinstance(items_payload, list) or len(items_payload) == 0:
                 return Response({'error': 'items must be a non-empty list'}, status=status.HTTP_400_BAD_REQUEST)

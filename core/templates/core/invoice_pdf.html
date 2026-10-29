@@ -65,6 +65,15 @@
             padding: 12px 14px;
             white-space: pre-wrap;
         }
+        .totals-note {
+            margin-top: 16px;
+        }
+        .totals-note .note-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 700;
+            color: var(--primary);
+        }
         .details-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -297,15 +306,14 @@
                 <span>Total:</span>
                 <span>{{ total_amount_fmt }}</span>
             </div>
+            {% if invoice_note %}
+            <div class="totals-note">
+                <span class="note-label">Note</span>
+                <div class="note-box">{{ invoice_note }}</div>
+            </div>
+            {% endif %}
         </div>
     </div>
-
-    {% if invoice_note %}
-    <div class="section">
-        <div class="section-title">Note</div>
-        <div class="note-box">{{ invoice_note }}</div>
-    </div>
-    {% endif %}
 
     <div class="footer">
         {{ invoice_render.footer_text }}

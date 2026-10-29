@@ -137,6 +137,7 @@ def effective_templates_for_user(user) -> dict:
         "logo_url": None,
         "logo_thumbnail_url": None,
         "footer_text": None,
+        "default_note": None,
         "layout": "classic",
         "show_item_description": True,
         "currency_symbol_position": None,

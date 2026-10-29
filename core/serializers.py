@@ -936,6 +936,17 @@ class UserSettingsSerializer(serializers.ModelSerializer):
                 payload = dict(payload)
                 payload.pop("logo_url", None)
                 payload.pop("logo_thumbnail_url", None)
+                if field_name == "invoice_template":
+                    default_note = payload.get("default_note")
+                    if default_note in (None, ""):
+                        payload["default_note"] = None
+                    elif not isinstance(default_note, str):
+                        raise serializers.ValidationError({"invoice_template": {"default_note": "Invalid default note"}})
+                    else:
+                        normalized_note = default_note.strip()
+                        if len(normalized_note) > 1000:
+                            raise serializers.ValidationError({"invoice_template": {"default_note": "Default note must be 1000 characters or fewer"}})
+                        payload["default_note"] = normalized_note or None
                 attrs[field_name] = payload
         return attrs
 

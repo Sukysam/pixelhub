@@ -202,6 +202,7 @@ function SettingsPageInner() {
     const logoUrl = resolveMediaUrl(logoUrlRaw);
     const showDesc = Boolean(invoiceTemplate.show_item_description);
     const footerText = (invoiceTemplate.footer_text as string) || (globalAppearance.invoice_footer_text as string) || "Thank you for your business!";
+    const defaultNote = String(invoiceTemplate.default_note ?? "").trim();
     const companyName = (globalAppearance.company_name as string) || authUser?.company_name || "PXL INVOICE";
     const companyTagline = (globalAppearance.company_tagline as string) || "";
     const currencyCode = activeCurrencyCode || "USD";
@@ -215,7 +216,7 @@ function SettingsPageInner() {
     const subtotal = 400;
     const tax = 0;
     const total = 400;
-    return { layout, primary, font, logoUrl, showDesc, footerText, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
+    return { layout, primary, font, logoUrl, showDesc, footerText, defaultNote, companyName, companyTagline, nf, df, today, items, subtotal, tax, total };
   }, [activeCurrencyCode, allowUserOverrides, authUser?.company_name, effectiveInvoiceTemplate, form?.invoice_template, globalAppearance, locale]);
 
   const previewReceipt = useMemo(() => {
@@ -642,6 +643,22 @@ function SettingsPageInner() {
                         })
                       }
                     />
+                    <Label htmlFor="inv_default_note">Default Invoice Note</Label>
+                    <textarea
+                      id="inv_default_note"
+                      disabled={!allowUserOverrides}
+                      value={String((form.invoice_template as Record<string, unknown>).default_note ?? "")}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          invoice_template: { ...(form.invoice_template || {}), default_note: e.target.value },
+                        })
+                      }
+                      rows={4}
+                      className="flex min-h-[112px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                      placeholder="This note will appear by default on invoices that do not have a custom note."
+                    />
+                    <div className="text-xs text-gray-500">Shows on all invoices by default unless you replace it with a custom note on an individual invoice.</div>
                   </div>
                 </CardContent>
               </Card>
@@ -908,6 +925,12 @@ function SettingsPageInner() {
                         <span>Total</span>
                         <span>{previewInvoice.nf.format(previewInvoice.total)}</span>
                       </div>
+                      {previewInvoice.defaultNote ? (
+                        <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-left">
+                          <div className="text-xs font-semibold" style={{ color: previewInvoice.primary }}>Note</div>
+                          <div className="mt-1 whitespace-pre-wrap text-xs text-gray-700">{previewInvoice.defaultNote}</div>
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className={`mt-4 border-t text-center text-gray-600 ${previewInvoice.layout === "compact" ? "pt-2 text-[11px]" : "pt-3 text-xs"}`}>{previewInvoice.footerText}</div>
