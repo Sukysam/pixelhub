@@ -237,10 +237,15 @@ function parseDiscountValue(value: string): number | null {
 
 function isValidDateString(value: string): boolean {
   if (!value) return false;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const d = new Date(value + "T00:00:00");
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const [, yearRaw, monthRaw, dayRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const d = new Date(year, month - 1, day);
   if (Number.isNaN(d.getTime())) return false;
-  return d.toISOString().slice(0, 10) === value;
+  return d.getFullYear() === year && d.getMonth() === month - 1 && d.getDate() === day;
 }
 
 function formatDateForInput(date: Date): string {
@@ -413,7 +418,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   >(null);
 
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
-  const [issueDate, setIssueDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState<string>(getTodayDateString());
   const [dueDate, setDueDate] = useState<string>("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [discountType, setDiscountType] = useState<DiscountType>("percentage");
@@ -1391,7 +1396,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const openPaymentForInvoice = (invoiceId: number) => {
     setPaymentInvoiceId(invoiceId);
     setPaymentMode("card_gateway");
-    setPaymentDate(new Date().toISOString().slice(0, 10));
+    setPaymentDate(getTodayDateString());
     setPaymentAmount("");
     setPaymentReference("");
     setPaymentProvider("paystack");
