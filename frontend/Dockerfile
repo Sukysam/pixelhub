@@ -10,6 +10,11 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 ENV NODE_ENV=production
 
+# NEXT_PUBLIC_* variables are inlined into the client bundle at build time,
+# so the value must be present here, not just in the runtime environment.
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
