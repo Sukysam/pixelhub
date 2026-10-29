@@ -120,7 +120,7 @@ function AuthLanding({ defaultMode, onAuthed }: { defaultMode: AuthMode; onAuthe
       return;
     }
     setOauthLoading(provider);
-    window.location.assign(`${API_BASE_URL}/auth/${provider}/start/?remember=${oauthRemember ? "1" : "0"}`);
+    window.open(`${API_BASE_URL}/auth/${provider}/start/?remember=${oauthRemember ? "1" : "0"}`, "_self");
   };
 
   return (

@@ -340,9 +340,7 @@ function SettingsPageInner() {
       setError("API base URL is not configured. Set NEXT_PUBLIC_API_BASE_URL to your live HTTPS backend API URL.");
       return;
     }
-    window.location.assign(
-      `${API_BASE_URL}/auth/${provider}/start/?intent=link&remember=1`
-    );
+    window.open(`${API_BASE_URL}/auth/${provider}/start/?intent=link&remember=1`, "_self");
   };
 
   return (

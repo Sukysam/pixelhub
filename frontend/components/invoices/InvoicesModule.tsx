@@ -373,6 +373,13 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const [confirmInvoiceSaveOpen, setConfirmInvoiceSaveOpen] = useState(false);
   const [confirmInvoiceDeleteOpen, setConfirmInvoiceDeleteOpen] = useState(false);
   const [defaultInvoiceNote, setDefaultInvoiceNote] = useState("");
+  const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
+  const [issueDate, setIssueDate] = useState<string>(getTodayDateString());
+  const [dueDate, setDueDate] = useState<string>("");
+  const [invoiceNote, setInvoiceNote] = useState("");
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
+  const [discountType, setDiscountType] = useState<DiscountType>("percentage");
+  const [discountValue, setDiscountValue] = useState("0");
 
   useEffect(() => {
     let cancelled = false;
@@ -431,14 +438,6 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       }
     | null
   >(null);
-
-  const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
-  const [issueDate, setIssueDate] = useState<string>(getTodayDateString());
-  const [dueDate, setDueDate] = useState<string>("");
-  const [invoiceNote, setInvoiceNote] = useState("");
-  const [lineItems, setLineItems] = useState<LineItem[]>([]);
-  const [discountType, setDiscountType] = useState<DiscountType>("percentage");
-  const [discountValue, setDiscountValue] = useState("0");
 
   const [invoiceSummaryOpen, setInvoiceSummaryOpen] = useState(false);
   const [invoiceSummaryLoading, setInvoiceSummaryLoading] = useState(false);
