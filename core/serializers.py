@@ -488,6 +488,16 @@ class InvoiceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Invalid discount_type")
         return value
 
+    def validate_note(self, value):
+        if value in (None, ""):
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if len(normalized) > 1000:
+            raise serializers.ValidationError("note must be 1000 characters or fewer")
+        return normalized
+
     def validate_discount_value(self, value):
         if value is None:
             return Decimal("0.00")
@@ -513,6 +523,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             "customer_email",
             "issue_date",
             "due_date",
+            "note",
             "subtotal",
             "discount_type",
             "discount_value",

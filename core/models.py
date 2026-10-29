@@ -170,6 +170,7 @@ class Invoice(SoftDeleteModel):
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='invoices')
     issue_date = models.DateField(default=timezone.localdate)
     due_date = models.DateField(blank=True, null=True)
+    note = models.TextField(blank=True, null=True)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     discount_type = models.CharField(max_length=20, choices=DISCOUNT_TYPE_CHOICES, default=DISCOUNT_TYPE_PERCENTAGE)
     discount_value = models.DecimalField(max_digits=10, decimal_places=2, default=0)

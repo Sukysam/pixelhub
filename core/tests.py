@@ -1878,6 +1878,30 @@ class InvoiceDiscountTests(APITestCase):
         self.assertEqual(persisted_items[0].description, "Custom product description")
         self.assertIsNone(persisted_items[1].description)
 
+    def test_invoice_create_persists_note_and_print_html_renders_it(self):
+        note = "Project reference: Tower fit-out\nPlease confirm delivery window before dispatch."
+        res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "note": note,
+                "items": [{"item": self.item.id, "quantity": 1}],
+            },
+            format="json",
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data["note"], note)
+
+        invoice = Invoice.objects.get(pk=res.data["id"])
+        self.assertEqual(invoice.note, note)
+
+        preview_res = self.client.get(f"/api/invoices/{invoice.id}/print_html/")
+        self.assertEqual(preview_res.status_code, status.HTTP_200_OK)
+        self.assertContains(preview_res, "Project reference: Tower fit-out")
+        self.assertContains(preview_res, "Please confirm delivery window before dispatch.")
+
     def test_invoice_create_rejects_description_longer_than_500_characters(self):
         res = self.client.post(
             "/api/invoices/",

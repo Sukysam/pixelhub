@@ -45,6 +45,7 @@ type InvoiceListItem = {
   customer: number;
   issue_date: string;
   due_date: string | null;
+  note?: string | null;
   status: "Draft" | "Sent" | "Paid" | "Overdue";
   discount_type: "percentage" | "fixed";
   discount_value: string;
@@ -74,6 +75,7 @@ type InvoiceResponse = {
   id: number;
   invoice_number: string;
   customer: number;
+  note: string | null;
   status: InvoiceListItem["status"];
   discount_type: InvoiceListItem["discount_type"];
   discount_value: string;
@@ -167,6 +169,7 @@ interface LineItem {
 }
 
 const LINE_ITEM_DESCRIPTION_MAX_LENGTH = 500;
+const INVOICE_NOTE_MAX_LENGTH = 1000;
 
 function parsePositiveInt(value: string): number | null {
   const n = Number(value);
@@ -195,6 +198,13 @@ function moneyInputValue(value: number): string {
 function lineItemDescriptionError(value: string): string | null {
   if (value.length > LINE_ITEM_DESCRIPTION_MAX_LENGTH) {
     return `Description must be ${LINE_ITEM_DESCRIPTION_MAX_LENGTH} characters or fewer`;
+  }
+  return null;
+}
+
+function invoiceNoteError(value: string): string | null {
+  if (value.length > INVOICE_NOTE_MAX_LENGTH) {
+    return `Note must be ${INVOICE_NOTE_MAX_LENGTH} characters or fewer`;
   }
   return null;
 }
@@ -420,6 +430,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
   const [issueDate, setIssueDate] = useState<string>(getTodayDateString());
   const [dueDate, setDueDate] = useState<string>("");
+  const [invoiceNote, setInvoiceNote] = useState("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [discountType, setDiscountType] = useState<DiscountType>("percentage");
   const [discountValue, setDiscountValue] = useState("0");
@@ -1060,6 +1071,11 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setError(dueDateError);
       return;
     }
+    const noteError = invoiceNoteError(invoiceNote);
+    if (noteError) {
+      setError(noteError);
+      return;
+    }
 
     if (!selectedCustomer) {
       setError("Please select a customer");
@@ -1124,6 +1140,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
           customer: selectedCustomer,
           issue_date: issueDate,
           due_date: dueDate || null,
+          note: invoiceNote.trim() || null,
           status: "Draft",
           discount_type: discountType,
           discount_value: computedDiscount.parsedValue,
@@ -1156,6 +1173,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setDiscountValue("0");
       setIssueDate(getTodayDateString());
       setDueDate("");
+      setInvoiceNote("");
       setSuccess(`Invoice ${invoiceSummaryInvoice.invoice_number} saved.`);
       setInvoiceSummaryOpen(false);
       if (alsoNavigateToPayment) {
@@ -1769,6 +1787,23 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                   {validateDueDate(dueDate, issueDate) ?? "Date payment is due. Must be on or after the issue date."}
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div>
+            <Label htmlFor="invoice_note">Note / Extra Detail <span className="text-gray-400 font-normal">(Optional)</span></Label>
+            <textarea
+              id="invoice_note"
+              value={invoiceNote}
+              onChange={(e) => setInvoiceNote(e.target.value)}
+              placeholder="Add any extra detail, payment note, project reference, or message to appear on the invoice."
+              disabled={loading || savingInvoice}
+              rows={4}
+              aria-invalid={invoiceNoteError(invoiceNote) ? "true" : "false"}
+              className="mt-2 flex min-h-[112px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <div className={`mt-1 text-xs ${invoiceNoteError(invoiceNote) ? "text-red-600" : "text-gray-500"}`} aria-live="polite">
+              {invoiceNoteError(invoiceNote) ?? `${invoiceNote.length}/${INVOICE_NOTE_MAX_LENGTH} characters`}
             </div>
           </div>
 
@@ -2746,6 +2781,12 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                 </div>
 
                 <div className="space-y-1 text-sm">
+                  {invoiceSummaryInvoice.note ? (
+                    <div className="rounded-md border bg-gray-50 px-3 py-2">
+                      <div className="text-xs text-gray-500">Note</div>
+                      <div className="mt-1 whitespace-pre-wrap text-sm text-gray-800">{invoiceSummaryInvoice.note}</div>
+                    </div>
+                  ) : null}
                   <div className="flex justify-between">
                     <span className="text-gray-600">Subtotal</span>
                     <span className="font-medium">{formatMoney(Number(invoiceSummaryInvoice.subtotal))}</span>

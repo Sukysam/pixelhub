@@ -342,6 +342,7 @@ def render_invoice(request, invoice: Invoice, fmt: DocumentFormat) -> RenderedDo
             "invoice_items": rendered_items,
             "issue_date_fmt": format_date_for_pattern(invoice.issue_date, region["date_format"]),
             "due_date_fmt": format_date_for_pattern(invoice.due_date, region["date_format"]) if invoice.due_date else None,
+            "invoice_note": str(invoice.note or "").strip() or None,
             "subtotal_fmt": format_money(Decimal(invoice.subtotal), currency, region["number_format"], symbol_position),
             **discount_context,
             "tax_total_fmt": format_money(Decimal(invoice.tax_total), currency, region["number_format"], symbol_position),

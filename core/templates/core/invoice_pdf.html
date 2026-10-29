@@ -58,6 +58,13 @@
             margin-bottom: 10px;
             color: var(--primary);
         }
+        .note-box {
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: #f9fafb;
+            padding: 12px 14px;
+            white-space: pre-wrap;
+        }
         .details-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -292,6 +299,13 @@
             </div>
         </div>
     </div>
+
+    {% if invoice_note %}
+    <div class="section">
+        <div class="section-title">Note</div>
+        <div class="note-box">{{ invoice_note }}</div>
+    </div>
+    {% endif %}
 
     <div class="footer">
         {{ invoice_render.footer_text }}
