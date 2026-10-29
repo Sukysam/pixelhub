@@ -28,7 +28,10 @@ _media_url_prefix = str(settings.MEDIA_URL or "/media/").lstrip("/")
 if _media_url_prefix and not _media_url_prefix.endswith("/"):
     _media_url_prefix += "/"
 _logo_media_pattern = rf"^{re.escape(_media_url_prefix)}uploads/logos/(?P<path>.*)$"
-_logo_media_root = str(Path(settings.MEDIA_ROOT) / "uploads" / "logos")
+
+
+def serve_uploaded_logo(request, path: str):
+    return serve(request, path, document_root=str(Path(settings.MEDIA_ROOT) / "uploads" / "logos"))
 
 urlpatterns = [
     path("", lambda request: JsonResponse({"service": "pixelhub", "status": "ok"}), name="root"),
@@ -38,7 +41,7 @@ urlpatterns = [
     path('api/health/', lambda request: JsonResponse({'status': 'ok'})),
     # Serve uploaded logo assets in all environments so settings previews and
     # printable invoice/receipt documents can load their media in production.
-    re_path(_logo_media_pattern, serve, {"document_root": _logo_media_root}),
+    re_path(_logo_media_pattern, serve_uploaded_logo),
 ]
 
 if settings.DEBUG:
