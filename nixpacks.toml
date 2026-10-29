@@ -9,13 +9,13 @@ nixPkgs = ["python311", "cairo", "pango", "gdk-pixbuf", "shared-mime-info"]
 
 [phases.install]
 cmds = [
-  "python -m ensurepip --upgrade && python -m pip install --upgrade pip setuptools wheel && python -m pip install -r requirements.txt",
+  "python -m venv /opt/venv && /opt/venv/bin/python -m pip install --upgrade pip setuptools wheel && /opt/venv/bin/python -m pip install -r requirements.txt",
 ]
 
 [phases.build]
 cmds = [
-  "python manage.py collectstatic --noinput",
+  "/opt/venv/bin/python manage.py collectstatic --noinput",
 ]
 
 [start]
-cmd = "python manage.py migrate && gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}"
+cmd = "/opt/venv/bin/python manage.py migrate && /opt/venv/bin/gunicorn pixelhub.wsgi:application -b 0.0.0.0:${PORT:-8080}"
