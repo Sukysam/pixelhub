@@ -55,7 +55,14 @@ When using the Dockerfile-based deploy, Sevalla should use the checked-in [Docke
 
 You do not need to enter custom build or start commands in the **Processes** section.
 
-*Note: If Sevalla keeps the Docker context at repository root (`.`), it will look for a root-level `Dockerfile` and fail with `open Dockerfile: no such file or directory`. The root [nixpacks.toml](file:///Users/sam/Documents/trae_projects/PIXELHUB/nixpacks.toml) builds the Django backend only and does not install Node.js. The frontend must be deployed as its own application with **Build Path** and **Docker Context** set to `frontend`. The Dockerfile-based frontend deploy avoids the repeated Node/V8 source compilation that was causing Sevalla build failures.*
+Fallback for hosts that keep the Docker context at repository root:
+
+-   **Docker Context**: `.`
+-   **Dockerfile Path**: `Dockerfile`
+
+The repository root now includes a compatibility [Dockerfile](file:///Users/sam/Documents/trae_projects/PIXELHUB/Dockerfile) that builds the frontend from the `frontend/` directory, plus a root [.dockerignore](file:///Users/sam/Documents/trae_projects/PIXELHUB/.dockerignore) that limits the Docker context to frontend files.
+
+*Note: The root [nixpacks.toml](file:///Users/sam/Documents/trae_projects/PIXELHUB/nixpacks.toml) still builds the Django backend only and does not install Node.js. The Dockerfile-based frontend deploy avoids the repeated Node/V8 source compilation that was causing Sevalla build failures.*
 
 ## 7. Post-Deployment Validation
 
