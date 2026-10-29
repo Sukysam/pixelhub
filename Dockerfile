@@ -24,7 +24,6 @@ FROM node:20-bookworm-slim AS runner
 
 WORKDIR /app/frontend
 ENV NODE_ENV=production
-ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
 COPY --from=builder /app/frontend/package.json ./package.json
@@ -36,4 +35,5 @@ COPY --from=builder /app/frontend/next.config.mjs ./next.config.mjs
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start"]
+# Bind to the port Sevalla provides at runtime (PORT), falling back to 3000 locally.
+CMD ["sh", "-c", "exec ./node_modules/.bin/next start -p \"${PORT:-3000}\" -H 0.0.0.0"]

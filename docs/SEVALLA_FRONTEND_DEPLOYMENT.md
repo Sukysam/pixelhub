@@ -44,7 +44,9 @@ This should generate a `.next/standalone` directory if `output: 'standalone'` is
 Under the **Environment Variables** tab for your new application, add the following:
 
 -   `NEXT_PUBLIC_API_BASE_URL`: The full URL to your backend API (e.g., `https://pixelhub-api.sevalla.app/api`).
--   `PORT`: `3000` (Sevalla will automatically bind to this, but you can explicitly set it).
+    **Mark this variable as "Available during buildtime"** (in addition to runtime). `NEXT_PUBLIC_*` values are inlined into the client bundle by `next build`, and Sevalla only passes buildtime variables into the Docker build as build arguments. If it is runtime-only, the browser bundle ships with no API URL and the app throws *"API base URL is not configured"*.
+
+Do **not** set `PORT`. Sevalla sets `PORT` at runtime to the web process port (default `8080`); the container's start command reads it. Hardcoding a different port is the most common cause of a *503 Service Temporarily Unavailable* immediately after a successful deploy.
 
 ## 6. Build and Start Commands
 
@@ -52,6 +54,8 @@ When using the Dockerfile-based deploy, Sevalla should use the checked-in [Docke
 
 -   **Docker Context**: `frontend`
 -   **Dockerfile Path**: `Dockerfile`
+
+The image's `CMD` runs `next start -p "$PORT" -H 0.0.0.0`, so it always binds to the port Sevalla routes to. Confirm the web process port on the Sevalla **Networking** tab and leave it at the default unless you have a reason to change it.
 
 You do not need to enter custom build or start commands in the **Processes** section.
 
