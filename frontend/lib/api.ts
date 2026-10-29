@@ -1,8 +1,28 @@
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000/api";
-const FALLBACK_API_BASE_URL = "http://127.0.0.1:8001/api";
+const LOCAL_API_BASE_URL = "http://127.0.0.1:8000/api";
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+function normalizeApiBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return /^(localhost|127\.0\.0\.1)$/i.test(hostname);
+}
+
+function resolveApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (configured) return normalizeApiBaseUrl(configured);
+  if (typeof window !== "undefined" && isLocalHostname(window.location.hostname)) {
+    return LOCAL_API_BASE_URL;
+  }
+  return "";
+}
+
+function requireApiBaseUrl(): string {
+  if (API_BASE_URL) return API_BASE_URL;
+  throw new Error("API base URL is not configured. Set NEXT_PUBLIC_API_BASE_URL to your live HTTPS backend API URL.");
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 export function apiOrigin(): string {
   try {
@@ -28,11 +48,12 @@ export async function downloadWithAuth(path: string, fallbackFilename = "downloa
   const token = getAuthToken();
   let url = path;
   if (!/^https?:\/\//i.test(path)) {
+    const apiBaseUrl = requireApiBaseUrl();
     if (path.startsWith("/api/")) {
       const origin = apiOrigin();
       url = origin ? `${origin}${path}` : path;
     } else {
-      url = `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
+      url = `${apiBaseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
     }
   }
   const headers: Record<string, string> = {};
@@ -356,13 +377,10 @@ export async function apiRequest<T>(
   init?: RequestInit
 ): Promise<T> {
   const isAbsolute = path.startsWith("http://") || path.startsWith("https://");
+  const apiBaseUrl = isAbsolute ? "" : requireApiBaseUrl();
   const url = isAbsolute
     ? path
-    : `${API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
-  const shouldFallback =
-    !isAbsolute &&
-    process.env.NEXT_PUBLIC_API_BASE_URL == null &&
-    API_BASE_URL === DEFAULT_API_BASE_URL;
+    : `${apiBaseUrl}${path.startsWith("/") ? "" : "/"}${path}`;
   const token = getAuthToken();
   const isFormData =
     typeof FormData !== "undefined" &&
@@ -384,9 +402,7 @@ export async function apiRequest<T>(
   try {
     res = await doFetch(url);
   } catch (e) {
-    if (!shouldFallback) throw e;
-    const fallbackUrl = `${FALLBACK_API_BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`;
-    res = await doFetch(fallbackUrl);
+    throw e;
   }
 
   const contentType = res.headers.get("content-type") ?? "";

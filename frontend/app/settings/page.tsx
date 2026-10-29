@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl, uploadLogoFile, validateLogoFile, type LogoUploadScope } from "@/lib/api";
+import { API_BASE_URL, apiRequest, getAuthUser, getErrorMessage, hasAdminSettingsAccess, resolveMediaUrl, uploadLogoFile, validateLogoFile, type LogoUploadScope } from "@/lib/api";
 
 type Currency = {
   id: number;
@@ -335,8 +335,12 @@ function SettingsPageInner() {
   const startSocialLink = (provider: "google" | "facebook") => {
     setError(null);
     setSuccess(null);
+    if (!API_BASE_URL) {
+      setError("API base URL is not configured. Set NEXT_PUBLIC_API_BASE_URL to your live HTTPS backend API URL.");
+      return;
+    }
     window.location.assign(
-      `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api"}/auth/${provider}/start/?intent=link&remember=1`
+      `${API_BASE_URL}/auth/${provider}/start/?intent=link&remember=1`
     );
   };
 
