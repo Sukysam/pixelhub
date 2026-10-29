@@ -138,7 +138,7 @@ def effective_templates_for_user(user) -> dict:
         "logo_thumbnail_url": None,
         "footer_text": None,
         "layout": "classic",
-        "show_item_description": False,
+        "show_item_description": True,
         "currency_symbol_position": None,
         **(invoice_template if isinstance(invoice_template, dict) else {}),
     }

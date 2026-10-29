@@ -1567,6 +1567,38 @@ class SettingsLogoUploadTests(APITestCase):
                 self.assertContains(receipt_html, 'class="receipt-layout-compact"')
                 self.assertContains(receipt_html, "data:image/webp;base64,")
 
+    def test_invoice_print_html_shows_item_description_by_default(self):
+        self.client.force_authenticate(user=self.user)
+        customer = Customer.objects.create(name="Preview Buyer", email="preview@example.com")
+        item = Item.objects.create(
+            name="Preview Widget",
+            description="Printable invoice line description",
+            unit_price=Decimal("25.00"),
+            stock_quantity=5,
+        )
+        invoice = Invoice.objects.create(
+            invoice_number="INV-2026-DESC",
+            customer=customer,
+            status="Draft",
+            issue_date=timezone.localdate(),
+            subtotal=Decimal("25.00"),
+            tax_total=Decimal("0.00"),
+            total_amount=Decimal("25.00"),
+        )
+        InvoiceItem.objects.create(
+            invoice=invoice,
+            item=item,
+            quantity=1,
+            unit_price=Decimal("25.00"),
+            line_subtotal=Decimal("25.00"),
+            line_tax=Decimal("0.00"),
+            line_total=Decimal("25.00"),
+        )
+
+        preview_res = self.client.get(f"/api/invoices/{invoice.id}/print_html/")
+        self.assertEqual(preview_res.status_code, status.HTTP_200_OK)
+        self.assertContains(preview_res, "Printable invoice line description")
+
     def test_user_settings_patch_ignores_manual_logo_url(self):
         self.client.force_authenticate(user=self.user)
         res = self.client.patch(
