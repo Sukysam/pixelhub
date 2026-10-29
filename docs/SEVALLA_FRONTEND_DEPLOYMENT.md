@@ -51,7 +51,7 @@ If Nixpacks doesn't automatically detect the correct commands, use these in the 
 -   **Build Command**: `npm run build`
 -   **Start Command**: `npm run start`
 
-*Note: The `nixpacks.toml` file in the `frontend` directory already specifies these defaults for Sevalla. If your host deploys from the repo root instead, set `APP_RUNTIME=frontend` so the root `nixpacks.toml` switches to the frontend build.*
+*Note: The `nixpacks.toml` file in the `frontend` directory already specifies these defaults for Sevalla. The root `nixpacks.toml` builds the Django backend only and does not install Node.js, so the frontend must be deployed as its own application with **Build Path** set to `frontend`.*
 
 ## 7. Post-Deployment Validation
 
