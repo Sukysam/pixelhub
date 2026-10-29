@@ -1486,6 +1486,21 @@ class SettingsLogoUploadTests(APITestCase):
                 self.assertIsNotNone(us.receipt_logo_id)
                 self.assertTrue(str(res.data["logo_url"]).endswith(".webp"))
 
+    def test_uploaded_invoice_logo_is_served_when_debug_is_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/", DEBUG=False, ALLOWED_HOSTS=["testserver"]):
+                self.client.force_authenticate(user=self.user)
+                res = self.client.post(
+                    "/api/settings/logo/upload/",
+                    {"file": _png_logo_upload_file("prod-invoice-logo.png"), "scope": "invoice_template"},
+                    format="multipart",
+                )
+                self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+                media_res = self.client.get(str(res.data["logo_url"]))
+                self.assertEqual(media_res.status_code, status.HTTP_200_OK)
+                self.assertEqual(media_res["Content-Type"], "image/png")
+
     def test_uploaded_logos_render_in_invoice_and_receipt_documents(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/", BACKEND_PUBLIC_BASE_URL="https://backend.example"):
