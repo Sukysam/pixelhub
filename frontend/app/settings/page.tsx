@@ -142,7 +142,7 @@ function SettingsPageInner() {
       ]);
       setCurrencies(currencyList);
       setSocialConnections(social.results);
-      setAllowUserOverrides(Boolean(effective.global?.allow_user_overrides ?? true));
+      setAllowUserOverrides(true);
       setGlobalAppearance(effective.effective.templates.global_appearance || {});
       setEffectiveInvoiceTemplate(effective.effective.templates.invoice_template || {});
       setEffectiveReceiptTemplate(effective.effective.templates.receipt_template || {});
@@ -254,10 +254,6 @@ function SettingsPageInner() {
 
   const onPickTemplateLogo = useCallback(
     async (scope: UserLogoScope, files: FileList | null) => {
-      if (!allowUserOverrides) {
-        setError("Template overrides are currently disabled by an administrator.");
-        return;
-      }
       if (!files || files.length === 0) return;
       const file = files[0];
       const validationError = validateLogoFile(file);
@@ -297,7 +293,7 @@ function SettingsPageInner() {
         setLogoUploading((prev) => ({ ...prev, [scope]: false }));
       }
     },
-    [allowUserOverrides, setScopedPreview]
+    [setScopedPreview]
   );
 
   const onSave = async () => {
@@ -314,13 +310,9 @@ function SettingsPageInner() {
           date_format: form.date_format,
           number_format: form.number_format,
           notifications: form.notifications,
-          ...(allowUserOverrides
-            ? {
-                currency: form.currency,
-                invoice_template: form.invoice_template,
-                receipt_template: form.receipt_template,
-              }
-            : {}),
+          currency: form.currency,
+          invoice_template: form.invoice_template,
+          receipt_template: form.receipt_template,
         }),
       });
       setConfirmOpen(false);

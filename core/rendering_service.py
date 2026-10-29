@@ -91,7 +91,7 @@ def effective_logo_assets_for_user(user) -> dict[str, Optional[LogoAsset]]:
     global_logo = getattr(gs, "appearance_logo", None)
     invoice_logo = None
     receipt_logo = None
-    if getattr(user, "is_authenticated", False) and gs.allow_user_overrides:
+    if getattr(user, "is_authenticated", False):
         us = get_user_settings(user)
         invoice_logo = getattr(us, "invoice_logo", None)
         receipt_logo = getattr(us, "receipt_logo", None)
@@ -125,11 +125,10 @@ def effective_templates_for_user(user) -> dict:
     identity = effective_company_identity_for_user(user)
     if getattr(user, "is_authenticated", False):
         us = get_user_settings(user)
-        if gs.allow_user_overrides:
-            invoice_template = us.invoice_template or {}
-            receipt_template = us.receipt_template or {}
-            invoice_logo = getattr(us, "invoice_logo", None)
-            receipt_logo = getattr(us, "receipt_logo", None)
+        invoice_template = us.invoice_template or {}
+        receipt_template = us.receipt_template or {}
+        invoice_logo = getattr(us, "invoice_logo", None)
+        receipt_logo = getattr(us, "receipt_logo", None)
 
     invoice_template = {
         "primary_color": None,
@@ -235,8 +234,7 @@ def effective_region_settings_for_user(request, user, *, detect_country) -> dict
         language = us.language or None
         date_format = us.date_format or None
         number_format = us.number_format or None
-        if gs.allow_user_overrides:
-            currency_code = us.currency.code if us.currency_id else None
+        currency_code = us.currency.code if us.currency_id else None
 
     if not country:
         country = detect_country(request)

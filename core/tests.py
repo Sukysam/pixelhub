@@ -1627,7 +1627,7 @@ class SettingsLogoUploadTests(APITestCase):
         self.assertEqual(us.invoice_template.get("default_note"), "Default invoice note")
         self.assertNotIn("logo_url", us.invoice_template)
 
-    def test_user_settings_patch_blocks_currency_and_template_overrides_when_disabled(self):
+    def test_user_settings_patch_allows_currency_and_template_overrides_even_when_global_lock_is_disabled(self):
         self.client.force_authenticate(user=self.user)
         gs = GlobalSettings.objects.get_or_create(singleton_key="global")[0]
         gs.allow_user_overrides = False
@@ -1635,12 +1635,13 @@ class SettingsLogoUploadTests(APITestCase):
 
         res = self.client.patch(
             "/api/settings/me/",
-            {"currency": None, "invoice_template": {"footer_text": "blocked"}},
+            {"currency": None, "invoice_template": {"footer_text": "allowed", "default_note": "Allowed note"}},
             format="json",
         )
-        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("disabled", str(res.data).lower())
-        self.assertIn("invoice_template", str(res.data.get("fields", [])))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        us = UserSettings.objects.get(user=self.user)
+        self.assertEqual(us.invoice_template.get("footer_text"), "allowed")
+        self.assertEqual(us.invoice_template.get("default_note"), "Allowed note")
 
     def test_user_settings_patch_allows_personal_preferences_when_overrides_disabled(self):
         self.client.force_authenticate(user=self.user)
@@ -1659,7 +1660,7 @@ class SettingsLogoUploadTests(APITestCase):
         self.assertEqual(us.date_format, "DD/MM/YYYY")
         self.assertEqual(us.notifications.get("email"), True)
 
-    def test_user_logo_upload_blocked_when_admin_disables_overrides(self):
+    def test_user_logo_upload_still_allowed_when_admin_disables_overrides(self):
         with tempfile.TemporaryDirectory() as tmp:
             with override_settings(MEDIA_ROOT=tmp, MEDIA_URL="/media/"):
                 self.client.force_authenticate(user=self.user)
@@ -1672,8 +1673,8 @@ class SettingsLogoUploadTests(APITestCase):
                     {"file": _png_logo_upload_file(), "scope": "invoice_template"},
                     format="multipart",
                 )
-                self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertIn("disabled", str(res.data).lower())
+                self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+                self.assertIn("/media/uploads/logos/", str(res.data.get("logo_url", "")))
 
 
 class InvoiceDiscountTests(APITestCase):
