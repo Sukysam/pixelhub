@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import crypto from "crypto";
 import { API_BASE_URL, adminToken, createStandardBusinessUserSession, setSession } from "./helpers/admin";
 
@@ -8,72 +8,7 @@ function buildPreview(value: string) {
   return `${normalized.slice(0, 47).trimEnd()}...`;
 }
 
-async function loadMoreUntilRowVisible(page: Page, customerName: string, maxPages = 6) {
-  const row = page.locator("tbody tr", { hasText: customerName }).first();
-
-  const clickLoadMoreAndWaitForResponse = async (loadMoreButton: ReturnType<Page["getByRole"]>) => {
-    const responsePromise = page
-      .waitForResponse(
-        (response) =>
-          response.url().startsWith(`${API_BASE_URL}/customers/`) &&
-          response.request().method() === "GET" &&
-          response.status() === 200,
-        { timeout: 10_000 }
-      )
-      .then((response) => ({ url: response.url(), status: response.status() }))
-      .catch(() => null);
-    // `disabled={loading}` on the button means a click while a request is still
-    // in flight simply waits for the button to re-enable, so retrying here can't
-    // race a duplicate fetch of the same page.
-    //
-    // Uses dispatchEvent instead of click(): traces showed Playwright's native
-    // click on Firefox sometimes completes successfully (per its own actionability
-    // checks) without the event ever reaching React's handler, and no fetch
-    // follows. dispatchEvent fires the DOM click directly, bypassing whatever
-    // drops the native input on that path.
-    await loadMoreButton.dispatchEvent("click");
-    return responsePromise;
-  };
-
-  for (let attempt = 0; attempt < maxPages; attempt += 1) {
-    if ((await row.count()) > 0) return row;
-    const loadMoreButton = page.getByRole("button", { name: /load more/i });
-    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) break;
-    const previousRowCount = await page.locator("tbody tr").count();
-    console.log(`[loadMore attempt ${attempt}] rows=${previousRowCount} clicking...`);
-    let responseInfo = await clickLoadMoreAndWaitForResponse(loadMoreButton);
-    if (!responseInfo) {
-      // Observed in CI: the click completes and no network request follows at
-      // all (not a slow response) — an intermittent Firefox click-dispatch
-      // miss. Re-clicking recovers it; a longer timeout would not.
-      console.log(`[loadMore attempt ${attempt}] no response within 10s, retrying click once...`);
-      responseInfo = await clickLoadMoreAndWaitForResponse(loadMoreButton);
-    }
-    console.log(
-      `[loadMore attempt ${attempt}] response=${responseInfo ? `${responseInfo.status} ${responseInfo.url}` : "TIMED OUT twice (no matching GET /customers/ after retry)"}`
-    );
-    let finalStatus = "unknown";
-    await expect
-      .poll(
-        async () => {
-          if ((await row.count()) > 0) return "row-visible";
-          if ((await page.locator("tbody tr").count()) !== previousRowCount) return "row-count-changed";
-          if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.isVisible())) return "pagination-finished";
-          return "waiting";
-        },
-        { timeout: 10_000 }
-      )
-      .not.toBe("waiting")
-      .catch(async (e) => {
-        finalStatus = `stuck rows=${await page.locator("tbody tr").count()} buttonVisible=${await loadMoreButton.isVisible().catch(() => "n/a")}`;
-        throw e;
-      });
-    console.log(`[loadMore attempt ${attempt}] resolved rows=${await page.locator("tbody tr").count()} ${finalStatus}`);
-  }
-  return row;
-}
-
-test("admin can preview internal customer notes from the customers list after pagination", async ({ page, request }) => {
+test("customers list loads every record and search filters the table before previewing internal notes", async ({ page, request }) => {
   const token = await adminToken(request);
   await setSession(page, request, token);
 
@@ -121,10 +56,24 @@ test("admin can preview internal customer notes from the customers list after pa
   await page.goto("/customers");
   await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("columnheader", { name: "Internal Notes" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /load more/i })).toBeVisible({ timeout: 30_000 });
-  const customerRow = await loadMoreUntilRowVisible(page, customerName);
+
+  // Every record loads automatically on open, so the customer created behind a
+  // full page of fillers is already present without any manual pagination.
+  const customerRow = page.locator("tbody tr", { hasText: customerName }).first();
   await expect(customerRow).toBeVisible({ timeout: 30_000 });
-  const previewButton = customerRow.getByRole("button", { name: `View internal notes for ${customerName}` });
+
+  const searchInput = page.getByRole("searchbox", { name: "Search customers" });
+  await searchInput.fill(customerName);
+  await expect(page.locator("tbody tr")).toHaveCount(1);
+
+  await searchInput.fill("zzz-no-such-customer");
+  await expect(page.getByText("No matching customers found.")).toBeVisible();
+
+  await searchInput.fill(customerName);
+  const previewButton = page
+    .locator("tbody tr", { hasText: customerName })
+    .first()
+    .getByRole("button", { name: `View internal notes for ${customerName}` });
   await expect(previewButton).toContainText(expectedPreview);
 
   const detailResponse = page.waitForResponse(

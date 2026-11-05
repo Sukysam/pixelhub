@@ -1108,6 +1108,16 @@ class SoftDeleteModelViewSet(viewsets.ModelViewSet):
 
 
 class OptionalPageNumberPagination(PageNumberPagination):
+    """Page-number pagination that lets clients enlarge the page size.
+
+    Clients may request ``?page_size=`` up to ``max_page_size`` so lists can be
+    fetched in a few requests instead of walking many 25-row pages. The default
+    page size stays at ``API_PAGE_SIZE`` when the parameter is omitted.
+    """
+
+    page_size_query_param = "page_size"
+    max_page_size = 500
+
     def paginate_queryset(self, queryset, request, view=None):
         self.page_size = getattr(settings, "API_PAGE_SIZE", 25)
         return super().paginate_queryset(queryset, request, view=view)
@@ -1862,7 +1872,12 @@ class ItemViewSet(SoftDeleteModelViewSet):
 
         q = str(p.get("q") or "").strip()
         if q:
-            qs = qs.filter(Q(name__icontains=q) | Q(sku__icontains=q) | Q(category__icontains=q))
+            qs = qs.filter(
+                Q(name__icontains=q)
+                | Q(sku__icontains=q)
+                | Q(category__icontains=q)
+                | Q(description__icontains=q)
+            )
 
         type_val = str(p.get("type") or "").strip()
         if type_val:

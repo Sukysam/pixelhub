@@ -101,18 +101,8 @@ async function postJsonWithTransientRetry(
   throw new Error(`POST ${apiPath} failed after retries: status=${lastStatus} body=${lastBody}`);
 }
 
-async function loadMoreUntilTextVisible(page: any, text: string, options?: { maxLoads?: number }) {
-  const maxLoads = options?.maxLoads ?? 10;
-  const row = page.locator("tbody tr", { hasText: text }).first();
-  for (let attempt = 0; attempt < maxLoads; attempt += 1) {
-    if ((await row.count()) > 0) return row;
-    const loadMoreButton = page.getByRole("button", { name: /load more/i });
-    if ((await loadMoreButton.count()) === 0 || !(await loadMoreButton.first().isVisible())) break;
-    const previousRowCount = await page.locator("tbody tr").count();
-    await loadMoreButton.first().click();
-    await expect.poll(async () => await page.locator("tbody tr").count(), { timeout: 10_000 }).not.toBe(previousRowCount);
-  }
-  return row;
+async function findRowByText(page: any, text: string) {
+  return page.locator("tbody tr", { hasText: text }).first();
 }
 
 async function waitForUploadedLogoSrc(locator: any) {
@@ -440,7 +430,7 @@ test("standard business user can persist customer invoice and receipt records", 
 
   await page.goto("/customers");
   await expect(page.getByRole("heading", { name: "Customers" })).toBeVisible({ timeout: 30_000 });
-  const createdCustomerRowInUi = await loadMoreUntilTextVisible(page, customerName);
+  const createdCustomerRowInUi = await findRowByText(page, customerName);
   await expect(createdCustomerRowInUi).toBeVisible({ timeout: 30_000 });
 
   const customerRow = createdCustomerRowInUi;

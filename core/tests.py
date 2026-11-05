@@ -438,6 +438,39 @@ class PersistenceTests(APITestCase):
         self.assertEqual(category_list_res.status_code, status.HTTP_200_OK)
         self.assertEqual(category_list_res.data["results"][0]["id"], item["id"])
 
+    def test_list_endpoints_support_large_page_size_and_item_description_search(self):
+        for index in range(30):
+            self.client.post(
+                reverse("customer-list"),
+                {"name": f"Bulk Customer {index:03d}", "email": f"bulk{index}@example.com"},
+                format="json",
+            )
+
+        default_page = self.client.get(f"{reverse('customer-list')}?page=1")
+        self.assertEqual(default_page.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(default_page.data["next"])
+
+        enlarged_page = self.client.get(f"{reverse('customer-list')}?page=1&page_size=200")
+        self.assertEqual(enlarged_page.status_code, status.HTTP_200_OK)
+        self.assertEqual(enlarged_page.data["count"], 30)
+        self.assertEqual(len(enlarged_page.data["results"]), 30)
+        self.assertIsNone(enlarged_page.data["next"])
+
+        item = self.client.post(
+            reverse("item-list"),
+            {
+                "name": "Description Search Item",
+                "sku": "DS-001",
+                "category": "Hardware",
+                "description": "Unique flux capacitor module",
+                "unit_price": "5.00",
+            },
+            format="json",
+        ).data
+        search_res = self.client.get(f"{reverse('item-list')}?q=flux capacitor")
+        self.assertEqual(search_res.status_code, status.HTTP_200_OK)
+        self.assertEqual([row["id"] for row in search_res.data["results"]], [item["id"]])
+
     def test_invoice_detail_and_list_support_payment_filters_sorting_and_customer_context(self):
         customer = self.client.post(reverse("customer-list"), {"name": "Invoice Buyer", "email": "invoice@example.com"}, format="json").data
         item = self.client.post(

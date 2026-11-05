@@ -7,8 +7,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { Plus } from "lucide-react";
-import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getErrorMessage } from "@/lib/api";
+import { Plus, Search } from "lucide-react";
+import { API_BASE_URL, ApiError, apiRequest, apiRequestAllPages, getAuthToken, getErrorMessage } from "@/lib/api";
+import { matchesSearch } from "@/lib/search";
 import { useI18n } from "@/lib/i18n";
 
 type ItemType = "product" | "service";
@@ -34,15 +35,13 @@ function normalizeItem(raw: ItemApi): Item {
   };
 }
 
-type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
-
 export default function InventoryPage() {
   const { t } = useI18n();
   const [currencyCode, setCurrencyCode] = useState("NGN");
   const money = useMemo(() => new Intl.NumberFormat(undefined, { style: "currency", currency: currencyCode || "NGN" }), [currencyCode]);
   const [items, setItems] = useState<Item[]>([]);
-  const [nextUrl, setNextUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -164,43 +163,31 @@ export default function InventoryPage() {
     return getErrorMessage(e, fallback);
   }, [t]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const data = await apiRequest<Paginated<ItemApi>>("/items/?page=1");
-        if (!cancelled) {
-          setItems(data.results.map(normalizeItem));
-          setNextUrl(data.next);
-          setSelectedIds({});
-        }
-      } catch (e: unknown) {
-        if (!cancelled) setError(toUserMessage(e, "Failed to load inventory"));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [toUserMessage]);
-
-  const loadMore = async () => {
-    if (!nextUrl) return;
+  const loadItems = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await apiRequest<Paginated<ItemApi>>(nextUrl);
-      setItems((prev) => [...prev, ...data.results.map(normalizeItem)]);
-      setNextUrl(data.next);
+      const results = await apiRequestAllPages<ItemApi>("/items/?page=1");
+      setItems(results.map(normalizeItem));
+      setSelectedIds({});
     } catch (e: unknown) {
-      setError(toUserMessage(e, "Failed to load more items"));
+      setError(toUserMessage(e, "Failed to load inventory"));
     } finally {
       setLoading(false);
     }
-  };
+  }, [toUserMessage]);
+
+  useEffect(() => {
+    void loadItems();
+  }, [loadItems]);
+
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) =>
+        matchesSearch(search, item.name, item.sku, item.category, item.description, item.type)
+      ),
+    [items, search]
+  );
 
   const addItem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -453,20 +440,33 @@ export default function InventoryPage() {
           </div>
         ) : null}
 
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => setExportOpen(true)} disabled={loading}>
-            Export
-          </Button>
-          <Button variant="outline" onClick={() => setImportOpen(true)} disabled={loading}>
-            Import
-          </Button>
-          <Button
-            variant="destructive"
-            disabled={selectedList.length === 0}
-            onClick={() => setConfirmBulkDeleteOpen(true)}
-          >
-            {t("deleteSelected")} ({selectedList.length})
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-sm">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden="true" />
+            <Input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, SKU, category, or description..."
+              aria-label="Search inventory"
+              className="pl-9"
+            />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => setExportOpen(true)} disabled={loading}>
+              Export
+            </Button>
+            <Button variant="outline" onClick={() => setImportOpen(true)} disabled={loading}>
+              Import
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={selectedList.length === 0}
+              onClick={() => setConfirmBulkDeleteOpen(true)}
+            >
+              {t("deleteSelected")} ({selectedList.length})
+            </Button>
+          </div>
         </div>
 
         <Dialog open={exportOpen} onOpenChange={setExportOpen}>
@@ -591,11 +591,11 @@ export default function InventoryPage() {
                 <th className="px-4 py-3">
                   <input
                     type="checkbox"
-                    checked={items.length > 0 && selectedList.length === items.length}
+                    checked={filteredItems.length > 0 && filteredItems.every((it) => selectedIds[it.id])}
                     onChange={(e) => {
                       const checked = e.target.checked;
-                      const next: Record<number, boolean> = {};
-                      for (const it of items) next[it.id] = checked;
+                      const next: Record<number, boolean> = { ...selectedIds };
+                      for (const it of filteredItems) next[it.id] = checked;
                       setSelectedIds(next);
                     }}
                   />
@@ -639,8 +639,14 @@ export default function InventoryPage() {
                     No items yet.
                   </td>
                 </tr>
+              ) : filteredItems.length === 0 ? (
+                <tr>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
+                    No matching items found.
+                  </td>
+                </tr>
               ) : (
-                items.map((item) => {
+                filteredItems.map((item) => {
                 const isLowStock = item.type === "product" && item.stock_quantity < 5;
                 return (
                   <tr key={item.id} className="hover:bg-gray-50">
@@ -770,14 +776,6 @@ export default function InventoryPage() {
           </table>
         </div>
       </div>
-
-      {nextUrl ? (
-        <div className="flex justify-center mt-4">
-          <Button variant="outline" onClick={loadMore} disabled={loading}>
-            {t("loadMore")}
-          </Button>
-        </div>
-      ) : null}
 
       <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
         <DialogContent>

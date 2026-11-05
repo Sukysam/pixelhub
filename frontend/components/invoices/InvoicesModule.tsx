@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Plus, Search, Trash2 } from "lucide-react";
-import { ApiError, apiRequest, downloadWithAuth, getErrorMessage } from "@/lib/api";
+import { ApiError, apiRequest, apiRequestAllPages, downloadWithAuth, getErrorMessage } from "@/lib/api";
+import { matchesSearch } from "@/lib/search";
 import { useI18n } from "@/lib/i18n";
 
 type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
@@ -27,6 +28,7 @@ interface Item {
   type: "product" | "service";
   name: string;
   sku: string | null;
+  category?: string | null;
   description: string | null;
   unit_price: number;
   tax_rate: number;
@@ -338,9 +340,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
     return money.format(value);
   }, [money]);
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [customersNext, setCustomersNext] = useState<string | null>(null);
   const [inventoryItems, setInventoryItems] = useState<Item[]>([]);
-  const [itemsNext, setItemsNext] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -492,6 +492,21 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const [pickerLineId, setPickerLineId] = useState<number | null>(null);
   const [itemSearch, setItemSearch] = useState("");
 
+  const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
+  const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
+  const [newCustomer, setNewCustomer] = useState<{
+    name: string;
+    email: string;
+    phone: string;
+    billing_address: string;
+  }>({
+    name: "",
+    email: "",
+    phone: "",
+    billing_address: "",
+  });
+
   const [isAddItemOpen, setIsAddItemOpen] = useState(false);
   const [addItemTargetLineId, setAddItemTargetLineId] = useState<number | null>(null);
   const [creatingItem, setCreatingItem] = useState(false);
@@ -533,17 +548,15 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
         setLoading(true);
         setError(null);
         const [cust, items, inv, views] = await Promise.all([
-          apiRequest<Paginated<Customer>>("/customers/?page=1"),
-          apiRequest<Paginated<ItemApi>>("/items/?page=1"),
+          apiRequestAllPages<Customer>("/customers/?page=1"),
+          apiRequestAllPages<ItemApi>("/items/?page=1"),
           apiRequest<Paginated<InvoiceListItem>>("/invoices/?page=1"),
           apiRequest<{ results: SavedInvoiceView[] }>("/invoices/views/"),
         ]);
         if (cancelled) return;
-        setCustomers(cust.results);
-        setCustomersNext(cust.next);
-        setInventoryItems(items.results.map(normalizeItem));
-        setItemsNext(items.next);
-        if (cust.results.length > 0) setSelectedCustomer(cust.results[0].id);
+        setCustomers(cust);
+        setInventoryItems(items.map(normalizeItem));
+        if (cust.length > 0) setSelectedCustomer(cust[0].id);
         setInvoices(inv.results);
         setInvoicesNext(inv.next);
         setSelectedInvoiceIds({});
@@ -569,36 +582,6 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setInvoicesNext(res.next);
     } catch (e: unknown) {
       setError(toUserMessage(e, "Failed to load more invoices"));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadMoreCustomers = async () => {
-    if (!customersNext) return;
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await apiRequest<Paginated<Customer>>(customersNext);
-      setCustomers((p) => [...p, ...res.results]);
-      setCustomersNext(res.next);
-    } catch (e: unknown) {
-      setError(toUserMessage(e, "Failed to load more customers"));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadMoreItems = async () => {
-    if (!itemsNext) return;
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await apiRequest<Paginated<ItemApi>>(itemsNext);
-      setInventoryItems((p) => [...p, ...res.results.map(normalizeItem)]);
-      setItemsNext(res.next);
-    } catch (e: unknown) {
-      setError(toUserMessage(e, "Failed to load more items"));
     } finally {
       setLoading(false);
     }
@@ -916,14 +899,13 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
     return map;
   }, [inventoryItems]);
 
-  const filteredInventory = useMemo(() => {
-    const q = itemSearch.trim().toLowerCase();
-    if (!q) return inventoryItems;
-    return inventoryItems.filter((i) => {
-      const haystack = `${i.name} ${i.sku ?? ""} ${i.description ?? ""}`.toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [inventoryItems, itemSearch]);
+  const filteredInventory = useMemo(
+    () =>
+      inventoryItems.filter((i) =>
+        matchesSearch(itemSearch, i.name, i.sku, i.category, i.description, i.type)
+      ),
+    [inventoryItems, itemSearch]
+  );
 
   const computed = useMemo(() => {
     let subtotal = 0;
@@ -1058,6 +1040,57 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       setNewItemError(toUserMessage(e, "Failed to create item"));
     } finally {
       setCreatingItem(false);
+    }
+  };
+
+  const openAddCustomer = () => {
+    setNewCustomerError(null);
+    setIsAddCustomerOpen(true);
+  };
+
+  const createAndSelectCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewCustomerError(null);
+
+    const name = newCustomer.name.trim();
+    if (!name) {
+      setNewCustomerError("Customer name is required");
+      return;
+    }
+    if (newCustomer.email.trim() && !isValidEmail(newCustomer.email)) {
+      setNewCustomerError("Enter a valid email address or leave it blank");
+      return;
+    }
+    if (newCustomer.phone.trim() && !isValidPhone(newCustomer.phone)) {
+      setNewCustomerError("Enter a valid phone number or leave it blank");
+      return;
+    }
+
+    try {
+      setCreatingCustomer(true);
+      setError(null);
+      setSuccess(null);
+      const created = await apiRequest<Customer>("/customers/", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          email: newCustomer.email.trim() || null,
+          phone: newCustomer.phone.trim() || null,
+          billing_address: newCustomer.billing_address.trim() || null,
+        }),
+      });
+
+      // Add the new customer to the selection list and select it for this invoice
+      // without touching any line items already entered.
+      setCustomers((prev) => [created, ...prev]);
+      setSelectedCustomer(created.id);
+      setIsAddCustomerOpen(false);
+      setNewCustomer({ name: "", email: "", phone: "", billing_address: "" });
+      setSuccess(`${created.name} created and selected for this invoice.`);
+    } catch (e: unknown) {
+      setNewCustomerError(toUserMessage(e, "Failed to create customer"));
+    } finally {
+      setCreatingCustomer(false);
     }
   };
 
@@ -1737,29 +1770,29 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <Label htmlFor="customer_select">Customer</Label>
-              <Select
-                id="customer_select"
-                value={selectedCustomer}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSelectedCustomer(v === "" ? "" : Number(v));
-                }}
-                disabled={loading}
-              >
-                <option value="">Select a customer</option>
-                {customers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-              {customersNext ? (
-                <div className="mt-2">
-                  <Button type="button" variant="outline" size="sm" onClick={loadMoreCustomers} disabled={loading}>
-                    {t("loadMore")}
-                  </Button>
-                </div>
-              ) : null}
+              <div className="flex gap-2">
+                <Select
+                  id="customer_select"
+                  value={selectedCustomer}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSelectedCustomer(v === "" ? "" : Number(v));
+                  }}
+                  disabled={loading}
+                  className="flex-1"
+                >
+                  <option value="">Select a customer</option>
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </Select>
+                <Button type="button" variant="outline" onClick={openAddCustomer} disabled={loading || savingInvoice}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add Customer
+                </Button>
+              </div>
             </div>
             <div className="space-y-4">
               <div>
@@ -2525,7 +2558,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
             <DialogTitle>Select Item</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
-            <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Search by name, SKU, description..." />
+            <Input value={itemSearch} onChange={(e) => setItemSearch(e.target.value)} placeholder="Search by name, SKU, category, description..." />
             <div className="max-h-[50vh] overflow-auto border rounded-md divide-y">
               {filteredInventory.length === 0 ? (
                 <div className="p-3 text-sm text-gray-600">No items found.</div>
@@ -2563,14 +2596,76 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                 ))
               )}
             </div>
-            {itemsNext ? (
-              <div className="flex justify-end">
-                <Button type="button" variant="outline" size="sm" onClick={loadMoreItems} disabled={loading}>
-                  {t("loadMore")}
-                </Button>
-              </div>
-            ) : null}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isAddCustomerOpen}
+        onOpenChange={(open) => {
+          setIsAddCustomerOpen(open);
+          if (!open) setNewCustomerError(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add New Customer</DialogTitle>
+            <DialogDescription>
+              Create a customer without leaving this invoice. They will be added to the list and selected automatically.
+            </DialogDescription>
+          </DialogHeader>
+          {newCustomerError ? (
+            <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{newCustomerError}</div>
+          ) : null}
+          <form className="space-y-4" onSubmit={createAndSelectCustomer}>
+            <div>
+              <Label htmlFor="invoice_new_customer_name">Name</Label>
+              <Input
+                id="invoice_new_customer_name"
+                value={newCustomer.name}
+                onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
+                disabled={creatingCustomer}
+              />
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
+                <Label htmlFor="invoice_new_customer_email">Email</Label>
+                <Input
+                  id="invoice_new_customer_email"
+                  type="email"
+                  value={newCustomer.email}
+                  onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
+                  disabled={creatingCustomer}
+                />
+              </div>
+              <div>
+                <Label htmlFor="invoice_new_customer_phone">Phone</Label>
+                <Input
+                  id="invoice_new_customer_phone"
+                  value={newCustomer.phone}
+                  onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
+                  disabled={creatingCustomer}
+                />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="invoice_new_customer_address">Billing Address</Label>
+              <Input
+                id="invoice_new_customer_address"
+                value={newCustomer.billing_address}
+                onChange={(e) => setNewCustomer((p) => ({ ...p, billing_address: e.target.value }))}
+                disabled={creatingCustomer}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setIsAddCustomerOpen(false)} disabled={creatingCustomer}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={creatingCustomer}>
+                {creatingCustomer ? "Saving..." : "Add Customer"}
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
 

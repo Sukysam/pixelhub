@@ -372,6 +372,42 @@ export function uploadLogoFile({
   });
 }
 
+export type PaginatedResponse<T> = {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+};
+
+const ALL_PAGES_DEFAULT_PAGE_SIZE = 200;
+const ALL_PAGES_MAX_REQUESTS = 25;
+
+/**
+ * Fetches every page of a DRF list endpoint so a list can render all of its
+ * records without a manual "Load more" step. A larger `page_size` keeps the
+ * number of round-trips low, and DRF's "next" link is followed until exhausted.
+ */
+export async function apiRequestAllPages<T>(
+  path: string,
+  options?: { pageSize?: number; maxRequests?: number }
+): Promise<T[]> {
+  const pageSize = options?.pageSize ?? ALL_PAGES_DEFAULT_PAGE_SIZE;
+  const maxRequests = options?.maxRequests ?? ALL_PAGES_MAX_REQUESTS;
+  const withPageSize = (p: string): string => {
+    if (pageSize <= 0 || /[?&]page_size=/.test(p)) return p;
+    return `${p}${p.includes("?") ? "&" : "?"}page_size=${pageSize}`;
+  };
+
+  const results: T[] = [];
+  let next: string | null = withPageSize(path);
+  for (let request = 0; next && request < maxRequests; request += 1) {
+    const page: PaginatedResponse<T> = await apiRequest<PaginatedResponse<T>>(next);
+    results.push(...(page?.results ?? []));
+    next = page?.next ?? null;
+  }
+  return results;
+}
+
 export async function apiRequest<T>(
   path: string,
   init?: RequestInit

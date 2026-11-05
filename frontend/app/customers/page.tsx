@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { FileText, Plus } from "lucide-react";
-import { API_BASE_URL, ApiError, apiRequest, getAuthToken, getAuthUser, getErrorMessage } from "@/lib/api";
+import { FileText, Plus, Search } from "lucide-react";
+import { API_BASE_URL, ApiError, apiRequest, apiRequestAllPages, getAuthToken, getAuthUser, getErrorMessage } from "@/lib/api";
+import { matchesSearch } from "@/lib/search";
 import { useI18n } from "@/lib/i18n";
 
 interface Customer {
@@ -21,8 +22,6 @@ interface Customer {
   has_internal_remarks?: boolean;
   updated_at: string;
 }
-
-type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
 
 const CUSTOMER_EXPORT_FIELDS = [
   "name",
@@ -51,8 +50,8 @@ export default function CustomersPage() {
   const canReadInternalRemarks = permissions.has("data.customers.remarks.read");
   const canWriteInternalRemarks = permissions.has("data.customers.remarks.write");
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [nextUrl, setNextUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -137,13 +136,12 @@ export default function CustomersPage() {
     URL.revokeObjectURL(href);
   }, []);
 
-  const loadCustomers = useCallback(async (path = "/customers/?page=1") => {
+  const loadCustomers = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await apiRequest<Paginated<Customer>>(path);
-      setCustomers(data.results);
-      setNextUrl(data.next);
+      const results = await apiRequestAllPages<Customer>("/customers/?page=1");
+      setCustomers(results);
       setSelectedIds({});
     } catch (e: unknown) {
       setError(toUserMessage(e, "Failed to load customers"));
@@ -156,20 +154,13 @@ export default function CustomersPage() {
     void loadCustomers();
   }, [loadCustomers]);
 
-  const loadMore = async () => {
-    if (!nextUrl) return;
-    try {
-      setLoading(true);
-      setError(null);
-      const data = await apiRequest<Paginated<Customer>>(nextUrl);
-      setCustomers((prev) => [...prev, ...data.results]);
-      setNextUrl(data.next);
-    } catch (e: unknown) {
-      setError(toUserMessage(e, "Failed to load more customers"));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const filteredCustomers = useMemo(
+    () =>
+      customers.filter((customer) =>
+        matchesSearch(search, customer.name, customer.email, customer.phone, customer.billing_address)
+      ),
+    [customers, search]
+  );
 
   const handleAddCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -436,14 +427,27 @@ export default function CustomersPage() {
           </div>
         ) : null}
 
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="destructive"
-            disabled={selectedList.length === 0}
-            onClick={() => setConfirmBulkDeleteOpen(true)}
-          >
-            {t("deleteSelected")} ({selectedList.length})
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="relative w-full max-w-sm">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" aria-hidden="true" />
+            <Input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search customers by name, email, phone, or address..."
+              aria-label="Search customers"
+              className="pl-9"
+            />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="destructive"
+              disabled={selectedList.length === 0}
+              onClick={() => setConfirmBulkDeleteOpen(true)}
+            >
+              {t("deleteSelected")} ({selectedList.length})
+            </Button>
+          </div>
         </div>
 
         <div className="border rounded-lg overflow-x-auto">
@@ -453,11 +457,11 @@ export default function CustomersPage() {
                 <th className="px-4 py-3">
                   <input
                     type="checkbox"
-                    checked={customers.length > 0 && selectedList.length === customers.length}
+                    checked={filteredCustomers.length > 0 && filteredCustomers.every((c) => selectedIds[c.id])}
                     onChange={(e) => {
                       const checked = e.target.checked;
-                      const next: Record<number, boolean> = {};
-                      for (const c of customers) next[c.id] = checked;
+                      const next: Record<number, boolean> = { ...selectedIds };
+                      for (const c of filteredCustomers) next[c.id] = checked;
                       setSelectedIds(next);
                     }}
                   />
@@ -500,8 +504,14 @@ export default function CustomersPage() {
                     No customers yet.
                   </td>
                 </tr>
+              ) : filteredCustomers.length === 0 ? (
+                <tr>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={customerTableColumnCount}>
+                    No matching customers found.
+                  </td>
+                </tr>
               ) : (
-                customers.map((customer) => (
+                filteredCustomers.map((customer) => (
                 <tr key={customer.id} className="hover:bg-gray-50">
                   <td className="px-4 py-4">
                     <input
@@ -605,14 +615,6 @@ export default function CustomersPage() {
             </tbody>
           </table>
         </div>
-
-        {nextUrl ? (
-          <div className="flex justify-center">
-            <Button variant="outline" onClick={loadMore} disabled={loading}>
-              {t("loadMore")}
-            </Button>
-          </div>
-        ) : null}
       </div>
 
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
