@@ -222,7 +222,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        with:
-          args: --redact --verbose
-          config: .gitleaks.toml
+
+      # gitleaks-action@v2 now requires a paid GITLEAKS_LICENSE and declares no
+      # inputs, so `args`/`config` were silently ignored. Run the pinned CLI
+      # instead; bump GITLEAKS_VERSION together with the .gitleaks.toml schema.
+      - name: Scan git history for secrets
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git --config .gitleaks.toml --redact --verbose --no-banner

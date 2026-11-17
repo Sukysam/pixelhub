@@ -1,4 +1,4 @@
-[allowlist]
+[[allowlists]]
   description = "Allowlist for common development files and false positives"
   paths = [
     '''frontend/node_modules''',
