@@ -92,7 +92,9 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   e2e:
-    runs-on: ubuntu-latest
+    # Playwright (1.60.x) has no browser builds for ubuntu26.04. Pin the
+    # officially supported LTS runner so `playwright install` works.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
