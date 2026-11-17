@@ -17,6 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.core.cache import cache
 from django.core import mail
+from django.core.management import call_command
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import override_settings
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -4486,3 +4487,79 @@ class DocumentDeliveryAndPaymentsTests(APITestCase):
         tx.refresh_from_db()
         self.assertEqual(tx.status, "succeeded")
         self.assertTrue(Receipt.objects.filter(invoice=self.invoice, is_deleted=False).exists())
+
+
+class InventoryBackfillCommandTests(APITestCase):
+    def _make_invoice(self, number, invoice_status, item, quantity):
+        customer = Customer.objects.create(name=f"Customer {number}")
+        invoice = Invoice.objects.create(
+            invoice_number=number,
+            customer=customer,
+            status=invoice_status,
+            subtotal=Decimal("100.00"),
+            total_amount=Decimal("100.00"),
+        )
+        InvoiceItem.objects.create(
+            invoice=invoice,
+            item=item,
+            quantity=quantity,
+            unit_price=Decimal("10.00"),
+            line_total=Decimal("10.00"),
+        )
+        return invoice
+
+    def test_backfill_deducts_completed_invoices_and_is_idempotent(self):
+        item = Item.objects.create(name="Backfill Widget", sku="BF-1", unit_price=Decimal("10.00"), stock_quantity=10)
+        paid = self._make_invoice("INV-BF-1", "Paid", item, 3)
+        sent = self._make_invoice("INV-BF-2", "Sent", item, 2)
+        draft = self._make_invoice("INV-BF-3", "Draft", item, 5)
+
+        call_command("backfill_inventory_deductions", stdout=io.StringIO())
+
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 5)
+        self.assertIsNotNone(Invoice.objects.get(pk=paid.pk).inventory_deducted_at)
+        self.assertIsNotNone(Invoice.objects.get(pk=sent.pk).inventory_deducted_at)
+        self.assertIsNone(Invoice.objects.get(pk=draft.pk).inventory_deducted_at)
+
+        call_command("backfill_inventory_deductions", stdout=io.StringIO())
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 5)
+
+    def test_backfill_skips_insufficient_stock_unless_forced(self):
+        item = Item.objects.create(name="Scarce", sku="SC-1", unit_price=Decimal("10.00"), stock_quantity=1)
+        invoice = self._make_invoice("INV-SC-1", "Paid", item, 3)
+
+        call_command("backfill_inventory_deductions", stdout=io.StringIO())
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 1)
+        self.assertIsNone(Invoice.objects.get(pk=invoice.pk).inventory_deducted_at)
+
+        call_command("backfill_inventory_deductions", "--force", stdout=io.StringIO())
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, -2)
+        self.assertIsNotNone(Invoice.objects.get(pk=invoice.pk).inventory_deducted_at)
+
+    def test_backfill_dry_run_makes_no_changes(self):
+        item = Item.objects.create(name="Dry", sku="DRY-1", unit_price=Decimal("10.00"), stock_quantity=7)
+        invoice = self._make_invoice("INV-DRY-1", "Paid", item, 2)
+
+        call_command("backfill_inventory_deductions", "--dry-run", stdout=io.StringIO())
+
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 7)
+        self.assertIsNone(Invoice.objects.get(pk=invoice.pk).inventory_deducted_at)
+
+    def test_backfill_status_filter_can_include_draft(self):
+        item = Item.objects.create(name="Drafty", sku="DR-1", unit_price=Decimal("10.00"), stock_quantity=5)
+        self._make_invoice("INV-DR-1", "Draft", item, 2)
+
+        call_command("backfill_inventory_deductions", "--status", "Draft,Sent,Paid", stdout=io.StringIO())
+
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 3)
+
+    def test_backfill_invoice_filter_limits_scope(self):
+        item = Item.objects.create(name="Scoped", sku="SCOPE-1", unit_price=Decimal("10.00"), stock_quantity=10)
+        first = self._make_invoice("INV-SCOPE-1", "Paid", item, 2)
+        second = self._make_invoice("INV-SCOPE-2", "Paid", item, 3)
+
+        call_command("backfill_inventory_deductions", "--invoice", "INV-SCOPE-1", stdout=io.StringIO())
+
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 8)
+        self.assertIsNotNone(Invoice.objects.get(pk=first.pk).inventory_deducted_at)
+        self.assertIsNone(Invoice.objects.get(pk=second.pk).inventory_deducted_at)

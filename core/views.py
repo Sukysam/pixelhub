@@ -93,6 +93,7 @@ from .logo_uploads import (
 from .expense_security import decrypt_expense_text
 from .finance_services import (
     CENTS,
+    deduct_inventory_for_invoice,
     outstanding_invoice_amount,
     q2 as _q2,
     resolve_invoice_discount as _resolve_invoice_discount,
@@ -2249,44 +2250,6 @@ class ItemViewSet(SoftDeleteModelViewSet):
             {"rows": int(payload.get("rows") or 0), "created": int(payload.get("imported") or 0), "errors": len(payload.get("errors") or [])},
         )
         return Response(payload, status=status_code)
-
-
-def deduct_inventory_for_invoice(invoice: Invoice) -> None:
-    """Subtract sold quantities from stock once an invoice reaches a completed state.
-
-    Called from every path that can move an invoice into "Sent"/"Paid" (invoice
-    create/update/bulk status, receipt recording, the invoice pay action and
-    payment-provider settlement). Idempotent: ``Invoice.inventory_deducted_at``
-    guards against double deduction on payment retries or status re-syncs, and it
-    is only stamped when the deduction succeeds.
-    """
-    if invoice.inventory_deducted_at is not None:
-        return
-
-    invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
-    required_by_item: dict[int, int] = {}
-    for line in invoice_items:
-        if line.item.type == "service":
-            continue
-        required_by_item[line.item_id] = required_by_item.get(line.item_id, 0) + int(line.quantity or 0)
-
-    if required_by_item:
-        items = {
-            item.id: item
-            for item in Item.objects.select_for_update().filter(id__in=list(required_by_item.keys()), is_deleted=False)
-        }
-        for item_id, required_qty in required_by_item.items():
-            db_item = items.get(item_id)
-            if db_item is None or db_item.stock_quantity < required_qty:
-                raise ValidationError(f"Insufficient stock for item {item_id}")
-        for item_id, required_qty in required_by_item.items():
-            Item.objects.filter(pk=item_id).update(stock_quantity=F("stock_quantity") - required_qty)
-
-    Invoice.objects.filter(pk=invoice.pk, inventory_deducted_at__isnull=True).update(
-        inventory_deducted_at=timezone.now()
-    )
-    invoice.refresh_from_db()
-    logger.info("inventory.deduct invoice_id=%s deducted_at=%s", invoice.id, invoice.inventory_deducted_at)
 
 
 class InvoiceViewSet(SoftDeleteModelViewSet):

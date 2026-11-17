@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
+from django.db.models import F
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .models import Invoice
+from .models import Invoice, Item
 
+
+logger = logging.getLogger(__name__)
 
 CENTS = Decimal("0.01")
 
@@ -109,3 +114,46 @@ def sync_invoice_status_with_payments(invoice: Invoice, payment_total: Any) -> s
         Invoice.objects.filter(pk=invoice.pk).update(status=target_status)
         invoice.status = target_status
     return target_status
+
+
+def deduct_inventory_for_invoice(invoice: Invoice, *, allow_negative: bool = False) -> None:
+    """Subtract sold quantities from stock once an invoice reaches a completed state.
+
+    Called from every path that can move an invoice into "Sent"/"Paid" (invoice
+    create/update/bulk status, receipt recording, the invoice pay action and
+    payment-provider settlement). Idempotent: ``Invoice.inventory_deducted_at``
+    guards against double deduction on payment retries or status re-syncs, and it
+    is only stamped when the deduction succeeds.
+
+    ``allow_negative`` lets the historical backfill command deduct even when
+    current stock is short (driving the balance negative) instead of aborting.
+    """
+    if invoice.inventory_deducted_at is not None:
+        return
+
+    invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
+    required_by_item: dict[int, int] = {}
+    for line in invoice_items:
+        if line.item.type == "service":
+            continue
+        required_by_item[line.item_id] = required_by_item.get(line.item_id, 0) + int(line.quantity or 0)
+
+    if required_by_item:
+        items = {
+            item.id: item
+            for item in Item.objects.select_for_update().filter(id__in=list(required_by_item.keys()), is_deleted=False)
+        }
+        for item_id, required_qty in required_by_item.items():
+            db_item = items.get(item_id)
+            if db_item is None:
+                raise ValidationError(f"Insufficient stock for item {item_id}")
+            if not allow_negative and db_item.stock_quantity < required_qty:
+                raise ValidationError(f"Insufficient stock for item {item_id}")
+        for item_id, required_qty in required_by_item.items():
+            Item.objects.filter(pk=item_id).update(stock_quantity=F("stock_quantity") - required_qty)
+
+    Invoice.objects.filter(pk=invoice.pk, inventory_deducted_at__isnull=True).update(
+        inventory_deducted_at=timezone.now()
+    )
+    invoice.refresh_from_db()
+    logger.info("inventory.deduct invoice_id=%s deducted_at=%s", invoice.id, invoice.inventory_deducted_at)
