@@ -4,11 +4,11 @@ import logging
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
-from django.db.models import F
+from django.db.models import F, Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .models import Invoice, Item
+from .models import Invoice, Item, Receipt
 
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,26 @@ def outstanding_invoice_amount(invoice_total: Any, payment_total: Any = None) ->
     paid = q2(Decimal(str(payment_total or 0)))
     outstanding = q2(total - paid)
     return outstanding if outstanding > Decimal("0.00") else Decimal("0.00")
+
+
+def invoice_payment_totals(invoice: Invoice) -> tuple[Decimal, Decimal]:
+    paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+    paid = q2(Decimal(str(paid)))
+    return paid, outstanding_invoice_amount(invoice.total_amount, paid)
+
+
+def receipt_payment_progress(receipt: Receipt) -> tuple[Decimal, Decimal]:
+    """Return cumulative paid and remaining balance at this receipt's date/sequence."""
+    through_receipt = Receipt.objects.filter(
+        invoice_id=receipt.invoice_id,
+        is_deleted=False,
+    ).filter(
+        Q(payment_date__lt=receipt.payment_date)
+        | Q(payment_date=receipt.payment_date, id__lte=receipt.id)
+    )
+    paid = through_receipt.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+    paid = q2(Decimal(str(paid)))
+    return paid, outstanding_invoice_amount(receipt.invoice.total_amount, paid)
 
 
 def sync_invoice_status_with_payments(invoice: Invoice, payment_total: Any) -> str:

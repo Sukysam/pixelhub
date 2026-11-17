@@ -12,11 +12,21 @@ import { ApiError, apiRequest, downloadWithAuth, getErrorMessage } from "@/lib/a
 import { useI18n } from "@/lib/i18n";
 
 type Paginated<T> = { count: number; next: string | null; previous: string | null; results: T[] };
-type InvoiceListItem = { id: number; invoice_number: string; total_amount: string; status: string; updated_at: string };
+type InvoiceListItem = {
+  id: number;
+  invoice_number: string;
+  total_amount: string;
+  amount_paid: string;
+  balance_due: string;
+  status: string;
+  updated_at: string;
+};
 type ReceiptListItem = {
   id: number;
   invoice: number;
   amount_paid: string;
+  total_paid_to_date: string;
+  balance_due_after: string;
   payment_date: string;
   payment_method: string;
   reference_number: string | null;
@@ -203,13 +213,19 @@ export default function ReceiptsPage() {
         setReceipts(rec.results);
         setReceiptsNext(rec.next);
         setSelectedIds({});
-        if (prefillOpen && prefillInvoiceId && inv.results.some((x) => x.id === prefillInvoiceId)) {
+        const firstOpenInvoice = inv.results.find((x) => Number(x.balance_due) > 0);
+        if (prefillOpen && prefillInvoiceId && inv.results.some((x) => x.id === prefillInvoiceId && Number(x.balance_due) > 0)) {
           const invRow = inv.results.find((x) => x.id === prefillInvoiceId);
           setForm((p) => ({ ...p, invoice: String(prefillInvoiceId), payment_date: p.payment_date || new Date().toISOString().slice(0, 10) }));
-          if (invRow) setForm((p) => ({ ...p, amount_paid: invRow.total_amount }));
+          if (invRow) setForm((p) => ({ ...p, amount_paid: invRow.balance_due }));
           setIsAddOpen(true);
-        } else if (inv.results.length > 0) {
-          setForm((p) => ({ ...p, invoice: String(inv.results[0].id), payment_date: p.payment_date || new Date().toISOString().slice(0, 10) }));
+        } else if (firstOpenInvoice) {
+          setForm((p) => ({
+            ...p,
+            invoice: String(firstOpenInvoice.id),
+            amount_paid: firstOpenInvoice.balance_due,
+            payment_date: p.payment_date || new Date().toISOString().slice(0, 10),
+          }));
         }
       } catch (e: unknown) {
         if (!cancelled) setError(toUserMessage(e, "Failed to load receipts"));
@@ -478,7 +494,16 @@ export default function ReceiptsPage() {
     const invoice = receipt ? invoices.find((i) => i.id === receipt.invoice) : null;
     const invoiceNumber = invoice?.invoice_number || (receipt ? `#${receipt.invoice}` : "");
     const amountPaid = receipt ? money.format(Number(receipt.amount_paid)) : "";
-    return [`Receipt RCPT-${receiptId}`, invoiceNumber ? `Invoice: ${invoiceNumber}` : "", amountPaid ? `Amount paid: ${amountPaid}` : "", downloadUrl]
+    const paidToDate = receipt ? money.format(Number(receipt.total_paid_to_date)) : "";
+    const balanceDue = receipt ? money.format(Number(receipt.balance_due_after)) : "";
+    return [
+      `Receipt RCPT-${receiptId}`,
+      invoiceNumber ? `Invoice: ${invoiceNumber}` : "",
+      amountPaid ? `This payment: ${amountPaid}` : "",
+      paidToDate ? `Paid to date: ${paidToDate}` : "",
+      balanceDue ? `Balance after payment: ${balanceDue}` : "",
+      downloadUrl,
+    ]
       .filter(Boolean)
       .join("\n");
   };
@@ -644,6 +669,8 @@ export default function ReceiptsPage() {
   const selectedList = Object.entries(selectedIds)
     .filter(([, v]) => v)
     .map(([k]) => Number(k));
+  const openInvoices = invoices.filter((invoice) => Number(invoice.balance_due) > 0);
+  const selectedPaymentInvoice = invoices.find((invoice) => String(invoice.id) === form.invoice);
 
   const startEdit = (r: ReceiptListItem) => {
     setError(null);
@@ -764,10 +791,20 @@ export default function ReceiptsPage() {
           <h1 className="text-3xl font-bold text-gray-900">Receipts</h1>
           <Button
             onClick={() => {
-              setForm((p) => ({ ...p, payment_date: p.payment_date || new Date().toISOString().slice(0, 10) }));
+              setForm((p) => {
+                const currentInvoice = openInvoices.find((invoice) => String(invoice.id) === p.invoice);
+                const nextInvoice = currentInvoice ?? openInvoices[0];
+                if (!nextInvoice) return p;
+                return {
+                  ...p,
+                  invoice: String(nextInvoice.id),
+                  amount_paid: currentInvoice ? p.amount_paid || currentInvoice.balance_due : nextInvoice.balance_due,
+                  payment_date: p.payment_date || new Date().toISOString().slice(0, 10),
+                };
+              });
               setIsAddOpen(true);
             }}
-            disabled={loading || invoices.length === 0}
+            disabled={loading || openInvoices.length === 0}
           >
             <Plus className="mr-2 h-4 w-4" />
             Record Payment
@@ -813,6 +850,8 @@ export default function ReceiptsPage() {
                 </th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice</th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Paid to date</th>
+                <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Balance after</th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Method</th>
                 <th className="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Reference</th>
@@ -822,13 +861,13 @@ export default function ReceiptsPage() {
             <tbody className="divide-y divide-gray-200">
               {loading ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={7}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
                     Loading...
                   </td>
                 </tr>
               ) : receipts.length === 0 ? (
                 <tr>
-                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={7}>
+                  <td className="px-6 py-6 text-sm text-gray-500" colSpan={9}>
                     No receipts yet.
                   </td>
                 </tr>
@@ -868,6 +907,8 @@ export default function ReceiptsPage() {
                         money.format(Number(r.amount_paid))
                       )}
                     </td>
+                    <td className="px-6 py-4 text-sm text-gray-500">{money.format(Number(r.total_paid_to_date))}</td>
+                    <td className="px-6 py-4 text-sm text-gray-500">{money.format(Number(r.balance_due_after))}</td>
                     <td className="px-6 py-4 text-sm text-gray-500">
                       {editingId === r.id ? (
                         <Input
@@ -960,13 +1001,27 @@ export default function ReceiptsPage() {
           <form onSubmit={requestRecordPayment} className="p-6 pt-0 space-y-4">
             <div>
               <Label htmlFor="invoice_select">Invoice</Label>
-              <Select id="invoice_select" value={form.invoice} onChange={(e) => setForm((p) => ({ ...p, invoice: e.target.value }))} disabled={processingPayment}>
-                {invoices.map((inv) => (
+              <Select
+                id="invoice_select"
+                value={form.invoice}
+                onChange={(e) => {
+                  const invoice = invoices.find((row) => String(row.id) === e.target.value);
+                  setForm((p) => ({ ...p, invoice: e.target.value, amount_paid: invoice?.balance_due ?? "" }));
+                }}
+                disabled={processingPayment}
+              >
+                {openInvoices.map((inv) => (
                   <option key={inv.id} value={String(inv.id)}>
-                    {inv.invoice_number} ({money.format(Number(inv.total_amount))}) - {inv.status}
+                    {inv.invoice_number} (Balance {money.format(Number(inv.balance_due))}) - {inv.status}
                   </option>
                 ))}
               </Select>
+              {selectedPaymentInvoice ? (
+                <div className="mt-1 text-xs text-gray-500">
+                  Paid to date: {money.format(Number(selectedPaymentInvoice.amount_paid))}; balance remaining:{" "}
+                  {money.format(Number(selectedPaymentInvoice.balance_due))}
+                </div>
+              ) : null}
               {invoicesNext ? (
                 <div className="mt-2">
                   <Button type="button" variant="outline" size="sm" onClick={loadMoreInvoices} disabled={loading || processingPayment}>

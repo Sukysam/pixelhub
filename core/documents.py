@@ -24,6 +24,7 @@ from rest_framework.exceptions import ValidationError
 
 from .finance_services import invoice_discount_context
 from .models import DocumentDelivery, Invoice, Receipt, SavedDocument
+from .finance_services import receipt_payment_progress
 from .rendering_service import (
     currency_for_code,
     detect_country,
@@ -458,6 +459,7 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
         receipt_number = f"RCPT-{receipt.id}"
 
     invoice = receipt.invoice
+    total_paid_to_date, balance_due_after = receipt_payment_progress(receipt)
     line_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
     rendered_items = []
     for li in line_items:
@@ -479,6 +481,8 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             "payment_date_fmt": format_date_for_pattern(receipt.payment_date, region["date_format"]),
             "amount_paid_fmt": format_money(Decimal(receipt.amount_paid), currency, region["number_format"], symbol_position),
             "invoice_total_fmt": format_money(Decimal(invoice.total_amount), currency, region["number_format"], symbol_position),
+            "total_paid_to_date_fmt": format_money(total_paid_to_date, currency, region["number_format"], symbol_position),
+            "balance_due_after_fmt": format_money(balance_due_after, currency, region["number_format"], symbol_position),
             "invoice_items": rendered_items,
             "receipt_render": receipt_render,
             **templates,
@@ -500,7 +504,9 @@ def render_receipt(request, receipt: Receipt, fmt: DocumentFormat) -> RenderedDo
             f"Invoice: {receipt.invoice.invoice_number}",
             f"Date: {receipt.payment_date}",
             f"Customer: {receipt.invoice.customer.name}",
-            f"Amount paid: {receipt.amount_paid}",
+            f"This payment: {format_money(Decimal(receipt.amount_paid), currency, region['number_format'], symbol_position)}",
+            f"Total paid to date: {format_money(total_paid_to_date, currency, region['number_format'], symbol_position)}",
+            f"Balance due after payment: {format_money(balance_due_after, currency, region['number_format'], symbol_position)}",
             f"Method: {receipt.payment_method}",
             f"Reference: {receipt.reference_number or ''}",
         ]

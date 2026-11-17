@@ -27,6 +27,7 @@ from .models import (
     BusinessAccount,
     BusinessMembership,
 )
+from .finance_services import invoice_payment_totals, outstanding_invoice_amount, receipt_payment_progress
 from .source_account_balances import ZERO_BALANCE
 from .rbac import user_has_permission
 
@@ -563,6 +564,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
     customer_id = serializers.IntegerField(source="invoice.customer_id", read_only=True)
     customer_name = serializers.CharField(source="invoice.customer.name", read_only=True)
     transaction_timestamp = serializers.DateTimeField(source="updated_at", read_only=True)
+    total_paid_to_date = serializers.SerializerMethodField()
+    balance_due_after = serializers.SerializerMethodField()
 
     class Meta:
         model = Receipt
@@ -575,6 +578,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "customer_id",
             "customer_name",
             "amount_paid",
+            "total_paid_to_date",
+            "balance_due_after",
             "payment_date",
             "payment_method",
             "reference_number",
@@ -590,7 +595,36 @@ class ReceiptSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("amount_paid must be > 0")
         return value
 
+    def _get_payment_progress(self, obj):
+        if not hasattr(self, "_payment_progress_cache"):
+            self._payment_progress_cache = {}
+        if obj.pk not in self._payment_progress_cache:
+            self._payment_progress_cache[obj.pk] = receipt_payment_progress(obj)
+        return self._payment_progress_cache[obj.pk]
+
+    def get_total_paid_to_date(self, obj):
+        return str(self._get_payment_progress(obj)[0])
+
+    def get_balance_due_after(self, obj):
+        return str(self._get_payment_progress(obj)[1])
+
     def validate(self, attrs):
+        invoice = attrs.get("invoice") or (self.instance.invoice if self.instance else None)
+        if invoice is not None:
+            if invoice.is_deleted:
+                raise serializers.ValidationError({"invoice": "Cannot record a payment against a deleted invoice"})
+            amount = attrs.get("amount_paid", self.instance.amount_paid if self.instance else None)
+            if amount is not None:
+                other_receipts = invoice.receipts.filter(is_deleted=False)
+                if self.instance is not None and self.instance.invoice_id == invoice.id:
+                    other_receipts = other_receipts.exclude(pk=self.instance.pk)
+                total_paid = other_receipts.aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                outstanding = outstanding_invoice_amount(invoice.total_amount, total_paid)
+                if amount > outstanding:
+                    raise serializers.ValidationError(
+                        {"amount_paid": f"amount_paid cannot exceed outstanding amount ({outstanding})"}
+                    )
+
         payment_method = attrs.get("payment_method") or getattr(self.instance, "payment_method", None)
         reference_number = attrs.get("reference_number") if "reference_number" in attrs else getattr(self.instance, "reference_number", None)
 
@@ -617,6 +651,7 @@ class ReceiptDetailSerializer(ReceiptSerializer):
         invoice = getattr(obj, "invoice", None)
         if invoice is None:
             return None
+        amount_paid, balance_due = invoice_payment_totals(invoice)
         return {
             "id": invoice.id,
             "invoice_number": invoice.invoice_number,
@@ -624,6 +659,8 @@ class ReceiptDetailSerializer(ReceiptSerializer):
             "issue_date": invoice.issue_date,
             "due_date": invoice.due_date,
             "total_amount": str(invoice.total_amount),
+            "amount_paid": str(amount_paid),
+            "balance_due": str(balance_due),
             "customer_id": invoice.customer_id,
             "customer_name": getattr(getattr(invoice, "customer", None), "name", None),
         }

@@ -33,7 +33,7 @@ from django.conf import settings
 from django.db import transaction
 from django.db.utils import DatabaseError
 from django.db import models
-from django.db.models import F, Sum, Q, Max
+from django.db.models import F, Sum, Q, Max, OuterRef, Subquery
 from django.db.models.functions import Coalesce, TruncDay, TruncMonth
 from django.db.models import Count
 from django.contrib.contenttypes.models import ContentType
@@ -94,8 +94,10 @@ from .expense_security import decrypt_expense_text
 from .finance_services import (
     CENTS,
     deduct_inventory_for_invoice,
+    invoice_payment_totals,
     outstanding_invoice_amount,
     q2 as _q2,
+    receipt_payment_progress,
     resolve_invoice_discount as _resolve_invoice_discount,
     sync_invoice_status_with_payments,
 )
@@ -2259,8 +2261,17 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
+        paid_receipts = (
+            Receipt.objects.filter(invoice_id=OuterRef("pk"), is_deleted=False)
+            .values("invoice_id")
+            .annotate(total=Sum("amount_paid"))
+            .values("total")[:1]
+        )
         qs = super().get_queryset().annotate(
-            amount_paid=Coalesce(Sum("receipts__amount_paid", filter=Q(receipts__is_deleted=False)), Decimal("0.00")),
+            amount_paid=Coalesce(
+                Subquery(paid_receipts, output_field=models.DecimalField(max_digits=10, decimal_places=2)),
+                Decimal("0.00"),
+            ),
             line_item_count=Count("invoice_items", filter=Q(invoice_items__is_deleted=False), distinct=True),
             last_payment_date=Max("receipts__payment_date", filter=Q(receipts__is_deleted=False)),
         )
@@ -2524,6 +2535,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     raise NotFound("Invoice not found")
                 _check_concurrency(request, invoice)
                 old_status = invoice.status
+                old_total_amount = Decimal(invoice.total_amount or 0)
                 serializer = self.get_serializer(invoice, data=request.data, partial=partial)
                 serializer.is_valid(raise_exception=True)
                 before = {k: getattr(invoice, k, None) for k in serializer.validated_data.keys()}
@@ -2532,6 +2544,11 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     Decimal(updated.subtotal), updated.discount_type, updated.discount_value
                 )
                 recomputed_total = _q2(Decimal(updated.subtotal) - discount_amount + Decimal(updated.tax_total))
+                total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+                if recomputed_total < total_paid:
+                    raise ValidationError(
+                        {"total_amount": f"Invoice total cannot be reduced below payments already received ({_q2(total_paid)})."}
+                    )
                 updated_fields: list[str] = []
                 if updated.discount_type != discount_type:
                     updated.discount_type = discount_type
@@ -2552,9 +2569,15 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 if {"discount_type", "discount_value"} & set(serializer.validated_data.keys()):
                     after_keys.update({"discount_amount", "total_amount"})
                     before.setdefault("discount_amount", getattr(invoice, "discount_amount", None))
-                    before.setdefault("total_amount", getattr(invoice, "total_amount", None))
+                    before.setdefault("total_amount", old_total_amount)
                 after = {k: getattr(updated, k, None) for k in after_keys}
                 changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
+                if old_total_amount != updated.total_amount:
+                    changes["payment_progress"] = {
+                        "total_paid_to_date": str(_q2(total_paid)),
+                        "balance_due_before": str(outstanding_invoice_amount(old_total_amount, total_paid)),
+                        "balance_due_after": str(outstanding_invoice_amount(updated.total_amount, total_paid)),
+                    }
                 if changes:
                     _log_audit(request.user, "update", updated, changes)
 
@@ -2723,6 +2746,24 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 new_status = sync_invoice_status_with_payments(invoice, total_paid_after)
                 if invoice.status in ("Sent", "Paid"):
                     deduct_inventory_for_invoice(invoice)
+                paid_to_date, balance_due = receipt_payment_progress(receipt)
+                invoice_paid_to_date, invoice_balance_due = invoice_payment_totals(invoice)
+                _log_audit(
+                    user,
+                    "create",
+                    receipt,
+                    {
+                        "invoice": str(invoice.id),
+                        "amount_paid": str(amount_paid),
+                        "payment_method": payment_method,
+                        "total_paid_to_date": str(paid_to_date),
+                        "balance_due_after": str(balance_due),
+                        "invoice_balance_after": {
+                            "total_paid_to_date": str(invoice_paid_to_date),
+                            "balance_due": str(invoice_balance_due),
+                        },
+                    },
+                )
                 if new_status == "Paid":
                     logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid_after)
 
@@ -3269,11 +3310,28 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
                     deduct_inventory_for_invoice(invoice)
                 if new_status == "Paid":
                     logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid)
+                paid_to_date, balance_due = receipt_payment_progress(receipt)
+                invoice_paid_to_date, invoice_balance_due = invoice_payment_totals(invoice)
+                if getattr(request.user, "is_authenticated", False):
+                    _log_audit(
+                        request.user,
+                        "create",
+                        receipt,
+                        {
+                            "invoice": str(invoice.id),
+                            "amount_paid": str(receipt.amount_paid),
+                            "payment_method": receipt.payment_method,
+                            "total_paid_to_date": str(paid_to_date),
+                            "balance_due_after": str(balance_due),
+                            "invoice_balance_after": {
+                                "total_paid_to_date": str(invoice_paid_to_date),
+                                "balance_due": str(invoice_balance_due),
+                            },
+                        },
+                    )
 
             if cache_key:
                 cache.set(cache_key, receipt.id, timeout=15 * 60)
-            if getattr(request.user, "is_authenticated", False):
-                _log_audit(request.user, "create", receipt, {"invoice": str(invoice.id), "amount_paid": str(receipt.amount_paid), "payment_method": receipt.payment_method})
             logger.info("receipt.create receipt_id=%s invoice_id=%s amount_paid=%s", receipt.id, invoice.id, receipt.amount_paid)
             return Response(ReceiptSerializer(receipt).data, status=status.HTTP_201_CREATED)
         except Exception as exc:
@@ -3319,20 +3377,46 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
             with transaction.atomic():
                 receipt = Receipt.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
                 _check_concurrency(request, receipt)
+                raw_invoice_id = request.data.get("invoice", receipt.invoice_id)
+                try:
+                    target_invoice_id = int(raw_invoice_id)
+                except (TypeError, ValueError):
+                    target_invoice_id = receipt.invoice_id
+
+                old_invoice_id = receipt.invoice_id
+                invoice_ids = sorted({old_invoice_id, target_invoice_id})
+                locked_invoices = {
+                    invoice.id: invoice
+                    for invoice in Invoice.objects.select_for_update()
+                    .filter(pk__in=invoice_ids, is_deleted=False)
+                    .order_by("pk")
+                }
+                previous_invoice = locked_invoices.get(receipt.invoice_id)
+                if previous_invoice is not None:
+                    receipt.invoice = previous_invoice
+                progress_before = receipt_payment_progress(receipt)
+
                 serializer = self.get_serializer(receipt, data=request.data, partial=partial)
                 serializer.is_valid(raise_exception=True)
                 before = {k: getattr(receipt, k, None) for k in serializer.validated_data.keys()}
                 updated = serializer.save()
                 after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
                 changes = {k: {"from": str(before[k]) if before[k] is not None else None, "to": str(after[k]) if after[k] is not None else None} for k in before.keys() if before[k] != after[k]}
+                progress_after = receipt_payment_progress(updated)
+                if progress_before != progress_after:
+                    changes["payment_progress"] = {
+                        "from": {"total_paid_to_date": str(progress_before[0]), "balance_due_after": str(progress_before[1])},
+                        "to": {"total_paid_to_date": str(progress_after[0]), "balance_due_after": str(progress_after[1])},
+                    }
                 if changes:
                     _log_audit(request.user, "update", updated, changes)
 
-                try:
-                    invoice = Invoice.objects.select_for_update().get(pk=updated.invoice_id, is_deleted=False)
-                except Invoice.DoesNotExist:
-                    invoice = None
-                if invoice is not None:
+                affected_invoices = {
+                    invoice.id: invoice
+                    for invoice in locked_invoices.values()
+                    if invoice.id in {old_invoice_id, updated.invoice_id}
+                }
+                for invoice in affected_invoices.values():
                     total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
                     sync_invoice_status_with_payments(invoice, total_paid)
                     if invoice.status in ("Sent", "Paid"):
@@ -3351,14 +3435,36 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
         with transaction.atomic():
             receipt = Receipt.objects.select_for_update().select_related("invoice").get(pk=self.get_object().pk, is_deleted=False)
             _check_concurrency(request, receipt)
+            invoice = Invoice.objects.select_for_update().get(pk=receipt.invoice_id, is_deleted=False)
+            receipt_progress_before = receipt_payment_progress(receipt)
+            paid_before, balance_before = invoice_payment_totals(invoice)
             receipt.is_deleted = True
             receipt.deleted_at = timezone.now()
             receipt.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
-            _log_audit(request.user, "delete", receipt, {})
 
-            invoice = Invoice.objects.select_for_update().get(pk=receipt.invoice_id, is_deleted=False)
             total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
             sync_invoice_status_with_payments(invoice, total_paid)
+            paid_after, balance_after = invoice_payment_totals(invoice)
+            _log_audit(
+                request.user,
+                "delete",
+                receipt,
+                {
+                    "amount_paid": str(receipt.amount_paid),
+                    "payment_progress_before": {
+                        "total_paid_to_date": str(paid_before),
+                        "balance_due": str(balance_before),
+                    },
+                    "payment_progress_after": {
+                        "total_paid_to_date": str(paid_after),
+                        "balance_due": str(balance_after),
+                    },
+                    "deleted_receipt_progress": {
+                        "total_paid_to_date": str(receipt_progress_before[0]),
+                        "balance_due_after": str(receipt_progress_before[1]),
+                    },
+                },
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=["post"])
@@ -3373,18 +3479,49 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
             if len(receipts) != len(set(ids)):
                 raise NotFound("One or more receipts not found")
             invoice_ids = {r.invoice_id for r in receipts}
+            invoices = {
+                invoice.id: invoice
+                for invoice in Invoice.objects.select_for_update()
+                .filter(pk__in=invoice_ids, is_deleted=False)
+                .order_by("pk")
+            }
+            invoice_totals_before = {
+                invoice_id: invoice_payment_totals(invoice)
+                for invoice_id, invoice in invoices.items()
+            }
+            receipt_progress_before = {r.id: receipt_payment_progress(r) for r in receipts}
             for r in receipts:
                 r.is_deleted = True
                 r.deleted_at = now
                 r.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
-                _log_audit(request.user, "bulk_delete", r, {"bulk": True})
-            for invoice_id in invoice_ids:
-                try:
-                    inv = Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
-                except Invoice.DoesNotExist:
-                    continue
+            for invoice_id, inv in invoices.items():
                 total_paid = inv.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
                 sync_invoice_status_with_payments(inv, total_paid)
+                paid_after, balance_after = invoice_payment_totals(inv)
+                paid_before, balance_before = invoice_totals_before[invoice_id]
+                for receipt in (r for r in receipts if r.invoice_id == invoice_id):
+                    receipt_progress = receipt_progress_before[receipt.id]
+                    _log_audit(
+                        request.user,
+                        "bulk_delete",
+                        receipt,
+                        {
+                            "bulk": True,
+                            "amount_paid": str(receipt.amount_paid),
+                            "payment_progress_before": {
+                                "total_paid_to_date": str(paid_before),
+                                "balance_due": str(balance_before),
+                            },
+                            "payment_progress_after": {
+                                "total_paid_to_date": str(paid_after),
+                                "balance_due": str(balance_after),
+                            },
+                            "deleted_receipt_progress": {
+                                "total_paid_to_date": str(receipt_progress[0]),
+                                "balance_due_after": str(receipt_progress[1]),
+                            },
+                        },
+                    )
         return Response({"deleted": len(ids)}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["get"])
@@ -5744,7 +5881,7 @@ def _settle_payment_transaction(*, tx: PaymentTransaction, provider_paid_at: str
         amount_paid = min(outstanding, tx.amount).quantize(CENTS, rounding=ROUND_HALF_UP)
         if amount_paid <= 0:
             return
-        Receipt.objects.create(
+        receipt = Receipt.objects.create(
             invoice=invoice,
             amount_paid=amount_paid,
             payment_method="Bank Transfer" if tx.provider == "bank_transfer" else "Card",
@@ -5754,7 +5891,39 @@ def _settle_payment_transaction(*, tx: PaymentTransaction, provider_paid_at: str
         sync_invoice_status_with_payments(invoice, total_paid_after)
         if invoice.status in ("Sent", "Paid"):
             deduct_inventory_for_invoice(invoice)
-        _log_audit(tx.created_by, "update", tx, {"status": {"to": "succeeded"}, "receipt_amount": str(amount_paid)})
+        paid_to_date, balance_due = receipt_payment_progress(receipt)
+        invoice_paid_to_date, invoice_balance_due = invoice_payment_totals(invoice)
+        _log_audit(
+            tx.created_by,
+            "create",
+            receipt,
+            {
+                "invoice": str(invoice.id),
+                "amount_paid": str(amount_paid),
+                "payment_method": receipt.payment_method,
+                "total_paid_to_date": str(paid_to_date),
+                "balance_due_after": str(balance_due),
+                "invoice_balance_after": {
+                    "total_paid_to_date": str(invoice_paid_to_date),
+                    "balance_due": str(invoice_balance_due),
+                },
+            },
+        )
+        _log_audit(
+            tx.created_by,
+            "update",
+            tx,
+            {
+                "status": {"to": "succeeded"},
+                "receipt_amount": str(amount_paid),
+                "total_paid_to_date": str(paid_to_date),
+                "balance_due_after": str(balance_due),
+                "invoice_balance_after": {
+                    "total_paid_to_date": str(invoice_paid_to_date),
+                    "balance_due": str(invoice_balance_due),
+                },
+            },
+        )
 
 
 def _fail_payment_transaction(*, tx: PaymentTransaction, failure_code: str | None, failure_message: str | None, provider_status: str | None) -> None:
@@ -6162,18 +6331,22 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
             if existing:
                 return Response(self.get_serializer(existing).data, status=status.HTTP_200_OK)
 
+            total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+            outstanding = outstanding_invoice_amount(invoice.total_amount, total_paid)
             raw_amount = request.data.get("amount")
             if raw_amount in (None, ""):
-                total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
-                outstanding = outstanding_invoice_amount(invoice.total_amount, total_paid)
                 amount = outstanding
             else:
                 try:
                     amount = Decimal(str(raw_amount)).quantize(CENTS, rounding=ROUND_HALF_UP)
                 except (InvalidOperation, TypeError):
                     raise ValidationError({"amount": "amount must be a valid number"})
+            if not amount.is_finite():
+                raise ValidationError({"amount": "amount must be a finite number"})
             if amount <= 0:
                 raise ValidationError({"amount": "amount must be > 0"})
+            if amount > outstanding:
+                raise ValidationError({"amount": f"amount cannot exceed outstanding balance ({outstanding})"})
 
             currency_code = str(request.data.get("currency_code") or "").strip().upper()
             if not currency_code:

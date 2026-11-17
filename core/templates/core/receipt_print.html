@@ -205,9 +205,17 @@
             <div>Invoice Total</div>
             <div>{{ invoice_total_fmt }}</div>
         </div>
-        <div class="totals-row totals-strong">
-            <div>Amount Paid</div>
+        <div class="totals-row">
+            <div>This Payment</div>
             <div>{{ amount_paid_fmt }}</div>
+        </div>
+        <div class="totals-row">
+            <div>Total Paid to Date</div>
+            <div>{{ total_paid_to_date_fmt }}</div>
+        </div>
+        <div class="totals-row totals-strong">
+            <div>Balance Due After Payment</div>
+            <div>{{ balance_due_after_fmt }}</div>
         </div>
     </div>
 

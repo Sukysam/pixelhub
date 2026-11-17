@@ -536,6 +536,35 @@ class PersistenceTests(APITestCase):
         self.assertEqual(detail_res.data["line_item_count"], 1)
         self.assertEqual(detail_res.data["invoice_items"][0]["item_name"], "Invoice Widget")
 
+    def test_invoice_payment_totals_do_not_multiply_across_multiple_lines(self):
+        customer = Customer.objects.create(name="Multi-line Balance Buyer")
+        item_a = Item.objects.create(name="Line A", unit_price=Decimal("10.00"), stock_quantity=10)
+        item_b = Item.objects.create(name="Line B", unit_price=Decimal("10.00"), stock_quantity=10)
+        invoice = Invoice.objects.create(
+            invoice_number="INV-MULTILINE-BALANCE",
+            customer=customer,
+            status="Sent",
+            subtotal=Decimal("20.00"),
+            total_amount=Decimal("20.00"),
+        )
+        for item in (item_a, item_b):
+            InvoiceItem.objects.create(
+                invoice=invoice,
+                item=item,
+                quantity=1,
+                unit_price=Decimal("10.00"),
+                line_subtotal=Decimal("10.00"),
+                line_tax=Decimal("0.00"),
+                line_total=Decimal("10.00"),
+            )
+        Receipt.objects.create(invoice=invoice, amount_paid=Decimal("5.00"), payment_method="Cash")
+
+        response = self.client.get(reverse("invoice-detail", args=[invoice.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Decimal(response.data["amount_paid"]), Decimal("5.00"))
+        self.assertEqual(Decimal(response.data["balance_due"]), Decimal("15.00"))
+        self.assertEqual(response.data["line_item_count"], 2)
+
     def test_receipt_detail_and_list_support_filters_sorting_and_linked_invoice_context(self):
         customer = self.client.post(reverse("customer-list"), {"name": "Receipt Buyer"}, format="json").data
         item = self.client.post(
@@ -568,7 +597,140 @@ class PersistenceTests(APITestCase):
         detail_res = self.client.get(reverse("receipt-detail", args=[receipt["id"]]))
         self.assertEqual(detail_res.status_code, status.HTTP_200_OK)
         self.assertEqual(detail_res.data["linked_invoice"]["invoice_number"], invoice["invoice_number"])
+        self.assertEqual(Decimal(detail_res.data["linked_invoice"]["amount_paid"]), Decimal("12.00"))
+        self.assertEqual(
+            Decimal(detail_res.data["linked_invoice"]["balance_due"]),
+            Decimal(invoice["total_amount"]) - Decimal("12.00"),
+        )
         self.assertEqual(detail_res.data["transaction_timestamp"], detail_res.data["updated_at"])
+
+    def test_installment_receipts_track_paid_to_date_balance_and_audit_changes(self):
+        customer = Customer.objects.create(name="Advance Payment Buyer")
+        invoice = Invoice.objects.create(
+            invoice_number="INV-ADVANCE-PROGRESS",
+            customer=customer,
+            status="Sent",
+            subtotal=Decimal("100.00"),
+            total_amount=Decimal("100.00"),
+        )
+        first = self.client.post(
+            reverse("receipt-list"),
+            {
+                "invoice": invoice.id,
+                "amount_paid": "30.00",
+                "payment_date": "2026-01-10",
+                "payment_method": "Cash",
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(first.data["total_paid_to_date"]), Decimal("30.00"))
+        self.assertEqual(Decimal(first.data["balance_due_after"]), Decimal("70.00"))
+
+        second = self.client.post(
+            reverse("receipt-list"),
+            {
+                "invoice": invoice.id,
+                "amount_paid": "20.00",
+                "payment_date": "2026-01-11",
+                "payment_method": "Bank Transfer",
+                "reference_number": "ADV-SECOND",
+            },
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(second.data["total_paid_to_date"]), Decimal("50.00"))
+        self.assertEqual(Decimal(second.data["balance_due_after"]), Decimal("50.00"))
+        create_audit = AuditLog.objects.filter(action="create", object_id=str(second.data["id"])).latest("id")
+        self.assertEqual(create_audit.changes["total_paid_to_date"], "50.00")
+        self.assertEqual(create_audit.changes["balance_due_after"], "50.00")
+
+        excess_payment = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice.id, "amount_paid": "50.01", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(excess_payment.status_code, status.HTTP_400_BAD_REQUEST)
+
+        overpayment = self.client.patch(
+            reverse("receipt-detail", args=[second.data["id"]]),
+            {"amount_paid": "90.00"},
+            format="json",
+        )
+        self.assertEqual(overpayment.status_code, status.HTTP_400_BAD_REQUEST)
+        second_receipt = Receipt.objects.get(pk=second.data["id"])
+        self.assertEqual(second_receipt.amount_paid, Decimal("20.00"))
+
+        updated_first = self.client.patch(
+            reverse("receipt-detail", args=[first.data["id"]]),
+            {"amount_paid": "40.00"},
+            format="json",
+        )
+        self.assertEqual(updated_first.status_code, status.HTTP_200_OK)
+        second_detail = self.client.get(reverse("receipt-detail", args=[second.data["id"]]))
+        self.assertEqual(Decimal(second_detail.data["total_paid_to_date"]), Decimal("60.00"))
+        self.assertEqual(Decimal(second_detail.data["balance_due_after"]), Decimal("40.00"))
+        update_audit = AuditLog.objects.filter(action="update", object_id=str(first.data["id"])).latest("id")
+        self.assertEqual(update_audit.changes["payment_progress"]["to"]["total_paid_to_date"], "40.00")
+
+        invoice_detail = self.client.get(reverse("invoice-detail", args=[invoice.id]))
+        self.assertEqual(Decimal(invoice_detail.data["amount_paid"]), Decimal("60.00"))
+        self.assertEqual(Decimal(invoice_detail.data["balance_due"]), Decimal("40.00"))
+
+        backdated = self.client.post(
+            reverse("receipt-list"),
+            {
+                "invoice": invoice.id,
+                "amount_paid": "5.00",
+                "payment_date": "2026-01-01",
+                "payment_method": "Cash",
+            },
+            format="json",
+        )
+        self.assertEqual(backdated.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Decimal(backdated.data["total_paid_to_date"]), Decimal("5.00"))
+        self.assertEqual(Decimal(backdated.data["balance_due_after"]), Decimal("95.00"))
+        backdated_audit = AuditLog.objects.filter(
+            action="create", object_id=str(backdated.data["id"])
+        ).latest("id")
+        self.assertEqual(backdated_audit.changes["total_paid_to_date"], "5.00")
+        self.assertEqual(backdated_audit.changes["balance_due_after"], "95.00")
+        self.assertEqual(
+            backdated_audit.changes["invoice_balance_after"]["total_paid_to_date"],
+            "65.00",
+        )
+        self.assertEqual(
+            backdated_audit.changes["invoice_balance_after"]["balance_due"],
+            "35.00",
+        )
+
+    def test_receipt_preview_shows_this_payment_and_remaining_balance(self):
+        customer = Customer.objects.create(name="Advance Preview Buyer")
+        invoice = Invoice.objects.create(
+            invoice_number="INV-ADVANCE-PREVIEW",
+            customer=customer,
+            status="Sent",
+            subtotal=Decimal("100.00"),
+            total_amount=Decimal("100.00"),
+        )
+        Receipt.objects.create(
+            invoice=invoice,
+            amount_paid=Decimal("30.00"),
+            payment_date=date(2026, 2, 1),
+            payment_method="Cash",
+        )
+        second = Receipt.objects.create(
+            invoice=invoice,
+            amount_paid=Decimal("20.00"),
+            payment_date=date(2026, 2, 2),
+            payment_method="Cash",
+        )
+        request_stub = type("Req", (), {"user": self.user, "query_params": {}, "headers": {}})()
+        rendered = render_receipt(request_stub, second, "html").content.decode("utf-8")
+        self.assertIn("This Payment", rendered)
+        self.assertIn("Total Paid to Date", rendered)
+        self.assertIn("Balance Due After Payment", rendered)
+        self.assertIn("₦50.00", rendered)
 
     def test_entity_read_views_reject_invalid_ordering_and_handle_missing_or_unauthorized_requests(self):
         customer = self.client.post(reverse("customer-list"), {"name": "Missing Target"}, format="json").data
@@ -1072,6 +1234,21 @@ class PersistenceTests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         inv.refresh_from_db()
         self.assertEqual(inv.status, "Sent")
+        delete_audit = AuditLog.objects.filter(
+            action="bulk_delete", object_id=str(r1.id)
+        ).latest("id")
+        self.assertEqual(
+            delete_audit.changes["payment_progress_before"]["total_paid_to_date"],
+            "10.00",
+        )
+        self.assertEqual(
+            delete_audit.changes["payment_progress_after"]["total_paid_to_date"],
+            "4.00",
+        )
+        self.assertEqual(
+            delete_audit.changes["payment_progress_after"]["balance_due"],
+            "6.00",
+        )
 
         res = self.client.post(reverse("receipt-bulk-delete"), {"ids": [r2.id]}, format="json")
         self.assertEqual(res.status_code, status.HTTP_200_OK)
@@ -1992,6 +2169,39 @@ class InvoiceDiscountTests(APITestCase):
         self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
         self.assertEqual(Decimal(patch_res.data["discount_amount"]), Decimal("5.00"))
         self.assertEqual(Decimal(patch_res.data["total_amount"]), Decimal("17.00"))
+
+    def test_invoice_total_cannot_be_reduced_below_advance_payments(self):
+        create_res = self.client.post(
+            "/api/invoices/",
+            {
+                "customer": self.customer.id,
+                "status": "Draft",
+                "items": [{"item": self.item.id, "quantity": 2}],
+            },
+            format="json",
+        )
+        self.assertEqual(create_res.status_code, status.HTTP_201_CREATED)
+        invoice_id = create_res.data["id"]
+        payment = self.client.post(
+            "/api/receipts/",
+            {"invoice": invoice_id, "amount_paid": "18.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(payment.status_code, status.HTTP_201_CREATED)
+
+        patch_res = self.client.patch(
+            f"/api/invoices/{invoice_id}/",
+            {
+                "discount_type": "fixed",
+                "discount_value": "5.00",
+                "updated_at": create_res.data["updated_at"],
+            },
+            format="json",
+        )
+        self.assertEqual(patch_res.status_code, status.HTTP_400_BAD_REQUEST)
+        invoice = Invoice.objects.get(pk=invoice_id)
+        self.assertEqual(invoice.total_amount, Decimal("22.00"))
+        self.assertEqual(Receipt.objects.get(invoice=invoice, is_deleted=False).amount_paid, Decimal("18.00"))
 
     def test_invoice_create_accepts_unit_price_override_and_recomputes_totals(self):
         res = self.client.post(
