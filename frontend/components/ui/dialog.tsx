@@ -7,6 +7,28 @@ interface DialogProps {
   children: React.ReactNode;
 }
 
+// Reference-counted body scroll lock. Capturing and restoring each dialog's own
+// `body.style.overflow` leaks when dialogs overlap or when the body already had
+// `overflow: hidden` from a prior dialog: every later dialog then restores the
+// stale `hidden` value and the page stays un-scrollable. A shared counter keeps
+// the lock active while any dialog is open and clears it exactly once when the
+// last one closes, regardless of open/close order.
+let openDialogCount = 0;
+
+function lockBodyScroll() {
+  openDialogCount += 1;
+  if (openDialogCount === 1) {
+    document.body.style.overflow = "hidden";
+  }
+}
+
+function unlockBodyScroll() {
+  openDialogCount = Math.max(0, openDialogCount - 1);
+  if (openDialogCount === 0) {
+    document.body.style.overflow = "";
+  }
+}
+
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
   const selector = [
     "a[href]",
@@ -34,9 +56,7 @@ const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
   React.useEffect(() => {
     if (!open) return;
     previousActiveRef.current = document.activeElement;
-    const body = document.body;
-    const prevOverflow = body.style.overflow;
-    body.style.overflow = "hidden";
+    lockBodyScroll();
 
     const focusTimer = window.setTimeout(() => {
       const root = contentRef.current;
@@ -79,7 +99,7 @@ const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
     return () => {
       window.clearTimeout(focusTimer);
       document.removeEventListener("keydown", onKeyDown);
-      body.style.overflow = prevOverflow;
+      unlockBodyScroll();
       const prev = previousActiveRef.current as HTMLElement | null;
       if (prev && typeof prev.focus === "function") prev.focus();
     };
