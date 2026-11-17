@@ -4,11 +4,11 @@ import logging
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
-from django.db.models import F, Q, Sum
+from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .models import Invoice, Item, Receipt
+from .models import InventoryMovement, Invoice, Item, Receipt
 
 
 logger = logging.getLogger(__name__)
@@ -136,12 +136,121 @@ def sync_invoice_status_with_payments(invoice: Invoice, payment_total: Any) -> s
     return target_status
 
 
-def deduct_inventory_for_invoice(invoice: Invoice, *, allow_negative: bool = False) -> None:
-    """Subtract sold quantities from stock once an invoice reaches a completed state.
+def apply_stock_movement(
+    item_id: int,
+    delta: int,
+    *,
+    reason: str,
+    invoice: Optional[Invoice] = None,
+    user=None,
+    note: str = "",
+    allow_negative: bool = False,
+) -> Optional[InventoryMovement]:
+    """Apply one stock change and record it in the inventory ledger.
+
+    The stock update and its ledger row belong to the caller's transaction, so
+    ``Item.stock_quantity`` and the ledger can never drift apart. Raises a
+    validation error instead of driving stock below zero unless the caller opts
+    in (the historical backfill does).
+    """
+    delta = int(delta)
+    if delta == 0:
+        return None
+
+    try:
+        item = Item.objects.select_for_update().get(pk=item_id)
+    except Item.DoesNotExist:
+        raise ValidationError(f"Item {item_id} not found")
+
+    before = int(item.stock_quantity or 0)
+    after = before + delta
+    if after < 0 and not allow_negative:
+        raise ValidationError(f"Insufficient stock for item {item_id}")
+
+    Item.objects.filter(pk=item_id).update(stock_quantity=after, updated_at=timezone.now())
+    movement = InventoryMovement.objects.create(
+        item_id=item_id,
+        invoice=invoice,
+        reason=reason,
+        delta=delta,
+        quantity_before=before,
+        quantity_after=after,
+        note=note or "",
+        created_by=user if getattr(user, "is_authenticated", False) else None,
+    )
+    logger.info(
+        "inventory.movement item_id=%s reason=%s delta=%s before=%s after=%s invoice_id=%s",
+        item_id,
+        reason,
+        delta,
+        before,
+        after,
+        getattr(invoice, "id", None),
+    )
+    return movement
+
+
+def invoice_deducted_quantities(invoice: Invoice) -> dict[int, int]:
+    """Net units taken out of stock for an invoice, per item id.
+
+    Read from the ledger so that a sale plus any later line-item edits nets out
+    to exactly the amount the invoice is currently holding.
+    """
+    net: dict[int, int] = {}
+    movements = InventoryMovement.objects.filter(
+        invoice_id=invoice.pk,
+        reason__in=[InventoryMovement.REASON_SALE, InventoryMovement.REASON_EDIT],
+    ).values_list("item_id", "delta")
+    for item_id, delta in movements:
+        net[item_id] = net.get(item_id, 0) + int(delta)
+    return net
+
+
+def restore_inventory_for_invoice(
+    invoice: Invoice,
+    *,
+    reason: str = InventoryMovement.REASON_VOID,
+    user=None,
+    note: str = "",
+) -> dict[int, int]:
+    """Put back every unit an invoice took out of stock and clear its stamp.
+
+    Idempotent: the deduction stamp is cleared in the same transaction, so a
+    second call is a no-op. Quantities come from the ledger; invoices deducted
+    before the ledger existed fall back to their current line items.
+    """
+    if invoice.inventory_deducted_at is None:
+        return {}
+
+    net_by_item = invoice_deducted_quantities(invoice)
+    if not net_by_item:
+        for line in invoice.invoice_items.select_related("item").filter(is_deleted=False):
+            if line.item.type == "service":
+                continue
+            quantity = int(line.quantity or 0)
+            if quantity:
+                net_by_item[line.item_id] = net_by_item.get(line.item_id, 0) - quantity
+
+    restored: dict[int, int] = {}
+    for item_id in sorted(net_by_item):
+        quantity = -int(net_by_item[item_id])
+        if quantity == 0:
+            continue
+        apply_stock_movement(item_id, quantity, reason=reason, invoice=invoice, user=user, note=note)
+        restored[item_id] = quantity
+
+    Invoice.objects.filter(pk=invoice.pk).update(inventory_deducted_at=None)
+    invoice.inventory_deducted_at = None
+    logger.info("inventory.restore invoice_id=%s restored=%s", invoice.id, restored)
+    return restored
+
+
+def deduct_inventory_for_invoice(invoice: Invoice, *, allow_negative: bool = False, user=None) -> None:
+    """Subtract sold quantities from stock once an invoice becomes a completed sale.
 
     Called from every path that can move an invoice into "Sent"/"Paid" (invoice
-    create/update/bulk status, receipt recording, the invoice pay action and
-    payment-provider settlement). Idempotent: ``Invoice.inventory_deducted_at``
+    create/update, receipt recording, the invoice pay action, payment-provider
+    settlement and the historical backfill). Idempotent: ``Invoice.inventory_deducted_at``
     guards against double deduction on payment retries or status re-syncs, and it
     is only stamped when the deduction succeeds.
 
@@ -151,26 +260,38 @@ def deduct_inventory_for_invoice(invoice: Invoice, *, allow_negative: bool = Fal
     if invoice.inventory_deducted_at is not None:
         return
 
-    invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
     required_by_item: dict[int, int] = {}
-    for line in invoice_items:
+    for line in invoice.invoice_items.select_related("item").filter(is_deleted=False):
         if line.item.type == "service":
             continue
         required_by_item[line.item_id] = required_by_item.get(line.item_id, 0) + int(line.quantity or 0)
 
     if required_by_item:
+        # Validate every line before touching stock so a short item cannot leave
+        # an invoice half deducted.
         items = {
             item.id: item
-            for item in Item.objects.select_for_update().filter(id__in=list(required_by_item.keys()), is_deleted=False)
+            for item in Item.objects.select_for_update().filter(id__in=sorted(required_by_item), is_deleted=False)
         }
         for item_id, required_qty in required_by_item.items():
             db_item = items.get(item_id)
             if db_item is None:
                 raise ValidationError(f"Insufficient stock for item {item_id}")
-            if not allow_negative and db_item.stock_quantity < required_qty:
+            if not allow_negative and int(db_item.stock_quantity or 0) < required_qty:
                 raise ValidationError(f"Insufficient stock for item {item_id}")
-        for item_id, required_qty in required_by_item.items():
-            Item.objects.filter(pk=item_id).update(stock_quantity=F("stock_quantity") - required_qty)
+        for item_id in sorted(required_by_item):
+            required_qty = required_by_item[item_id]
+            if required_qty <= 0:
+                continue
+            apply_stock_movement(
+                item_id,
+                -required_qty,
+                reason=InventoryMovement.REASON_SALE,
+                invoice=invoice,
+                user=user,
+                note=f"Invoice {invoice.invoice_number}",
+                allow_negative=allow_negative,
+            )
 
     Invoice.objects.filter(pk=invoice.pk, inventory_deducted_at__isnull=True).update(
         inventory_deducted_at=timezone.now()

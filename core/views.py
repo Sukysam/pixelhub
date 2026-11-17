@@ -52,6 +52,7 @@ from .models import (
     Item,
     Invoice,
     InvoiceItem,
+    InventoryMovement,
     Receipt,
     Expense,
     SourceAccount,
@@ -93,12 +94,14 @@ from .logo_uploads import (
 from .expense_security import decrypt_expense_text
 from .finance_services import (
     CENTS,
+    apply_stock_movement,
     deduct_inventory_for_invoice,
     invoice_payment_totals,
     outstanding_invoice_amount,
     q2 as _q2,
     receipt_payment_progress,
     resolve_invoice_discount as _resolve_invoice_discount,
+    restore_inventory_for_invoice,
     sync_invoice_status_with_payments,
 )
 from .rendering_service import (
@@ -2021,8 +2024,14 @@ class ItemViewSet(SoftDeleteModelViewSet):
             new_qty = item.stock_quantity + adjustment
             if new_qty < 0:
                 raise ValidationError({"stock_quantity": "stock_quantity cannot go below 0"})
-            item.stock_quantity = new_qty
-            item.save(update_fields=["stock_quantity", "updated_at"])
+            apply_stock_movement(
+                item.id,
+                adjustment,
+                reason=InventoryMovement.REASON_MANUAL,
+                user=request.user,
+                note="Manual stock adjustment",
+            )
+            item.refresh_from_db()
 
         logger.info("inventory.adjust_stock item_id=%s adjustment=%s new_stock=%s", item.id, adjustment, item.stock_quantity)
         return Response(
@@ -2516,7 +2525,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 invoice.refresh_from_db()
 
                 if invoice.status in ["Sent", "Paid"]:
-                    self._deduct_inventory_for_invoice(invoice)
+                    self._deduct_inventory_for_invoice(invoice, user=request.user)
 
             logger.info("invoice.create invoice_id=%s invoice_number=%s status=%s", invoice.id, invoice.invoice_number, invoice.status)
             return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
@@ -2582,7 +2591,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                     _log_audit(request.user, "update", updated, changes)
 
                 if old_status not in ["Sent", "Paid"] and updated.status in ["Sent", "Paid"]:
-                    self._deduct_inventory_for_invoice(updated)
+                    self._deduct_inventory_for_invoice(updated, user=request.user)
 
             logger.info("invoice.update invoice_id=%s status_from=%s status_to=%s", invoice.id, old_status, updated.status)
             return Response(InvoiceSerializer(updated).data, status=status.HTTP_200_OK)
@@ -2593,8 +2602,8 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         kwargs["partial"] = True
         return self.update(request, *args, **kwargs)
 
-    def _deduct_inventory_for_invoice(self, invoice: Invoice) -> None:
-        deduct_inventory_for_invoice(invoice)
+    def _deduct_inventory_for_invoice(self, invoice: Invoice, user=None) -> None:
+        deduct_inventory_for_invoice(invoice, user=user)
 
     def destroy(self, request, *args, **kwargs):
         self._require_model_perm("delete")
@@ -2602,12 +2611,27 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
             invoice = Invoice.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
             _check_concurrency(request, invoice)
             now = timezone.now()
+            # Put sold quantities back before the line items are soft-deleted so
+            # invoices deducted before the ledger existed still restore correctly.
+            restored = restore_inventory_for_invoice(
+                invoice,
+                user=request.user,
+                note=f"Invoice {invoice.invoice_number} deleted",
+            )
             InvoiceItem.objects.filter(invoice=invoice, is_deleted=False).update(is_deleted=True, deleted_at=now)
             Receipt.objects.filter(invoice=invoice, is_deleted=False).update(is_deleted=True, deleted_at=now)
             invoice.is_deleted = True
             invoice.deleted_at = now
             invoice.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
-            _log_audit(request.user, "delete", invoice, {"cascade": ["invoice_items", "receipts"]})
+            _log_audit(
+                request.user,
+                "delete",
+                invoice,
+                {
+                    "cascade": ["invoice_items", "receipts"],
+                    "stock_restored": {str(item_id): qty for item_id, qty in restored.items()},
+                },
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=["post"])
@@ -2618,16 +2642,30 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
             raise ValidationError({"ids": "ids must be a non-empty list"})
         now = timezone.now()
         with transaction.atomic():
-            invoices = list(Invoice.objects.select_for_update().filter(id__in=ids, is_deleted=False))
+            invoices = list(Invoice.objects.select_for_update().filter(id__in=ids, is_deleted=False).order_by("pk"))
             if len(invoices) != len(set(ids)):
                 raise NotFound("One or more invoices not found")
             for inv in invoices:
+                restored = restore_inventory_for_invoice(
+                    inv,
+                    user=request.user,
+                    note=f"Invoice {inv.invoice_number} deleted",
+                )
                 InvoiceItem.objects.filter(invoice=inv, is_deleted=False).update(is_deleted=True, deleted_at=now)
                 Receipt.objects.filter(invoice=inv, is_deleted=False).update(is_deleted=True, deleted_at=now)
                 inv.is_deleted = True
                 inv.deleted_at = now
                 inv.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
-                _log_audit(request.user, "bulk_delete", inv, {"bulk": True, "cascade": ["invoice_items", "receipts"]})
+                _log_audit(
+                    request.user,
+                    "bulk_delete",
+                    inv,
+                    {
+                        "bulk": True,
+                        "cascade": ["invoice_items", "receipts"],
+                        "stock_restored": {str(item_id): qty for item_id, qty in restored.items()},
+                    },
+                )
         return Response({"deleted": len(ids)}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])
@@ -3086,10 +3124,212 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         )
 
 
+def _invoice_active_line_quantities(invoice: Invoice) -> dict[int, int]:
+    """Product quantities on an invoice's active lines, keyed by item id."""
+    quantities: dict[int, int] = {}
+    for line in invoice.invoice_items.select_related("item").filter(is_deleted=False):
+        if line.item.type == "service":
+            continue
+        quantity = int(line.quantity or 0)
+        if quantity:
+            quantities[line.item_id] = quantities.get(line.item_id, 0) + quantity
+    return quantities
+
+
+def _sync_invoice_lines_to_stock(
+    invoice: Invoice,
+    before: dict[int, int],
+    after: dict[int, int],
+    user,
+    note: str,
+) -> None:
+    """Move stock so it matches an invoice's current line items.
+
+    A line going up removes more units; a line going down (or being deleted)
+    returns them. Recorded in the ledger as an invoice line change.
+    """
+    for item_id in sorted(set(before) | set(after)):
+        delta = int(before.get(item_id, 0)) - int(after.get(item_id, 0))
+        if delta == 0:
+            continue
+        apply_stock_movement(
+            item_id,
+            delta,
+            reason=InventoryMovement.REASON_EDIT,
+            invoice=invoice,
+            user=user,
+            note=note,
+        )
+
+
+def _recompute_invoice_totals(invoice: Invoice) -> None:
+    """Rebuild an invoice's line amounts, totals and paid/sent status from its lines.
+
+    Line money is always derived from quantity x unit price + tax so a quantity
+    edit cannot leave stale amounts behind, and the rebuilt total is rejected if
+    it would drop below the payments already received.
+    """
+    lines = list(invoice.invoice_items.filter(is_deleted=False))
+    dirty: list[InvoiceItem] = []
+    subtotal = Decimal("0.00")
+    tax_total = Decimal("0.00")
+    for line in lines:
+        unit_price = _q2(Decimal(line.unit_price or 0))
+        tax_rate = Decimal(line.tax_rate or 0)
+        line_subtotal = _q2(unit_price * int(line.quantity or 0))
+        line_tax = _q2((line_subtotal * tax_rate) / Decimal("100"))
+        line_total = _q2(line_subtotal + line_tax)
+        if (line.line_subtotal, line.line_tax, line.line_total) != (line_subtotal, line_tax, line_total):
+            line.line_subtotal = line_subtotal
+            line.line_tax = line_tax
+            line.line_total = line_total
+            dirty.append(line)
+        subtotal += line_subtotal
+        tax_total += line_tax
+
+    if dirty:
+        InvoiceItem.objects.bulk_update(dirty, ["line_subtotal", "line_tax", "line_total"])
+
+    subtotal = _q2(subtotal)
+    tax_total = _q2(tax_total)
+    discount_type, discount_value, discount_amount = _resolve_invoice_discount(
+        subtotal, invoice.discount_type, invoice.discount_value
+    )
+    total_amount = _q2(subtotal - discount_amount + tax_total)
+    tax_rate = _q2((tax_total / subtotal) * Decimal("100")) if subtotal > 0 else Decimal("0.00")
+
+    paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
+    paid = _q2(Decimal(str(paid)))
+    if total_amount < paid:
+        raise ValidationError(
+            {"total_amount": f"Invoice total cannot be reduced below payments already received ({paid})."}
+        )
+
+    Invoice.objects.filter(pk=invoice.pk).update(
+        subtotal=subtotal,
+        discount_type=discount_type,
+        discount_value=discount_value,
+        discount_amount=discount_amount,
+        tax_rate=tax_rate,
+        tax_total=tax_total,
+        total_amount=total_amount,
+        updated_at=timezone.now(),
+    )
+    invoice.refresh_from_db()
+    if invoice.status != "Draft" and total_amount > 0:
+        sync_invoice_status_with_payments(invoice, paid)
+
+
 class InvoiceItemViewSet(SoftDeleteModelViewSet):
+    """Invoice line items.
+
+    Editing a line changes what the customer owes and, for invoices already
+    deducted from stock, how many units are held. Both are kept in step here so
+    the ledger can never disagree with the stock level.
+    """
+
     queryset = InvoiceItem.objects.all().select_related("invoice", "item").order_by("-id")
     serializer_class = InvoiceItemSerializer
     pagination_class = OptionalPageNumberPagination
+
+    def _locked_invoice(self, invoice_id: int) -> Invoice:
+        try:
+            return Invoice.objects.select_for_update().get(pk=invoice_id, is_deleted=False)
+        except Invoice.DoesNotExist:
+            raise NotFound("Invoice not found")
+
+    def _apply_line_change(self, invoice: Invoice, before: dict[int, int], user, note: str) -> None:
+        if invoice.inventory_deducted_at is not None:
+            after = _invoice_active_line_quantities(invoice)
+            _sync_invoice_lines_to_stock(invoice, before, after, user, note)
+        _recompute_invoice_totals(invoice)
+
+    def create(self, request, *args, **kwargs):
+        try:
+            self._require_model_perm("add")
+            with transaction.atomic():
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                invoice = self._locked_invoice(serializer.validated_data["invoice"].pk)
+                before = _invoice_active_line_quantities(invoice)
+                line = serializer.save()
+                self._apply_line_change(invoice, before, request.user, f"Invoice {invoice.invoice_number} line added")
+                _log_audit(request.user, "create", line, {})
+            headers = self.get_success_headers(serializer.data)
+            return self._disable_response_cache(
+                Response(self.get_serializer(line).data, status=status.HTTP_201_CREATED, headers=headers)
+            )
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="invoiceitem", operation="create", exc=exc)
+
+    def update(self, request, *args, **kwargs):
+        try:
+            self._require_model_perm("change")
+            partial = kwargs.pop("partial", False)
+            with transaction.atomic():
+                line = InvoiceItem.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
+                _check_concurrency(request, line)
+                invoice = self._locked_invoice(line.invoice_id)
+                before = _invoice_active_line_quantities(invoice)
+                serializer = self.get_serializer(line, data=request.data, partial=partial)
+                serializer.is_valid(raise_exception=True)
+                audit_before = {k: getattr(line, k, None) for k in serializer.validated_data.keys()}
+                updated = serializer.save()
+                after = {k: getattr(updated, k, None) for k in serializer.validated_data.keys()}
+                changes = {
+                    k: {"from": str(audit_before[k]) if audit_before[k] is not None else None,
+                        "to": str(after[k]) if after[k] is not None else None}
+                    for k in audit_before.keys()
+                    if audit_before[k] != after[k]
+                }
+                self._apply_line_change(invoice, before, request.user, f"Invoice {invoice.invoice_number} line changed")
+                if changes:
+                    _log_audit(request.user, "update", updated, changes)
+            return self._disable_response_cache(Response(self.get_serializer(updated).data, status=status.HTTP_200_OK))
+        except Exception as exc:
+            _raise_record_save_failure(request=request, entity="invoiceitem", operation="update", exc=exc)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._require_model_perm("delete")
+        with transaction.atomic():
+            line = InvoiceItem.objects.select_for_update().get(pk=self.get_object().pk, is_deleted=False)
+            _check_concurrency(request, line)
+            invoice = self._locked_invoice(line.invoice_id)
+            before = _invoice_active_line_quantities(invoice)
+            line.is_deleted = True
+            line.deleted_at = timezone.now()
+            line.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
+            self._apply_line_change(invoice, before, request.user, f"Invoice {invoice.invoice_number} line deleted")
+            _log_audit(request.user, "delete", line, {})
+        return self._disable_response_cache(Response(status=status.HTTP_204_NO_CONTENT))
+
+    @action(detail=False, methods=["post"])
+    def bulk_delete(self, request):
+        self._require_model_perm("delete")
+        ids = request.data.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({"ids": "ids must be a non-empty list"})
+        now = timezone.now()
+        with transaction.atomic():
+            lines = list(InvoiceItem.objects.select_for_update().filter(id__in=ids, is_deleted=False).order_by("pk"))
+            if len(lines) != len(set(ids)):
+                raise NotFound("One or more records not found")
+            invoices: dict[int, tuple[Invoice, dict[int, int]]] = {}
+            for invoice_id in sorted({line.invoice_id for line in lines}):
+                invoice = self._locked_invoice(invoice_id)
+                invoices[invoice_id] = (invoice, _invoice_active_line_quantities(invoice))
+            for line in lines:
+                line.is_deleted = True
+                line.deleted_at = now
+                line.save(update_fields=["is_deleted", "deleted_at", "updated_at"])
+                _log_audit(request.user, "bulk_delete", line, {"bulk": True})
+            for invoice, before in invoices.values():
+                self._apply_line_change(invoice, before, request.user, f"Invoice {invoice.invoice_number} lines deleted")
+        return self._disable_response_cache(Response({"deleted": len(ids)}, status=status.HTTP_200_OK))
 
 
 class ImportErrorLogDownloadApi(APIView):

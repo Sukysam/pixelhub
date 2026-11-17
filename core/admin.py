@@ -4,6 +4,7 @@ from .models import (
     Item,
     Invoice,
     InvoiceItem,
+    InventoryMovement,
     Receipt,
     Expense,
     SourceAccount,
@@ -49,6 +50,34 @@ class ReceiptAdmin(admin.ModelAdmin):
     list_display = ('invoice', 'amount_paid', 'payment_date', 'payment_method', 'reference_number')
     list_filter = ('payment_date', 'payment_method')
     search_fields = ('invoice__invoice_number', 'reference_number')
+
+
+@admin.register(InventoryMovement)
+class InventoryMovementAdmin(admin.ModelAdmin):
+    list_display = ('created_at', 'item', 'delta', 'quantity_before', 'quantity_after', 'reason', 'invoice', 'created_by')
+    list_filter = ('reason', 'created_at')
+    search_fields = ('item__name', 'item__sku', 'invoice__invoice_number', 'note')
+    readonly_fields = (
+        'item',
+        'invoice',
+        'reason',
+        'delta',
+        'quantity_before',
+        'quantity_after',
+        'note',
+        'created_by',
+        'created_at',
+    )
+    ordering = ('-created_at', '-id')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Expense)

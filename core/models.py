@@ -290,6 +290,54 @@ class Receipt(SoftDeleteModel):
         return f"Receipt for Invoice {self.invoice.invoice_number}"
 
 
+class InventoryMovement(models.Model):
+    """Append-only ledger row describing one change to an item's stock quantity.
+
+    Written in the same transaction as the ``Item.stock_quantity`` update it
+    describes, so the ledger and the stock level can never disagree.
+    """
+
+    REASON_SALE = "sale"
+    REASON_VOID = "void"
+    REASON_EDIT = "edit"
+    REASON_MANUAL = "manual"
+    REASON_CHOICES = [
+        (REASON_SALE, "Sale (invoice deduction)"),
+        (REASON_VOID, "Void / return"),
+        (REASON_EDIT, "Invoice line change"),
+        (REASON_MANUAL, "Manual adjustment"),
+    ]
+
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="inventory_movements")
+    invoice = models.ForeignKey(
+        Invoice, on_delete=models.SET_NULL, blank=True, null=True, related_name="inventory_movements"
+    )
+    reason = models.CharField(max_length=20, choices=REASON_CHOICES)
+    delta = models.IntegerField()
+    quantity_before = models.IntegerField()
+    quantity_after = models.IntegerField()
+    note = models.CharField(max_length=255, blank=True, null=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="inventory_movements",
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(fields=["item", "created_at"]),
+            models.Index(fields=["invoice", "created_at"]),
+            models.Index(fields=["reason", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.item_id}: {self.delta:+d} ({self.reason})"
+
+
 class Expense(SoftDeleteModel):
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     expense_date = models.DateField(default=timezone.localdate)

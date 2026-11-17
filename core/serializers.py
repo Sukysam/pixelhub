@@ -398,7 +398,17 @@ class InvoiceItemSerializer(serializers.ModelSerializer):
             "deleted_at",
             "updated_at",
         )
-        read_only_fields = ("id", "is_deleted", "deleted_at", "updated_at")
+        read_only_fields = (
+            "id",
+            "is_deleted",
+            "deleted_at",
+            "updated_at",
+            # Derived from quantity x unit_price + tax_rate so a quantity change
+            # cannot leave stale money on a line.
+            "line_subtotal",
+            "line_tax",
+            "line_total",
+        )
 
     def validate_quantity(self, value):
         if value < 1:

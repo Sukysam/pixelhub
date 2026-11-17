@@ -36,6 +36,7 @@ from .models import (
     Customer,
     Receipt,
     InvoiceItem,
+    InventoryMovement,
     AuditLog,
     Expense,
     SourceAccount,
@@ -4773,3 +4774,283 @@ class InventoryBackfillCommandTests(APITestCase):
         self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 8)
         self.assertIsNotNone(Invoice.objects.get(pk=first.pk).inventory_deducted_at)
         self.assertIsNone(Invoice.objects.get(pk=second.pk).inventory_deducted_at)
+
+
+class InventoryLedgerTests(APITestCase):
+    """Stock, invoice and receipt operations must always agree, and every
+    quantity change must leave an auditable ledger row behind."""
+
+    def setUp(self):
+        super().setUp()
+        self.cred = _test_secret()
+        self.user = User.objects.create_user(username="ledger-admin", password=self.cred)
+        self.client.force_authenticate(user=self.user)
+        perms = Permission.objects.filter(
+            codename__in=[
+                "change_customer",
+                "delete_customer",
+                "change_item",
+                "delete_item",
+                "change_invoice",
+                "delete_invoice",
+                "change_receipt",
+                "delete_receipt",
+                "change_invoiceitem",
+                "delete_invoiceitem",
+            ]
+        )
+        self.user.user_permissions.add(*perms)
+
+    def _customer(self, name="Ledger Co"):
+        return self.client.post(reverse("customer-list"), {"name": name}, format="json").data
+
+    def _item(self, sku, stock=10, name=None):
+        return self.client.post(
+            reverse("item-list"),
+            {
+                "name": name or f"Item {sku}",
+                "sku": sku,
+                "unit_price": "10.00",
+                "tax_rate": "0",
+                "stock_quantity": stock,
+            },
+            format="json",
+        ).data
+
+    def _invoice(self, customer_id, items, status="Draft"):
+        return self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer_id, "status": status, "items": items},
+            format="json",
+        ).data
+
+    def _stock(self, item_id):
+        return Item.objects.get(pk=item_id).stock_quantity
+
+    def _ledger(self, item_id):
+        return list(
+            InventoryMovement.objects.filter(item_id=item_id)
+            .order_by("id")
+            .values_list("reason", "delta")
+        )
+
+    def test_invoice_delete_returns_stock_and_records_ledger(self):
+        customer = self._customer()
+        item = self._item("DEL-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 3}], status="Sent")
+
+        self.assertEqual(self._stock(item["id"]), 7)
+        self.assertEqual(self._ledger(item["id"]), [("sale", -3)])
+
+        res = self.client.delete(reverse("invoice-detail", args=[invoice["id"]]))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+
+        self.assertEqual(self._stock(item["id"]), 10)
+        self.assertIsNone(Invoice.objects.get(pk=invoice["id"]).inventory_deducted_at)
+        self.assertEqual(self._ledger(item["id"]), [("sale", -3), ("void", 3)])
+
+    def test_bulk_invoice_delete_returns_stock(self):
+        customer = self._customer()
+        first = self._item("BULK-A", stock=10)
+        second = self._item("BULK-B", stock=10)
+        inv_a = self._invoice(customer["id"], [{"item": first["id"], "quantity": 2}], status="Sent")
+        inv_b = self._invoice(customer["id"], [{"item": second["id"], "quantity": 4}], status="Paid")
+
+        self.assertEqual(self._stock(first["id"]), 8)
+        self.assertEqual(self._stock(second["id"]), 6)
+
+        res = self.client.post(
+            reverse("invoice-bulk-delete"), {"ids": [inv_a["id"], inv_b["id"]]}, format="json"
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._stock(first["id"]), 10)
+        self.assertEqual(self._stock(second["id"]), 10)
+
+    def test_deleting_draft_invoice_leaves_stock_untouched(self):
+        customer = self._customer()
+        item = self._item("DRAFT-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 3}], status="Draft")
+
+        self.assertEqual(self._stock(item["id"]), 10)
+        res = self.client.delete(reverse("invoice-detail", args=[invoice["id"]]))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self._stock(item["id"]), 10)
+        self.assertFalse(InventoryMovement.objects.filter(item_id=item["id"]).exists())
+
+    def test_deleting_receipt_does_not_change_stock(self):
+        customer = self._customer()
+        item = self._item("RCPT-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 2}], status="Draft")
+
+        receipt = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "20.00", "payment_method": "Cash"},
+            format="json",
+        ).data
+        # Paying the draft in full completes the sale, so stock is deducted once.
+        self.assertEqual(self._stock(item["id"]), 8)
+
+        res = self.client.delete(reverse("receipt-detail", args=[receipt["id"]]))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        # The invoice still exists, so the units stay out of stock.
+        self.assertEqual(self._stock(item["id"]), 8)
+        self.assertEqual(self._ledger(item["id"]), [("sale", -2)])
+
+    def test_short_line_blocks_the_whole_deduction(self):
+        customer = self._customer()
+        plenty = self._item("ATOM-A", stock=10, name="Plenty")
+        scarce = self._item("ATOM-B", stock=1, name="Scarce")
+
+        res = self.client.post(
+            reverse("invoice-list"),
+            {
+                "customer": customer["id"],
+                "status": "Sent",
+                "items": [
+                    {"item": plenty["id"], "quantity": 5},
+                    {"item": scarce["id"], "quantity": 5},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._stock(plenty["id"]), 10)
+        self.assertEqual(self._stock(scarce["id"]), 1)
+        self.assertEqual(Invoice.objects.count(), 0)
+        self.assertEqual(InventoryMovement.objects.count(), 0)
+
+    def test_line_quantity_changes_keep_stock_in_step(self):
+        customer = self._customer()
+        item = self._item("LINE-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 2}], status="Sent")
+        self.assertEqual(self._stock(item["id"]), 8)
+
+        line_id = InvoiceItem.objects.get(invoice_id=invoice["id"]).id
+        detail = reverse("invoiceitem-detail", args=[line_id])
+
+        res = self.client.patch(detail, {"quantity": 5}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._stock(item["id"]), 5)
+        self.assertEqual(Decimal(Invoice.objects.get(pk=invoice["id"]).total_amount), Decimal("50.00"))
+
+        res = self.client.patch(detail, {"quantity": 1}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._stock(item["id"]), 9)
+
+        res = self.client.delete(detail)
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self._stock(item["id"]), 10)
+
+        self.assertEqual(
+            self._ledger(item["id"]),
+            [("sale", -2), ("edit", -3), ("edit", 4), ("edit", 1)],
+        )
+
+    def test_line_delete_rejected_when_it_would_underpay_receipts(self):
+        customer = self._customer()
+        item = self._item("GUARD-1", stock=10)
+        invoice = self._invoice(
+            customer["id"],
+            [{"item": item["id"], "quantity": 2}, {"item": item["id"], "quantity": 1}],
+            status="Draft",
+        )
+        self.assertEqual(self._stock(item["id"]), 10)
+
+        receipt = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "30.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(receipt.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self._stock(item["id"]), 7)
+
+        line = InvoiceItem.objects.filter(invoice_id=invoice["id"]).order_by("quantity").first()
+        res = self.client.delete(reverse("invoiceitem-detail", args=[line.id]))
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(InvoiceItem.objects.get(pk=line.id).is_deleted)
+        self.assertEqual(self._stock(item["id"]), 7)
+        self.assertFalse(InventoryMovement.objects.filter(reason=InventoryMovement.REASON_EDIT).exists())
+
+    def test_manual_adjustment_records_ledger_and_blocks_negative(self):
+        item = self._item("ADJ-1", stock=5)
+        url = reverse("item-adjust-stock", args=[item["id"]])
+
+        res = self.client.post(url, {"adjustment": 4}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._stock(item["id"]), 9)
+
+        res = self.client.post(url, {"adjustment": -100}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._stock(item["id"]), 9)
+
+        self.assertEqual(self._ledger(item["id"]), [("manual", 4)])
+
+    def test_item_endpoint_rejects_negative_stock(self):
+        res = self.client.post(
+            reverse("item-list"),
+            {"name": "Negative", "unit_price": "1.00", "stock_quantity": -3},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invoice_delete_restores_net_quantity_after_line_edit(self):
+        customer = self._customer()
+        item = self._item("NET-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 3}], status="Sent")
+        self.assertEqual(self._stock(item["id"]), 7)
+
+        line_id = InvoiceItem.objects.get(invoice_id=invoice["id"]).id
+        self.client.patch(reverse("invoiceitem-detail", args=[line_id]), {"quantity": 5}, format="json")
+        self.assertEqual(self._stock(item["id"]), 5)
+
+        res = self.client.delete(reverse("invoice-detail", args=[invoice["id"]]))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self._stock(item["id"]), 10)
+        self.assertIsNone(Invoice.objects.get(pk=invoice["id"]).inventory_deducted_at)
+
+    def test_legacy_invoice_without_ledger_restores_from_line_items(self):
+        item = Item.objects.create(name="Legacy", sku="LEG-1", unit_price=Decimal("10.00"), stock_quantity=3)
+        customer = Customer.objects.create(name="Legacy Customer")
+        invoice = Invoice.objects.create(
+            invoice_number="INV-LEG-1",
+            customer=customer,
+            status="Paid",
+            subtotal=Decimal("30.00"),
+            total_amount=Decimal("30.00"),
+            inventory_deducted_at=timezone.now(),
+        )
+        InvoiceItem.objects.create(
+            invoice=invoice,
+            item=item,
+            quantity=3,
+            unit_price=Decimal("10.00"),
+            line_subtotal=Decimal("30.00"),
+            line_total=Decimal("30.00"),
+        )
+
+        res = self.client.delete(reverse("invoice-detail", args=[invoice.pk]))
+        self.assertEqual(res.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(Item.objects.get(pk=item.pk).stock_quantity, 6)
+        self.assertEqual(
+            list(
+                InventoryMovement.objects.filter(item_id=item.pk).values_list("reason", "delta")
+            ),
+            [("void", 3)],
+        )
+
+    def test_deleting_invoice_twice_does_not_restore_stock_twice(self):
+        customer = self._customer()
+        item = self._item("ONCE-1", stock=10)
+        invoice = self._invoice(customer["id"], [{"item": item["id"], "quantity": 4}], status="Sent")
+        self.assertEqual(self._stock(item["id"]), 6)
+
+        self.assertEqual(
+            self.client.delete(reverse("invoice-detail", args=[invoice["id"]])).status_code,
+            status.HTTP_204_NO_CONTENT,
+        )
+        self.assertEqual(self._stock(item["id"]), 10)
+
+        second = self.client.delete(reverse("invoice-detail", args=[invoice["id"]]))
+        self.assertEqual(second.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self._stock(item["id"]), 10)
+        self.assertEqual(self._ledger(item["id"]), [("sale", -4), ("void", 4)])
