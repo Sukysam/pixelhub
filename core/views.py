@@ -2251,6 +2251,44 @@ class ItemViewSet(SoftDeleteModelViewSet):
         return Response(payload, status=status_code)
 
 
+def deduct_inventory_for_invoice(invoice: Invoice) -> None:
+    """Subtract sold quantities from stock once an invoice reaches a completed state.
+
+    Called from every path that can move an invoice into "Sent"/"Paid" (invoice
+    create/update/bulk status, receipt recording, the invoice pay action and
+    payment-provider settlement). Idempotent: ``Invoice.inventory_deducted_at``
+    guards against double deduction on payment retries or status re-syncs, and it
+    is only stamped when the deduction succeeds.
+    """
+    if invoice.inventory_deducted_at is not None:
+        return
+
+    invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
+    required_by_item: dict[int, int] = {}
+    for line in invoice_items:
+        if line.item.type == "service":
+            continue
+        required_by_item[line.item_id] = required_by_item.get(line.item_id, 0) + int(line.quantity or 0)
+
+    if required_by_item:
+        items = {
+            item.id: item
+            for item in Item.objects.select_for_update().filter(id__in=list(required_by_item.keys()), is_deleted=False)
+        }
+        for item_id, required_qty in required_by_item.items():
+            db_item = items.get(item_id)
+            if db_item is None or db_item.stock_quantity < required_qty:
+                raise ValidationError(f"Insufficient stock for item {item_id}")
+        for item_id, required_qty in required_by_item.items():
+            Item.objects.filter(pk=item_id).update(stock_quantity=F("stock_quantity") - required_qty)
+
+    Invoice.objects.filter(pk=invoice.pk, inventory_deducted_at__isnull=True).update(
+        inventory_deducted_at=timezone.now()
+    )
+    invoice.refresh_from_db()
+    logger.info("inventory.deduct invoice_id=%s deducted_at=%s", invoice.id, invoice.inventory_deducted_at)
+
+
 class InvoiceViewSet(SoftDeleteModelViewSet):
     queryset = Invoice.objects.all().select_related("customer").prefetch_related("invoice_items", "invoice_items__item").order_by("-id")
     serializer_class = InvoiceSerializer
@@ -2570,31 +2608,7 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
         return self.update(request, *args, **kwargs)
 
     def _deduct_inventory_for_invoice(self, invoice: Invoice) -> None:
-        if invoice.inventory_deducted_at is not None:
-            return
-
-        invoice_items = list(invoice.invoice_items.select_related("item").filter(is_deleted=False))
-        item_ids = [li.item_id for li in invoice_items]
-        items = {i.id: i for i in Item.objects.select_for_update().filter(id__in=item_ids, is_deleted=False)}
-
-        for li in invoice_items:
-            db_item = items[li.item_id]
-            if db_item.type == "service":
-                continue
-            if db_item.stock_quantity < li.quantity:
-                raise ValidationError(f"Insufficient stock for item {db_item.id}")
-
-        for li in invoice_items:
-            db_item = items[li.item_id]
-            if db_item.type == "service":
-                continue
-            Item.objects.filter(pk=li.item_id).update(stock_quantity=F("stock_quantity") - li.quantity)
-
-        Invoice.objects.filter(pk=invoice.pk, inventory_deducted_at__isnull=True).update(
-            inventory_deducted_at=timezone.now()
-        )
-        invoice.refresh_from_db()
-        logger.info("inventory.deduct invoice_id=%s deducted_at=%s", invoice.id, invoice.inventory_deducted_at)
+        deduct_inventory_for_invoice(invoice)
 
     def destroy(self, request, *args, **kwargs):
         self._require_model_perm("delete")
@@ -2743,7 +2757,10 @@ class InvoiceViewSet(SoftDeleteModelViewSet):
                 )
 
                 total_paid_after = (total_paid + amount_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
-                if sync_invoice_status_with_payments(invoice, total_paid_after) == "Paid":
+                new_status = sync_invoice_status_with_payments(invoice, total_paid_after)
+                if invoice.status in ("Sent", "Paid"):
+                    deduct_inventory_for_invoice(invoice)
+                if new_status == "Paid":
                     logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid_after)
 
             cache.set(cache_key, receipt.id, timeout=15 * 60)
@@ -3284,7 +3301,10 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
                 receipt = serializer.save()
 
                 total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
-                if sync_invoice_status_with_payments(invoice, total_paid) == "Paid":
+                new_status = sync_invoice_status_with_payments(invoice, total_paid)
+                if invoice.status in ("Sent", "Paid"):
+                    deduct_inventory_for_invoice(invoice)
+                if new_status == "Paid":
                     logger.info("invoice.paid invoice_id=%s total_paid=%s", invoice.id, total_paid)
 
             if cache_key:
@@ -3352,6 +3372,8 @@ class ReceiptViewSet(SoftDeleteModelViewSet):
                 if invoice is not None:
                     total_paid = invoice.receipts.filter(is_deleted=False).aggregate(total=Sum("amount_paid"))["total"] or Decimal("0.00")
                     sync_invoice_status_with_payments(invoice, total_paid)
+                    if invoice.status in ("Sent", "Paid"):
+                        deduct_inventory_for_invoice(invoice)
 
             return Response(self.get_serializer(updated).data, status=status.HTTP_200_OK)
         except Exception as exc:
@@ -5767,6 +5789,8 @@ def _settle_payment_transaction(*, tx: PaymentTransaction, provider_paid_at: str
         )
         total_paid_after = (total_paid + amount_paid).quantize(CENTS, rounding=ROUND_HALF_UP)
         sync_invoice_status_with_payments(invoice, total_paid_after)
+        if invoice.status in ("Sent", "Paid"):
+            deduct_inventory_for_invoice(invoice)
         _log_audit(tx.created_by, "update", tx, {"status": {"to": "succeeded"}, "receipt_amount": str(amount_paid)})
 
 

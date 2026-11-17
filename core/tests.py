@@ -635,6 +635,141 @@ class PersistenceTests(APITestCase):
         self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 1)
 
+    def test_receipt_fully_paying_draft_invoice_deducts_inventory(self):
+        customer = self.client.post(
+            reverse("customer-list"),
+            {"name": "Receipt Buyer", "email": "receipt-buyer@example.com"},
+            format="json",
+        ).data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Receipt Widget", "sku": "RC-D1", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 2}]},
+            format="json",
+        ).data
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 5)
+
+        receipt_res = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "20.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(receipt_res.status_code, status.HTTP_201_CREATED)
+
+        invoice_row = Invoice.objects.get(pk=invoice["id"])
+        self.assertEqual(invoice_row.status, "Paid")
+        self.assertIsNotNone(invoice_row.inventory_deducted_at)
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 3)
+
+    def test_invoice_pay_action_on_draft_invoice_deducts_inventory(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Pay Deduct"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Pay Deduct Widget", "sku": "PD-1", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 5},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 1}]},
+            format="json",
+        ).data
+
+        res = self.client.post(
+            reverse("invoice-pay", args=[invoice["id"]]),
+            {"amount_paid": "10.00", "payment_method": "Cash"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="k-pay-deduct-1",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+
+        invoice_row = Invoice.objects.get(pk=invoice["id"])
+        self.assertEqual(invoice_row.status, "Paid")
+        self.assertIsNotNone(invoice_row.inventory_deducted_at)
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 4)
+
+    def test_bulk_sale_deducts_all_line_items(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Bulk Buyer"}, format="json").data
+        item_a = self.client.post(
+            reverse("item-list"),
+            {"name": "Bulk A", "sku": "BA-1", "unit_price": "5.00", "tax_rate": "0", "stock_quantity": 10},
+            format="json",
+        ).data
+        item_b = self.client.post(
+            reverse("item-list"),
+            {"name": "Bulk B", "sku": "BB-1", "unit_price": "7.00", "tax_rate": "0", "stock_quantity": 8},
+            format="json",
+        ).data
+        inv_res = self.client.post(
+            reverse("invoice-list"),
+            {
+                "customer": customer["id"],
+                "status": "Paid",
+                "items": [
+                    {"item": item_a["id"], "quantity": 4},
+                    {"item": item_a["id"], "quantity": 1},
+                    {"item": item_b["id"], "quantity": 3},
+                ],
+            },
+            format="json",
+        )
+        self.assertEqual(inv_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Item.objects.get(pk=item_a["id"]).stock_quantity, 5)
+        self.assertEqual(Item.objects.get(pk=item_b["id"]).stock_quantity, 5)
+
+    def test_insufficient_stock_blocks_receipt_payment_and_keeps_inventory(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Low Stock Buyer"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Low Stock", "sku": "LS-1", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 1},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Draft", "items": [{"item": item["id"], "quantity": 2}]},
+            format="json",
+        ).data
+
+        res = self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "20.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Receipt.objects.filter(invoice_id=invoice["id"], is_deleted=False).count(), 0)
+        self.assertEqual(Invoice.objects.get(pk=invoice["id"]).status, "Draft")
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 1)
+
+    def test_inventory_deducted_only_once_when_invoice_reaches_paid(self):
+        customer = self.client.post(reverse("customer-list"), {"name": "Idem Buyer"}, format="json").data
+        item = self.client.post(
+            reverse("item-list"),
+            {"name": "Idem Widget", "sku": "ID-1", "unit_price": "10.00", "tax_rate": "0", "stock_quantity": 10},
+            format="json",
+        ).data
+        invoice = self.client.post(
+            reverse("invoice-list"),
+            {"customer": customer["id"], "status": "Sent", "items": [{"item": item["id"], "quantity": 2}]},
+            format="json",
+        ).data
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 8)
+
+        self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "10.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.client.post(
+            reverse("receipt-list"),
+            {"invoice": invoice["id"], "amount_paid": "10.00", "payment_method": "Cash"},
+            format="json",
+        )
+        self.assertEqual(Invoice.objects.get(pk=invoice["id"]).status, "Paid")
+        self.assertEqual(Item.objects.get(pk=item["id"]).stock_quantity, 8)
+
     def test_dashboard_metrics(self):
         customer = self.client.post(
             reverse("customer-list"),
