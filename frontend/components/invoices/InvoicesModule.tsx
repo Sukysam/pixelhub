@@ -21,6 +21,7 @@ interface Customer {
   name: string;
   email?: string | null;
   phone?: string | null;
+  billing_address?: string | null;
 }
 
 interface Item {
@@ -374,6 +375,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
   const [confirmInvoiceDeleteOpen, setConfirmInvoiceDeleteOpen] = useState(false);
   const [defaultInvoiceNote, setDefaultInvoiceNote] = useState("");
   const [selectedCustomer, setSelectedCustomer] = useState<number | "">("");
+  const [customerSearch, setCustomerSearch] = useState("");
   const [issueDate, setIssueDate] = useState<string>(getTodayDateString());
   const [dueDate, setDueDate] = useState<string>("");
   const [invoiceNote, setInvoiceNote] = useState("");
@@ -899,6 +901,14 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
     return map;
   }, [inventoryItems]);
 
+  const filteredCustomers = useMemo(
+    () =>
+      customers.filter((customer) =>
+        matchesSearch(customerSearch, customer.name, customer.email, customer.phone, customer.billing_address)
+      ),
+    [customers, customerSearch]
+  );
+
   const filteredInventory = useMemo(
     () =>
       inventoryItems.filter((i) =>
@@ -1084,6 +1094,7 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
       // without touching any line items already entered.
       setCustomers((prev) => [created, ...prev]);
       setSelectedCustomer(created.id);
+      setCustomerSearch("");
       setIsAddCustomerOpen(false);
       setNewCustomer({ name: "", email: "", phone: "", billing_address: "" });
       setSuccess(`${created.name} created and selected for this invoice.`);
@@ -1769,20 +1780,35 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
         <div className="bg-white border rounded-lg p-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <Label htmlFor="customer_select">Customer</Label>
-              <div className="flex gap-2">
+              <Label htmlFor="customer_search">Customer</Label>
+              <div className="space-y-2">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                  <Input
+                    id="customer_search"
+                    type="search"
+                    value={customerSearch}
+                    onChange={(e) => setCustomerSearch(e.target.value)}
+                    placeholder="Search customers by name, email, phone, or address..."
+                    aria-label="Search customers for invoice"
+                    className="pl-9"
+                    disabled={loading || savingInvoice}
+                  />
+                </div>
+                <div className="flex gap-2">
                 <Select
                   id="customer_select"
                   value={selectedCustomer}
                   onChange={(e) => {
                     const v = e.target.value;
                     setSelectedCustomer(v === "" ? "" : Number(v));
+                    setCustomerSearch("");
                   }}
                   disabled={loading}
                   className="flex-1"
                 >
                   <option value="">Select a customer</option>
-                  {customers.map((c) => (
+                  {filteredCustomers.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
                     </option>
@@ -1792,7 +1818,11 @@ export function InvoicesModule({ mode = "create" }: InvoicesModuleProps) {
                   <Plus className="mr-2 h-4 w-4" />
                   Add Customer
                 </Button>
+                </div>
               </div>
+              {customerSearch.trim() && filteredCustomers.length === 0 ? (
+                <div className="text-sm text-gray-600">No matching customers found.</div>
+              ) : null}
             </div>
             <div className="space-y-4">
               <div>

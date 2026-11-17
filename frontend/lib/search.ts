@@ -1,14 +1,27 @@
+const COMBINING_MARKS_RE = /[\u0300-\u036f]/g;
+const SEARCH_PUNCTUATION_RE = /[^\p{L}\p{N}\s]+/gu;
+const SEARCH_WHITESPACE_RE = /\s+/g;
+
+function normalizeSearchValue(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(COMBINING_MARKS_RE, "")
+    .toLocaleLowerCase()
+    .replace(SEARCH_PUNCTUATION_RE, "")
+    .replace(SEARCH_WHITESPACE_RE, " ")
+    .trim();
+}
+
 /**
  * Case-insensitive, order-independent text matching shared by the list views.
  *
- * A record matches when every whitespace-separated token in `query` is found in
- * the concatenated `fields`, which lets users search by any character, word, or
- * combination of words (for example "acme lagos" matches a customer whose name
- * and address contain those tokens in any order).
+ * Matching is punctuation-tolerant and Unicode-aware, so names such as
+ * "Anne-Marie O'Connor", "Joao", and non-Latin text remain searchable by
+ * partial strings and mixed-case queries.
  */
 export function matchesSearch(query: string, ...fields: Array<string | number | null | undefined>): boolean {
-  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const tokens = normalizeSearchValue(query).split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return true;
-  const haystack = fields.map((field) => (field == null ? "" : String(field))).join(" ").toLowerCase();
+  const haystack = normalizeSearchValue(fields.map((field) => (field == null ? "" : String(field))).join(" "));
   return tokens.every((token) => haystack.includes(token));
 }

@@ -1528,12 +1528,14 @@ class CustomerViewSet(SoftDeleteModelViewSet):
 
         q = str(p.get("q") or "").strip()
         if q:
-            qs = qs.filter(
-                Q(name__icontains=q)
-                | Q(email__icontains=q)
-                | Q(phone__icontains=q)
-                | Q(billing_address__icontains=q)
-            )
+            search_tokens = [token for token in re.split(r"[^\w]+", q, flags=re.UNICODE) if token]
+            for token in (search_tokens or [q]):
+                qs = qs.filter(
+                    Q(name__icontains=token)
+                    | Q(email__icontains=token)
+                    | Q(phone__icontains=token)
+                    | Q(billing_address__icontains=token)
+                )
 
         email = str(p.get("email") or "").strip()
         if email:

@@ -397,6 +397,35 @@ class PersistenceTests(APITestCase):
         self.assertEqual(detail_res.data["email"], "alpha@example.com")
         self.assertEqual(detail_res.data["order_history"][0]["invoice_number"], invoice["invoice_number"])
 
+    def test_customer_search_supports_partial_tokens_special_characters_and_non_latin_names(self):
+        anne = self.client.post(
+            reverse("customer-list"),
+            {"name": "Anne-Marie O'Connor", "email": "anne.oconnor@example.com", "billing_address": "12 Marina Road"},
+            format="json",
+        ).data
+        mixed = self.client.post(
+            reverse("customer-list"),
+            {"name": "MIXED Case Holdings", "email": "mixed.case@example.com"},
+            format="json",
+        ).data
+        non_latin = self.client.post(
+            reverse("customer-list"),
+            {"name": "客户名字阿明", "email": "aming@example.com"},
+            format="json",
+        ).data
+
+        punctuation_res = self.client.get(f"{reverse('customer-list')}?q=oconnor anne")
+        self.assertEqual(punctuation_res.status_code, status.HTTP_200_OK)
+        self.assertIn(anne["id"], [row["id"] for row in punctuation_res.data["results"]])
+
+        mixed_case_res = self.client.get(f"{reverse('customer-list')}?q=holdings mixed")
+        self.assertEqual(mixed_case_res.status_code, status.HTTP_200_OK)
+        self.assertIn(mixed["id"], [row["id"] for row in mixed_case_res.data["results"]])
+
+        non_latin_res = self.client.get(f"{reverse('customer-list')}?q=阿明")
+        self.assertEqual(non_latin_res.status_code, status.HTTP_200_OK)
+        self.assertIn(non_latin["id"], [row["id"] for row in non_latin_res.data["results"]])
+
     def test_item_detail_and_list_support_filters_sorting_and_usage_history(self):
         customer = self.client.post(reverse("customer-list"), {"name": "Inventory Buyer"}, format="json").data
         item = self.client.post(
